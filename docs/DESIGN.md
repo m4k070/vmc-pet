@@ -60,17 +60,34 @@ Lenia は kernel radius R が 10 を下回ると離散化誤差で生物が維�
 表示解像度(32x32)をそのまま場の解像度にすると R≈5 が上限となり、既存のLenia資産
 (`~/work/Lenia/Python/animals.json`)が使えなくなる。
 
-したがって **内部場 96x96 (R=12) → 3x3平均プーリング → 表示 32x32** とする。
+したがって **内部場 64x64 → 2x2平均プーリング → 表示 32x32** とする。
 プーリングは学習も表現も持たない純粋なダウンサンプルであり、
-「Vに相当するエンコーダを実装しない」というコンセプトは維持される。
+「V に相当するエンコーダを実装しない」というコンセプトは維持される。
+
+場のサイズは実測で決めた。生物は animals.json が記述する R でしか安定しないため
+(Orbium は R=13)、場を R に合わせる方が正しい。Orbium の初期パターンは 20x20 で、
+64x64 は Lenia 本家が既定で使う世界サイズでもある。
 
 | パラメータ | 値 |
 |---|---|
-| 場の解像度 | 96x96 |
-| kernel radius R | 12 |
-| dt | 0.1 |
-| 境界条件 | 周辺減衰 (端から8セルで減衰させ、生物が画面外へ逃げないようにする) |
+| 場の解像度 | 64x64 |
+| kernel radius R | 生物ごとに animals.json の値に従う (Orbium は 13) |
+| dt | 1/T (Orbium は T=10 なので 0.1) |
+| 境界条件 | 周期境界(トーラス) |
 | 表示解像度 | 32x32 ドット |
+
+#### 境界条件を周辺減衰からトーラスへ変更した理由
+
+当初は「生物が画面外へ逃げないように」端から8セルを減衰させる設計だった。
+しかし実測すると、**周辺減衰は生物を閉じ込めるのではなく殺す**ことが分かった。
+
+| 境界条件 | 600ステップ後の総量 | 結果 |
+|---|---|---|
+| トーラス | 73.7 (初期 76.9) | 重心が動き続ける。安定 |
+| 周辺減衰 (margin=8) | 0.0 | 150ステップで完全に消滅 |
+
+Lenia の生物は自己維持するパターンであり、一部を削られると構造が崩れて崩壊する。
+したがって境界はトーラスとし、端を越えた生物は反対側から現れる。
 
 ### 時間刻み
 
@@ -79,10 +96,15 @@ Lenia は kernel radius R が 10 を下回ると離散化誤差で生物が維�
 
 | パラメータ | 値 |
 |---|---|
-| step_rate | 15 step/s (ポインタ非接触時は落としてCPUを節約) |
+| step_rate | 15 step/s |
 | render_fps | 30 fps |
 
+描画レートの判定には frame_interval の 1/8 の許容幅を持たせる。描画機会は vblank
+単位でしか訪れないため、許容幅なしで 60Hz に 30fps を要求すると閾値(33.33ms)と
+vblank 2回分(33.34ms)がほぼ一致し、ジッタで1フレーム落ちて実測 24fps まで下がる。
+
 常駐アプリのため、アイドル時 CPU 2%未満・RSS 50MB未満を目標値とする。
+実測 (release, 2560x1440@60Hz, Orbium 稼働中): CPU 1.3% / RSS 4.3MB / 30.00fps。
 
 ### 実装スタック
 
@@ -90,10 +112,14 @@ Lenia は kernel radius R が 10 を下回ると離散化誤差で生物が維�
 |---|---|
 | 言語 | Rust (単一バイナリ・低フットプリント) |
 | ウィンドウ | `smithay-client-toolkit` (wlr-layer-shell) |
-| 描画 | `wl_shm` バッファ + `tiny-skia` (ソフトウェア描画) |
-| 場 | 自前実装 (96x96・R=12 の直接畳み込み) |
-| 生物データ | `~/work/Lenia/Python/animals.json` を `serde_json` で読む |
+| 描画 | `wl_shm` バッファへのソフトウェア描画 (自前) |
+| 場 | 自前実装 (カーネルをタップ列に展開した直接畳み込み) |
+| 生物データ | `assets/animals.json` (Lenia 本家から4体を vendor。出典は `assets/NOTICE.md`) |
 | 開発環境 | `flake.nix` devShell |
+
+畳み込みは、値を持つセルからタップ先へ加算する散布型で実装する。生物は場のごく一部
+しか占めないため、全セルを走査する収集型より計算量が桁で落ちる。カーネルはリング状で
+中心と外周がほぼ 0 になるため、重みが 1e-5 以下のタップは精度を落とさず除外できる。
 
 ## モジュール構成
 
@@ -102,10 +128,11 @@ Lenia は kernel radius R が 10 を下回ると離散化誤差で生物が維�
 ```
 src/
   body/          # 体 = 場。外部依存ゼロの純粋ロジック
-    field.rs         # Field と純粋な step
-    lenia.rs         # カーネル・成長関数・パラメータ
-    perturbation.rs  # Perturbation { x, y, radius, amount }
-  interface/     # IF層: 外界 → 摂動 だけを通す窓口
+    field.rs         # Field / FieldView
+    lenia.rs         # カーネル・成長関数・更新規則
+    animal.rs        # animals.json の読み込みと RLE デコード
+    perturbation.rs  # (step 4) Perturbation { x, y, radius, amount }
+  interface/     # (step 4) IF層: 外界 → 摂動 だけを通す窓口
     port.rs          # trait BodyPort
     pointer.rs       # ポインタイベント → Perturbation への変換
   render/
@@ -119,16 +146,19 @@ src/
 /// 体の場。値域は 0.0..=1.0 に正規化して保持する
 pub struct Field { width: usize, height: usize, cells: Vec<f32> }
 
-/// IF層が体に注入できる唯一の操作
+/// 場の読み取り専用ビュー。内部 Vec は露出させない
+pub struct FieldView<'a> { width: usize, height: usize, cells: &'a [f32] }
+
+/// IF層が体に注入できる唯一の操作 (step 4)
 pub struct Perturbation { pub x: usize, pub y: usize, pub radius: f32, pub amount: f32 }
 
-/// 体の境界。将来C(コントローラ)を後付けする際も、人間と同じこの窓口を通す
+/// 体の境界。将来C(コントローラ)を後付けする際も、人間と同じこの窓口を通す (step 4)
 pub trait BodyPort {
     fn inject(&mut self, perturbation: Perturbation);
-    fn observe(&self) -> FieldView<'_>;   // 読み取り専用ビュー。内部 Vec は露出させない
+    fn observe(&self) -> FieldView<'_>;
 }
 
-/// 入力の意味を型で列挙する(booleanフラグにしない)
+/// 入力の意味を型で列挙する(booleanフラグにしない) (step 4)
 pub enum Touch {
     Hover { at: CellPos },   // 弱い持続注入
     Click { at: CellPos },   // 強い単発注入
@@ -142,20 +172,26 @@ pub enum Touch {
 
 ## 実装ロードマップ
 
-| # | マイルストーン | 完了条件 |
-|---|---|---|
-| 0 | flake.nix で devShell | `nix develop` で環境が再現する |
-| 1 | layer-shell 常駐ウィンドウ | 透明な矩形が最前面に出て、周囲のクリックが下に抜ける |
-| 2 | ドットグリッド描画 | ダミー波形が32x32のドットで30fps描画される |
-| 3 | Lenia場を接続 | `animals.json` の生物が場の上で安定移動する |
-| 4 | 入力IF | クリックで局所注入され場が反応する。ホバーは弱い持続注入 |
-| 5 | (任意) 気分状態 | エネルギー量が growth 係数に効き、放置で弱る |
+| # | マイルストーン | 完了条件 | 状態 |
+|---|---|---|---|
+| 0 | flake.nix で devShell | `nix develop` で環境が再現する | 完了 |
+| 1 | layer-shell 常駐ウィンドウ | 透明な矩形が最前面に出て、周囲のクリックが下に抜ける | 完了 |
+| 2 | ドットグリッド描画 | ダミー波形が32x32のドットで30fps描画される | 完了 |
+| 3 | Lenia場を接続 | `animals.json` の生物が場の上で安定移動する | 完了 |
+| 4 | 入力IF | クリックで局所注入され場が反応する。ホバーは弱い持続注入 | |
+| 5 | (任意) 気分状態 | エネルギー量が growth 係数に効き、放置で弱る | |
+
+step 3 の完了は `orbium_survives_and_glides_on_a_torus` テストで担保する。
+600ステップ(15 step/s で約40秒ぶん)後も総量が初期比 ±10% 以内に収まり、
+かつ重心が 5 セル以上移動していることを確認する。
 
 ### 未確定(実装しながら決める)
 
-- 初期生物の選定 — orbium が 96x96 で安定するかは step 3 で実測する
+- 生物の見かけの小ささ — Orbium は 20x20 なので 32x32 の表示では 10x10 ドットに
+  収まり、盤面の大半が空く。場を縮めるか、表示に階調カーブを掛けるかは要検討
+- 生物がトーラスの端をまたぐ間、体が画面の両端に分かれて見える点の扱い
 - 摂動量の強さ — 体感チューニングのため設定ファイルに出す
-- 気分状態(step 5)の変数設計 — step 3-4 で場の挙動を見てから決める
+- 気分状態(step 5)の変数設計 — step 4 で場の挙動を見てから決める
 
 ## 将来の拡張(体を付け替える実験の足場として)
 
