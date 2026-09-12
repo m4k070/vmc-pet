@@ -1,9 +1,10 @@
-//! Lenia の場を体として持つペット本体。
-//! 場の更新レートと描画レートを分離し、描画時に経過分だけステップを進める。
+//! ペット本体。体・IF層・描画・時間をここで束ねる。
+//! 唯一の可変状態の持ち主であり、体には `BodyPort` 越しにしか働きかけない。
 
 use std::time::{Duration, Instant};
 
-use crate::body::{load_animal, Field, Lenia};
+use crate::body::{load_animal, BodyPort, LeniaBody};
+use crate::interface::{perturbation_for, Touch};
 use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
@@ -22,22 +23,30 @@ const INITIAL_ANIMAL_CODE: &str = "O2u";
 /// 場を進める頻度。描画レートとは独立に決める。
 const STEPS_PER_SECOND: u32 = 15;
 
+/// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
+/// Lenia はカオス系で、摂動の強さを絞っても履歴次第では崩壊しうるため、
+/// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
+const COLLAPSE_MASS: f32 = 5.0;
+
 /// 1回の描画でまとめて進めるステップ数の上限。
 /// 復帰直後など大きく遅れた場合に、追いつこうとして固まるのを防ぐ。
 const MAX_CATCH_UP_STEPS: u32 = 4;
 
 /// Lenia の場を体として持つペット。
 pub struct Pet {
-    field: Field,
-    lenia: Lenia,
+    body: LeniaBody,
     grid: DotGrid,
     camera: Camera,
     step_interval: Duration,
     last_step: Instant,
+    /// 直近のサーフェスの大きさ。ポインタ座標を場のセルへ写すのに要る。
+    surface_size: (u32, u32),
+    /// ポインタが体の上にある間の位置。撫でている扱いで毎ステップ弱く注入する。
+    hovering_at: Option<crate::body::CellPos>,
 }
 
 impl Pet {
-    /// 生物を読み込んで場の中央に配置する。
+    /// 生物を読み込んで体を作る。
     /// 生物データは実行ファイルに埋め込んであるため、読み込みに失敗するのは
     /// データが壊れている場合だけで、その場合は起動を止める。
     pub fn new() -> Result<Self, PetError> {
@@ -47,25 +56,31 @@ impl Pet {
             animal.name, animal.code, animal.params.radius, animal.params.time_divisor
         );
 
-        let mut field = Field::new(FIELD_WIDTH, FIELD_HEIGHT);
-        field.place_centered(&animal.pattern);
-
         Ok(Self {
-            field,
-            lenia: Lenia::new(animal.params),
+            body: LeniaBody::new(animal, FIELD_WIDTH, FIELD_HEIGHT),
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
             camera: Camera::new(),
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
+            surface_size: (0, 0),
+            hovering_at: None,
         })
     }
 
-    /// 前回のステップからの経過分だけ場を進める。
+    /// 前回のステップからの経過分だけ体を進める。
+    /// 撫でられている間は、進める直前に毎回弱く注入する。
     fn advance(&mut self, now: Instant) {
         let mut steps = 0;
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
-            self.lenia.step(&mut self.field);
+            if let Some(at) = self.hovering_at {
+                self.touch(Touch::Hover { at });
+            }
+            self.body.step();
+            if self.body.mass() < COLLAPSE_MASS {
+                eprintln!("vmc-pet: the body collapsed; reviving");
+                self.body.revive();
+            }
             self.last_step += self.step_interval;
             steps += 1;
         }
@@ -73,6 +88,25 @@ impl Pet {
             // 追いつけなかった分は捨てる
             self.last_step = now;
         }
+    }
+
+    /// 触れ方を摂動に翻訳して体へ渡す。体に働きかける経路はここだけ。
+    fn touch(&mut self, touch: Touch) {
+        let Some(perturbation) = perturbation_for(touch) else {
+            return;
+        };
+        self.body.inject(perturbation);
+    }
+
+    /// ポインタ座標に対応する場のセル。グリッドの外なら `None`。
+    fn cell_under(&self, x: f64, y: f64) -> Option<crate::body::CellPos> {
+        self.grid.cell_at(
+            (x, y),
+            self.camera.origin(),
+            (FIELD_WIDTH, FIELD_HEIGHT),
+            self.surface_size.0,
+            self.surface_size.1,
+        )
     }
 }
 
@@ -94,12 +128,14 @@ impl std::error::Error for PetError {}
 
 impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
+        self.surface_size = (width, height);
         self.advance(Instant::now());
         // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
-        self.camera.follow(self.field.view(), GRID_COLUMNS, GRID_ROWS);
+        self.camera
+            .follow(self.body.observe(), GRID_COLUMNS, GRID_ROWS);
         canvas.fill(0);
         self.grid
-            .draw(self.field.view(), self.camera.origin(), canvas, width, height);
+            .draw(self.body.observe(), self.camera.origin(), canvas, width, height);
     }
 
     fn input_region(&self, width: u32, height: u32) -> InputRegion {
@@ -113,12 +149,20 @@ impl Surface for Pet {
     }
 
     fn on_pointer(&mut self, input: PointerInput) {
-        // step 4 でここから場への摂動注入につなぐ
         match input {
-            PointerInput::Pressed { x, y } => {
-                eprintln!("vmc-pet: pointer pressed at ({x:.1}, {y:.1})");
+            PointerInput::Entered { x, y } | PointerInput::Moved { x, y } => {
+                self.hovering_at = self.cell_under(x, y);
             }
-            PointerInput::Entered { .. } | PointerInput::Moved { .. } | PointerInput::Left => {}
+            PointerInput::Pressed { x, y } => {
+                self.hovering_at = self.cell_under(x, y);
+                if let Some(at) = self.hovering_at {
+                    self.touch(Touch::Click { at });
+                }
+            }
+            PointerInput::Left => {
+                self.hovering_at = None;
+                self.touch(Touch::Leave);
+            }
         }
     }
 }
@@ -126,6 +170,25 @@ impl Surface for Pet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 描画を1回通して、サーフェスの大きさを Pet に教える。
+    fn drawn_pet() -> Pet {
+        let mut pet = Pet::new().unwrap();
+        let mut canvas = vec![0u8; 384 * 384 * 4];
+        pet.draw(&mut canvas, 384, 384);
+        pet
+    }
+
+    fn mass(pet: &Pet) -> f32 {
+        let view = pet.body.observe();
+        let mut total = 0.0;
+        for y in 0..view.height() {
+            for x in 0..view.width() {
+                total += view.get(x, y);
+            }
+        }
+        total
+    }
 
     #[test]
     fn input_region_matches_the_drawn_grid() {
@@ -169,5 +232,123 @@ mod tests {
 
         // Assert: 追いつきを諦めて現在時刻に合わせる
         assert_eq!(pet.last_step, now);
+    }
+
+    #[test]
+    fn a_click_inside_the_grid_feeds_the_body() {
+        // Arrange
+        let mut pet = drawn_pet();
+        let before = mass(&pet);
+
+        // Act: サーフェスの中央を押す
+        pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
+
+        // Assert
+        assert!(mass(&pet) > before, "a click must inject energy");
+    }
+
+    #[test]
+    fn a_pointer_outside_the_grid_touches_nothing() {
+        // Arrange
+        let mut pet = drawn_pet();
+        let before = mass(&pet);
+
+        // Act: グリッドの外を押す
+        pet.on_pointer(PointerInput::Pressed { x: 1000.0, y: 1000.0 });
+
+        // Assert
+        assert_eq!(mass(&pet), before);
+        assert!(pet.hovering_at.is_none());
+    }
+
+    #[test]
+    fn leaving_stops_the_continuous_hover_injection() {
+        // Arrange
+        let mut pet = drawn_pet();
+        pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
+        assert!(pet.hovering_at.is_some());
+
+        // Act
+        pet.on_pointer(PointerInput::Left);
+
+        // Assert
+        assert!(pet.hovering_at.is_none());
+    }
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    use crate::body::{BodyPort, CellPos, Perturbation};
+
+    /// 体の時間を `steps` ぶん進める。1間隔ずつ刻んで追いつき上限に掛からないようにする。
+    fn run(pet: &mut Pet, steps: usize) {
+        for _ in 0..steps {
+            let next = pet.last_step + pet.step_interval;
+            pet.advance(next);
+        }
+    }
+
+    /// ポインタを動かしながら撫で、ときどき突く、という実際の操作を模す。
+    fn harass(pet: &mut Pet, seed: u64, rounds: usize) {
+        let mut state = seed;
+        let mut at = CellPos { x: 16, y: 16 };
+        for round in 0..rounds {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            at = CellPos {
+                x: (at.x + ((state >> 33) % 5) as usize) % FIELD_WIDTH,
+                y: (at.y + ((state >> 13) % 5) as usize) % FIELD_HEIGHT,
+            };
+            if round % 3 == 0 {
+                pet.touch(Touch::Click { at });
+            }
+            pet.hovering_at = Some(at);
+            run(pet, 10);
+        }
+        pet.hovering_at = None;
+    }
+
+    #[test]
+    fn the_body_always_comes_back_after_being_harassed() {
+        // Arrange / Act / Assert: 乱暴に触られても、必ず生きた状態へ戻る。
+        // Lenia はカオス系で安全境界が単調にならないため、摂動の強さを絞るだけでは
+        // これを保証できない。崩壊を検知して置き直す仕組みが要る。
+        for seed in [12345u64, 99, 777, 20260912] {
+            let mut pet = Pet::new().unwrap();
+            harass(&mut pet, seed, 40);
+            run(&mut pet, 600);
+
+            let mass = pet.body.mass();
+            assert!(
+                mass > 40.0,
+                "the pet must recover after harassment (seed {seed}), got {mass}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deliberately_scorched_field_is_revived() {
+        // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う
+        let mut pet = Pet::new().unwrap();
+        for _ in 0..12 {
+            for y in (0..FIELD_HEIGHT).step_by(4) {
+                for x in (0..FIELD_WIDTH).step_by(4) {
+                    pet.body.inject(Perturbation {
+                        at: CellPos { x, y },
+                        radius: 6.0,
+                        amount: 1.0,
+                    });
+                }
+            }
+            pet.body.step();
+        }
+
+        // Act: 崩壊を検知させる
+        run(&mut pet, 900);
+
+        // Assert
+        assert!(pet.body.mass() > 40.0, "the collapsed body must be revived");
     }
 }

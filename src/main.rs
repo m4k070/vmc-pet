@@ -1,5 +1,6 @@
 mod app;
 mod body;
+mod interface;
 mod render;
 mod shell;
 
