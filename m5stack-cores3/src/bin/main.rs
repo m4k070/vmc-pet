@@ -260,17 +260,25 @@ fn main() -> ! {
                 Ok(report) => {
                     if let Some(event) = report.events.into_iter().flatten().next() {
                         let cell = renderer.cell_at(event.point.x, event.point.y);
-                        if matches!(event.phase, TouchPhase::Down) {
-                            // 突いた瞬間だけ、体への強い単発注入を発生させる
-                            if let Some(at) = cell {
-                                apply_touch(&mut body, &mut echo, Touch::Click { at });
-                            }
-                        }
-                        touching_at = if matches!(event.phase, TouchPhase::Up) {
+                        let new_touching_at = if matches!(event.phase, TouchPhase::Up) {
                             None
                         } else {
                             cell
                         };
+
+                        // 「新たに触れ始めた」ことは、ハードウェアの Down フェーズ
+                        // ではなく、直前のポーリングで無反応(None)だったことで
+                        // 判定する。描画(SPI書き込み)は重く、その間ポーリングが
+                        // 止まる。ちょうどその間に押して離す速いタップが完結すると、
+                        // Down フェーズのサンプルを一度も読めないまま Move や Up
+                        // だけを見ることになり、Down 頼りの判定ではタッチを丸ごと
+                        // 見逃していた。
+                        if touching_at.is_none() {
+                            if let Some(at) = new_touching_at {
+                                apply_touch(&mut body, &mut echo, Touch::Click { at });
+                            }
+                        }
+                        touching_at = new_touching_at;
                     } else {
                         touching_at = None;
                     }
