@@ -27,10 +27,17 @@ const IMBALANCE_THRESHOLD: f32 = 0.3;
 
 /// 自己摂動の半径・強さ。`touch.rs` の `CLICK_BODY_AMOUNT`(0.20)より弱くして
 /// ある。クリックは一度きりだが、こちらは条件を満たすたびに繰り返し働きかける
-/// ため、1回あたりは控えめにし、長時間の連続動作でも崩壊しないことを
-/// `long_running_self_perturbation_never_collapses_the_body` で確かめてある。
+/// ため、1回あたりは控えめにする必要がある。
+///
+/// 最初 0.08 にしていたところ、ユーザーから「自律的な動きが目で分かるほどでは
+/// ない」というフィードバックを受け、強めるにあたって
+/// `the_autonomous_controller_never_collapses_the_body_over_a_long_run`
+/// (20000ステップの連続動作)で安全域を実測した。0.12 までは崩壊せず、
+/// 0.13 で崩壊する崖になっている(`growth_scale` の崖と同種の、Orbium が
+/// 持つ急峻な不安定性)。その崖からは十分離しつつ 0.08 より強めた 0.10 を
+/// 採用した。
 const NUDGE_RADIUS_CELLS: f32 = 4.0;
-const NUDGE_AMOUNT: f32 = 0.08;
+const NUDGE_AMOUNT: f32 = 0.10;
 
 /// 重心から自己摂動の位置までの距離(セル)。
 const NUDGE_OFFSET_CELLS: f32 = 3.0;
