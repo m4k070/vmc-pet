@@ -4,7 +4,7 @@
 //! プーリングは学習も表現も持たない純粋なダウンサンプルであり、
 //! 「V に相当するエンコーダを実装しない」というコンセプトを壊さない。
 
-use crate::body::FieldView;
+use crate::body::{CellPos, FieldView};
 
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
 const DOT_GAP_RATIO: f32 = 0.18;
@@ -61,6 +61,50 @@ impl DotGrid {
             width: grid_width,
             height: grid_height,
         }
+    }
+
+    /// 画面上の位置に対応する場のセルを返す。グリッドの外なら `None`。
+    ///
+    /// `draw` が行う座標変換の逆写像。表示原点の小数部だけずれている点も含めて
+    /// 逆に辿るため、見えているドットと押した位置が一致する。
+    pub fn cell_at(
+        &self,
+        position: (f64, f64),
+        origin: (f32, f32),
+        field_size: (usize, usize),
+        width: u32,
+        height: u32,
+    ) -> Option<CellPos> {
+        let bounds = self.bounds(width, height);
+        if bounds.width == 0 {
+            return None;
+        }
+        let (x, y) = (position.0 as f32, position.1 as f32);
+        let inside = x >= bounds.x as f32
+            && x < (bounds.x + bounds.width) as f32
+            && y >= bounds.y as f32
+            && y < (bounds.y + bounds.height) as f32;
+        if !inside {
+            return None;
+        }
+
+        let cell_size = bounds.width as f32 / self.columns as f32;
+        let cell_origin = (origin.0.floor() as i32, origin.1.floor() as i32);
+        let shift = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
+
+        let column = ((x - bounds.x as f32) / cell_size + shift.0).floor() as i32;
+        let row = ((y - bounds.y as f32) / cell_size + shift.1).floor() as i32;
+
+        let (field_width, field_height) = (field_size.0 as i32, field_size.1 as i32);
+        let field_x = (column * field_width / self.columns as i32 + cell_origin.0)
+            .rem_euclid(field_width);
+        let field_y =
+            (row * field_height / self.rows as i32 + cell_origin.1).rem_euclid(field_height);
+
+        Some(CellPos {
+            x: field_x as usize,
+            y: field_y as usize,
+        })
     }
 
     /// 場の値をドットとして描く。`canvas` は premultiplied ARGB8888。
