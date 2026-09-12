@@ -31,22 +31,81 @@ pub const COLLAPSE_PENALTY: f32 = -1000.0;
 pub struct Trajectory {
     /// 各ステップの重心。場が空だったステップは `None`。
     centroids: Vec<Option<(f32, f32)>>,
+    /// 各ステップの総量。脈動の大きさ(見た目の落ち着き)を測るのに使う。
+    masses: Vec<f32>,
     /// 記録中に一度でも崩壊(`Pet::step` が `true` を返す)が起きたか。
     collapsed: bool,
+}
+
+/// 外から見える振る舞いの特徴。**人間が画面を見て感じ取れる量だけ**に
+/// 絞ってある(内部変数を直接覗くと、見た目に出ていない差まで拾ってしまい、
+/// 「読み取りやすさ」の指標として意味をなさなくなる)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Signature {
+    /// 1ステップあたりの重心の移動量。どれだけ動いて見えるか。
+    pub mean_speed: f32,
+    /// 総量の標準偏差。どれだけ脈動して(ざわついて)見えるか。
+    pub mass_deviation: f32,
 }
 
 impl Trajectory {
     /// `pet` を `steps` ぶん進めながら軌跡を記録する。
     pub fn record(pet: &mut Pet, steps: u32) -> Self {
+        Self::record_with(pet, steps, |_| {})
+    }
+
+    /// 各ステップの前に `before_step` を呼びながら記録する。
+    ///
+    /// 評価の条件づけ(たとえばエネルギーを固定して「元気な状態」「弱った状態」を
+    /// 作る)に使う。世話のされ方を変えて振る舞いの差を測るとき、クリックで
+    /// 条件を作るとクリック自体が場を乱してしまい、コントローラの貢献と区別が
+    /// つかない。内部状態だけを差し替えられるようにしてある。
+    pub fn record_with(pet: &mut Pet, steps: u32, mut before_step: impl FnMut(&mut Pet)) -> Self {
         let mut centroids = Vec::with_capacity(steps as usize);
+        let mut masses = Vec::with_capacity(steps as usize);
         let mut collapsed = false;
         for _ in 0..steps {
+            before_step(pet);
             if pet.step() {
                 collapsed = true;
             }
             centroids.push(pet.observe().toroidal_centroid());
+            masses.push(pet.mass());
         }
-        Self { centroids, collapsed }
+        Self {
+            centroids,
+            masses,
+            collapsed,
+        }
+    }
+
+    /// 崩壊が一度でも起きたか。
+    pub fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// 外から見える振る舞いの特徴。
+    pub fn signature(&self, field_width: usize, field_height: usize) -> Signature {
+        Signature {
+            mean_speed: self.mean_step_displacement(field_width, field_height),
+            mass_deviation: self.mass_deviation(),
+        }
+    }
+
+    /// 総量の標準偏差。
+    fn mass_deviation(&self) -> f32 {
+        if self.masses.is_empty() {
+            return 0.0;
+        }
+        let count = self.masses.len() as f32;
+        let mean = self.masses.iter().sum::<f32>() / count;
+        let variance = self
+            .masses
+            .iter()
+            .map(|mass| (mass - mean) * (mass - mean))
+            .sum::<f32>()
+            / count;
+        crate::math::sqrtf(variance)
     }
 
     /// 重心の移動量(トーラス上の符号付き最短距離)の、1ステップあたりの
@@ -75,12 +134,101 @@ impl Trajectory {
 
     /// この軌跡の適応度。崩壊が一度でも起きていれば `COLLAPSE_PENALTY`。
     /// そうでなければ、重心の平均移動量(動きがあるほど高い)を返す。
+    ///
+    /// これは最初に作った素朴な指標で、「動きの多さ」しか見ていない。実測の
+    /// 結果、この指標を最大化する方向には出荷できる精度で安全な設定が無く、
+    /// しかも本当に欲しかったもの(自律的な動きが見えること)は echo で
+    /// 解決できてしまった。経験に関わる評価には `legibility` を使う
+    /// (docs/DESIGN.md「世話のされ方が振る舞いに現れているか」参照)。
     pub fn fitness(&self, field_width: usize, field_height: usize) -> f32 {
         if self.collapsed {
             return COLLAPSE_PENALTY;
         }
         self.mean_step_displacement(field_width, field_height)
     }
+}
+
+/// 世話され続けている状態へ持っていくまでの助走。
+const CARED_WARMUP_STEPS: u32 = 60;
+
+/// 放置してエネルギーが尽き、体が弱った状態へ落ち着くまでの助走。
+/// エネルギーは約2250ステップで尽き、S1s のように形が変わる生物も
+/// その頃には新しい状態へ落ち着いている。
+const NEGLECTED_WARMUP_STEPS: u32 = 3000;
+
+/// 世話され続けている状態の軌跡。
+///
+/// エネルギーを満タンに固定する。触るのではなく固定するのは、クリック自体が
+/// 場を乱してしまい、コントローラの貢献と区別がつかなくなるため。エネルギーは
+/// 放っておけば減る一方なので、「満タンに保たれている」は「よく触られている」
+/// と同じ状態になる。
+pub fn cared_for_trajectory(code: &str, field_size: usize, eval_steps: u32) -> Trajectory {
+    let animal = crate::load_animal(code).unwrap();
+    let mut pet = Pet::new(animal, field_size, field_size);
+    for _ in 0..CARED_WARMUP_STEPS {
+        pet.restore(crate::PetMemory { energy: 1.0 }, 0.0);
+        pet.step();
+    }
+    Trajectory::record_with(&mut pet, eval_steps, |pet| {
+        pet.restore(crate::PetMemory { energy: 1.0 }, 0.0);
+    })
+}
+
+/// 放置され続けた状態の軌跡。
+///
+/// エネルギーを0に固定するのではなく、**ただ触らずに放置して自然に尽きさせる**。
+/// 最初は0へ固定していたが、それだと S1s が崩壊した。滑空している最中に急に
+/// 成長を弱めると再編成できずに壊れてしまうためで、自然な減衰なら同じ生物が
+/// 20000ステップ生き延びることは別途確認済み。実生活でエネルギーは徐々にしか
+/// 減らないので、急落は条件として不当だった(docs/DESIGN.md参照)。
+pub fn neglected_trajectory(code: &str, field_size: usize, eval_steps: u32) -> Trajectory {
+    let animal = crate::load_animal(code).unwrap();
+    let mut pet = Pet::new(animal, field_size, field_size);
+    for _ in 0..NEGLECTED_WARMUP_STEPS {
+        pet.step();
+    }
+    Trajectory::record(&mut pet, eval_steps)
+}
+
+/// 「世話のされ方が、外から見える振る舞いに現れているか」を測る。
+///
+/// 元気な状態と弱った状態それぞれの振る舞いの特徴を比べ、成分ごとの相対差の
+/// 平均を返す。0 に近いほど「どう扱われてきたかが見た目に出ていない」、
+/// 大きいほど「見れば分かる」。
+///
+/// なぜこれを指標にするのか(docs/DESIGN.md参照):
+///
+/// - 人間のラベルが要らない。シミュレーションの中だけで完結する
+/// - 経験に直結する。差が出るには、内部状態(=どう扱われてきたか)が
+///   見た目に出ていなければならない
+/// - 報酬ハッキングしにくい。両方の条件で等しく派手に動いても差はゼロなので、
+///   「目立てば勝つ」にはならない。差を作るには状態に応じて**振る舞いを
+///   変える**必要がある
+///
+/// どちらかの条件で崩壊した場合は `COLLAPSE_PENALTY`。読み取りやすさのために
+/// 体を危険にするのは本末転倒なので、安全性は従来どおりハードな足切りにする。
+pub fn legibility(
+    cared_for: &Trajectory,
+    neglected: &Trajectory,
+    field_width: usize,
+    field_height: usize,
+) -> f32 {
+    if cared_for.collapsed() || neglected.collapsed() {
+        return COLLAPSE_PENALTY;
+    }
+    let cared = cared_for.signature(field_width, field_height);
+    let weak = neglected.signature(field_width, field_height);
+    let relative_difference = |a: f32, b: f32| {
+        let scale = a.abs().max(b.abs());
+        if scale <= 1e-6 {
+            0.0
+        } else {
+            (a - b).abs() / scale
+        }
+    };
+    (relative_difference(cared.mean_speed, weak.mean_speed)
+        + relative_difference(cared.mass_deviation, weak.mass_deviation))
+        / 2.0
 }
 
 #[cfg(test)]
@@ -125,6 +273,53 @@ mod tests {
 
         // Assert
         assert_eq!(trajectory.fitness(32, 32), COLLAPSE_PENALTY);
+    }
+
+    #[test]
+    fn identical_conditions_are_not_legible() {
+        // Arrange: まったく同じ条件を2回。Lenia は決定的なので軌跡も一致する
+        let first = cared_for_trajectory("O2u", 32, 300);
+        let second = cared_for_trajectory("O2u", 32, 300);
+
+        // Act / Assert: 差が無いなら「見ても分からない」= 0
+        assert_eq!(legibility(&first, &second, 32, 32), 0.0);
+    }
+
+    #[test]
+    fn a_creature_that_stops_when_neglected_is_highly_legible() {
+        // Arrange: S1s は放置されると滑空をやめて止まる(docs/DESIGN.md参照)
+        let cared_for = cared_for_trajectory("S1s", 32, 900);
+        let neglected = neglected_trajectory("S1s", 32, 900);
+
+        // Act
+        let score = legibility(&cared_for, &neglected, 32, 32);
+
+        // Assert: 一目で分かる変化なので、高いスコアになるべき
+        assert!(score > 0.5, "stopping outright must read as legible, got {score}");
+    }
+
+    #[test]
+    fn orbium_hides_its_condition_much_better_than_s1s() {
+        // Arrange: 既定の生物(O2u)は、放置されても14%ほど遅くなるだけ
+        let orbium = legibility(
+            &cared_for_trajectory("O2u", 32, 900),
+            &neglected_trajectory("O2u", 32, 900),
+            32,
+            32,
+        );
+        let scutium = legibility(
+            &cared_for_trajectory("S1s", 32, 900),
+            &neglected_trajectory("S1s", 32, 900),
+            32,
+            32,
+        );
+
+        // Assert: 指標が人間の見立て(S1sは一目瞭然、Orbiumは分からない)と
+        // 同じ順位をつけること。これが代理指標として使えるかの最低条件
+        assert!(
+            scutium > orbium * 2.0,
+            "the metric must agree with the eye; orbium={orbium} scutium={scutium}"
+        );
     }
 
     #[test]
