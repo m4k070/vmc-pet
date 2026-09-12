@@ -141,6 +141,58 @@ pub struct Lenia {
     params: LeniaParams,
     taps: Vec<KernelTap>,
     potential: Vec<f32>,
+    /// `wrap_tables` タップの折り返し先を事前に引けるようにするテーブル(下記参照)。
+    /// 場の大きさが変わったときだけ作り直す。
+    wrap_tables: WrapTables,
+}
+
+/// トーラス境界の折り返し先を事前に計算しておくテーブル。
+///
+/// 畳み込みのホットループは(活性セル数)×(タップ数)回まわり、そのたびに
+/// 「x + dx が場の外に出た分だけ折り返す」という分岐が x・y それぞれで発生していた。
+/// この分岐を配列参照に置き換えることで、実測(M5Stack CoreS3, docs/M5STACK.md参照)
+/// でボトルネックだと判明した畳み込みそのものを速くする。
+///
+/// 折り返しの計算自体は変えていない(同じ剰余演算を先に済ませておくだけ)ので、
+/// 浮動小数点の加算順序も含めて出力は元の実装と完全に一致する
+/// (`accumulate_potential_matches_the_naive_wraparound` テストで検証している)。
+struct WrapTables {
+    dims: Option<(usize, usize)>,
+    x: Vec<i32>,
+    y: Vec<i32>,
+}
+
+impl WrapTables {
+    fn empty() -> Self {
+        Self {
+            dims: None,
+            x: Vec::new(),
+            y: Vec::new(),
+        }
+    }
+
+    /// 場の大きさが前回と同じならそのまま使う。変わっていれば作り直す。
+    fn ensure(&mut self, width: usize, height: usize, radius: i32) {
+        if self.dims == Some((width, height)) {
+            return;
+        }
+        self.x = build_wrap_table(width as i32, radius);
+        self.y = build_wrap_table(height as i32, radius);
+        self.dims = Some((width, height));
+    }
+}
+
+/// オフセット `-radius..=size+radius-1` それぞれについて、折り返した後の
+/// `0..size` の座標を引けるテーブルを作る。添字は `offset + radius`。
+fn build_wrap_table(size: i32, radius: i32) -> Vec<i32> {
+    let len = (size + 2 * radius) as usize;
+    let mut table = Vec::with_capacity(len);
+    for i in 0..len {
+        let offset = i as i32 - radius;
+        // (offset % size + size) % size は offset が負でも正しく 0..size に収まる。
+        table.push(((offset % size) + size) % size);
+    }
+    table
 }
 
 impl Lenia {
@@ -150,6 +202,7 @@ impl Lenia {
             params,
             taps,
             potential: Vec::new(),
+            wrap_tables: WrapTables::empty(),
         }
     }
 
@@ -181,32 +234,29 @@ impl Lenia {
     /// 値を持つセルからタップ先へ加算していく散布型にしてある。
     /// 生物は場のごく一部しか占めないため、全セルを走査する収集型より桁で軽い。
     fn accumulate_potential(&mut self, field: FieldView<'_>) {
-        let width = field.width() as i32;
-        let height = field.height() as i32;
+        let width = field.width();
+        let height = field.height();
+        let width_i = width as i32;
+        let radius = self.params.radius as i32;
+        self.wrap_tables.ensure(width, height, radius);
         self.potential.clear();
-        self.potential.resize((width * height) as usize, 0.0);
+        self.potential.resize(width * height, 0.0);
 
         for y in 0..height {
             for x in 0..width {
-                let value = field.get(x as usize, y as usize);
+                let value = field.get(x, y);
                 if value <= NEGLIGIBLE_CELL_VALUE {
                     continue;
                 }
+                // タップの折り返し先はあらかじめ引けるようにしてある(WrapTables 参照)。
+                // 添字がテーブル範囲に収まることは、タップが半径未満(|dx|,|dy| < radius)
+                // に絞り込まれていることから保証される(build_kernel_taps 参照)。
+                let base_x = x as i32 + radius;
+                let base_y = y as i32 + radius;
                 for tap in &self.taps {
-                    // |dx| < width なので、加減算1回で周期境界に折り返せる
-                    let mut target_x = x + tap.dx;
-                    if target_x < 0 {
-                        target_x += width;
-                    } else if target_x >= width {
-                        target_x -= width;
-                    }
-                    let mut target_y = y + tap.dy;
-                    if target_y < 0 {
-                        target_y += height;
-                    } else if target_y >= height {
-                        target_y -= height;
-                    }
-                    self.potential[(target_y * width + target_x) as usize] += value * tap.weight;
+                    let target_x = self.wrap_tables.x[(base_x + tap.dx) as usize];
+                    let target_y = self.wrap_tables.y[(base_y + tap.dy) as usize];
+                    self.potential[(target_y * width_i + target_x) as usize] += value * tap.weight;
                 }
             }
         }
@@ -433,5 +483,66 @@ mod tests {
 
         // Assert: growth > 0 の領域では scale=1.0 のとき等倍(何も弱めない)
         assert!(mass(&field) > 0.0);
+    }
+
+    /// `accumulate_potential` を境界折り返しの分岐から事前計算テーブル
+    /// (`WrapTables`)へ書き換えたとき、計算内容(浮動小数点の加算順序も含む)を
+    /// 一切変えていないことのゴールデン値。書き換え前のコードで実際に
+    /// 43x32(M5Stack CoreS3 の場のサイズ)で O2u を40ステップ動かし、
+    /// 5ステップごとの総量・チェックサム・特定セルの値を記録したもの
+    /// (docs/M5STACK.md「Lenia の畳み込みを高速化した」参照)。
+    #[test]
+    fn accumulate_potential_matches_the_naive_wraparound() {
+        // Arrange
+        let animal = crate::load_animal("O2u").unwrap();
+        let mut field = Field::new(43, 32);
+        field.place_centered(&animal.pattern);
+        let mut lenia = Lenia::new(animal.params);
+
+        // Act / Assert: 5ステップごとに書き換え前のゴールデン値と比較する
+        let expected: [(f64, f64, f32, f32); 8] = [
+            (73.4041085909, 30653.1380272796, 0.0000000000, 0.3154825568),
+            (73.8548008939, 34151.4545903920, 0.0000000000, 0.4525962472),
+            (73.5859313533, 35385.1240248531, 0.0000000000, 0.0000000000),
+            (73.1399620378, 32380.1707311238, 0.0000000000, 0.0000000000),
+            (74.0888389423, 27974.3764514197, 0.0000000000, 0.0000000000),
+            (74.0556613440, 24691.9511666251, 0.0000000000, 0.0000000000),
+            (73.6990019393, 24388.2690644411, 0.0000000000, 0.0000000000),
+            (73.0978133455, 24244.5838269605, 0.0000000000, 0.0000000000),
+        ];
+        for (checkpoint, &(expected_mass, expected_checksum, expected_a, expected_b)) in
+            expected.iter().enumerate()
+        {
+            for _ in 0..5 {
+                lenia.step(&mut field, 1.0);
+            }
+            let view = field.view();
+            let mut mass = 0.0f64;
+            let mut checksum = 0.0f64;
+            for y in 0..32 {
+                for x in 0..43 {
+                    let v = view.get(x, y);
+                    mass += v as f64;
+                    checksum += (v as f64) * ((x * 7 + y * 13 + 1) as f64);
+                }
+            }
+            let step = (checkpoint + 1) * 5;
+            assert!(
+                (mass - expected_mass).abs() < 1e-4,
+                "step={step}: mass drifted, got {mass}, expected {expected_mass}"
+            );
+            assert!(
+                (checksum - expected_checksum).abs() < 1e-3,
+                "step={step}: checksum drifted, got {checksum}, expected {expected_checksum}"
+            );
+            assert!(
+                (view.get(10, 10) - expected_a).abs() < 1e-6,
+                "step={step}: sample(10,10) drifted"
+            );
+            assert!(
+                (view.get(20, 15) - expected_b).abs() < 1e-6,
+                "step={step}: sample(20,15) drifted"
+            );
+        }
     }
 }
