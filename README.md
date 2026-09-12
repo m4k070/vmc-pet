@@ -51,6 +51,10 @@ nix develop --command cargo run --release
 起動すると画面右下に半透明のドットグリッドが常駐する。周囲の透明部分はクリックが
 下のウィンドウへ抜ける。終了は `Ctrl-C`。
 
+体の上にポインタを乗せると撫でている扱いになり、弱くエネルギーが注入され続ける。
+クリックすると突いた扱いになり、その位置へ強く注入される。Lenia はカオス系なので
+触り方によっては体が崩壊するが、そのときは自動で生物を置き直す。
+
 ## 動作環境
 
 `wlr-layer-shell` に対応した Wayland コンポジタが必要。niri 26.04 で動作を確認して
@@ -82,7 +86,7 @@ layer-rule {
 | 1 | layer-shell 常駐ウィンドウ | 完了 |
 | 2 | ドットグリッド描画 | 完了 |
 | 3 | Lenia 場を体として接続 | 完了 |
-| 4 | 入力を局所摂動として注入する IF 層 | 未着手 |
+| 4 | 入力を局所摂動として注入する IF 層 | 完了 |
 | 5 | (任意) 気分状態による表現の方向づけ | 未着手 |
 
 常駐時の実測値 (release, 2560x1440@60Hz): CPU 1.6% / RSS 4.4MB / 30.00fps。
@@ -97,6 +101,11 @@ src/
     field.rs         # Field / FieldView
     lenia.rs         # カーネル・成長関数・更新規則
     animal.rs        # animals.json の読み込みと RLE デコード
+    perturbation.rs  # Perturbation / CellPos
+    port.rs          # trait BodyPort (体が外に見せる唯一の窓口)
+    lenia_body.rs    # BodyPort の実装。崩壊からの復帰も持つ
+  interface/       # IF層: 外界 → 摂動 だけを通す
+    pointer.rs       # Touch → Perturbation
   render/
     dot_grid.rs      # FieldView → ピクセルバッファ
     camera.rs        # 重心を画面中央に置く表示原点(場は書き換えない)
