@@ -1,5 +1,4 @@
 mod app;
-mod body;
 mod cli;
 mod interface;
 mod render;

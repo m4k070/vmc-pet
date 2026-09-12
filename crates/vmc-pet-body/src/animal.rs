@@ -7,7 +7,7 @@ use serde::Deserialize;
 use super::lenia::{GrowthMapping, KernelCore, LeniaParams};
 
 /// 埋め込んだ生物データ。外部ファイルに依存させないため実行ファイルに含める。
-const ANIMALS_JSON: &str = include_str!("../../assets/animals.json");
+const ANIMALS_JSON: &str = include_str!("../../../assets/animals.json");
 
 /// RLE の行区切り。2次元の Lenia では `$` が1行の終わりを表す。
 const ROW_DELIMITER: char = '$';

@@ -29,7 +29,7 @@ impl Perturbation {
         if self.radius <= 0.0 || distance >= self.radius {
             return 0.0;
         }
-        0.5 * (1.0 + (std::f32::consts::PI * distance / self.radius).cos())
+        0.5 * (1.0 + crate::math::cosf(core::f32::consts::PI * distance / self.radius))
     }
 }
 
@@ -47,7 +47,7 @@ pub fn accumulate_into(
     min: f32,
     max: f32,
 ) {
-    let reach = perturbation.radius.ceil() as i32;
+    let reach = crate::math::ceilf(perturbation.radius) as i32;
     if reach <= 0 {
         return;
     }
@@ -55,7 +55,7 @@ pub fn accumulate_into(
 
     for dy in -reach..=reach {
         for dx in -reach..=reach {
-            let distance = ((dx * dx + dy * dy) as f32).sqrt();
+            let distance = crate::math::sqrtf((dx * dx + dy * dy) as f32);
             let weight = perturbation.weight_at(distance);
             if weight <= 0.0 {
                 continue;

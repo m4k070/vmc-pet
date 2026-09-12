@@ -164,7 +164,7 @@ mod tests {
 #[cfg(test)]
 mod injection_tests {
     use super::*;
-    use crate::body::perturbation::CellPos;
+    use crate::perturbation::CellPos;
 
     #[test]
     fn inject_raises_the_centre_most() {

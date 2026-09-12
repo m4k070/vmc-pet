@@ -13,7 +13,7 @@
 //! いまは render 層に閉じた描画専用データだが、場(z 相当)と行動(a 相当)を最初から
 //! 別データとして持っているという構造そのものは、その拡張と衝突しない。
 
-use crate::body::{accumulate_into, Perturbation};
+use vmc_pet_body::{accumulate_into, Perturbation};
 
 /// heat の値域。Field の値域(0.0..=1.0)と揃えてある。
 const MIN_HEAT: f32 = 0.0;
@@ -94,7 +94,7 @@ impl TouchEchoView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::CellPos;
+    use vmc_pet_body::CellPos;
 
     #[test]
     fn touch_raises_the_centre_most() {

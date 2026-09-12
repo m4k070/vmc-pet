@@ -4,7 +4,7 @@
 //! (main.rs)を分けることで、引数解釈そのものを OS から独立してテストできる
 //! ようにする。
 
-use crate::body::list_animals;
+use vmc_pet_body::list_animals;
 
 /// 引数解釈の結果、main が実際に行うべきこと。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +73,7 @@ vmc-pet [オプション]
 ";
 
 /// 選べる生物の一覧を人間向けに整形する。
-pub fn format_animal_list() -> Result<String, crate::body::animal::AnimalError> {
+pub fn format_animal_list() -> Result<String, vmc_pet_body::animal::AnimalError> {
     let animals = list_animals()?;
     let mut out = String::new();
     for (code, name) in animals {

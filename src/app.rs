@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::body::{load_animal, BodyPort, LeniaBody};
+use vmc_pet_body::{load_animal, BodyPort, LeniaBody};
 use crate::interface::{body_perturbation_for, echo_perturbation_for, MachineLoad, Touch};
 use crate::render::{Camera, DotGrid, TouchEcho};
 use crate::shell::{InputRegion, PointerInput, Surface};
@@ -51,7 +51,7 @@ pub struct Pet {
     /// 直近のサーフェスの大きさ。ポインタ座標を場のセルへ写すのに要る。
     surface_size: (u32, u32),
     /// ポインタが体の上にある間の位置。撫でている扱いで、毎フレーム echo を光らせる。
-    hovering_at: Option<crate::body::CellPos>,
+    hovering_at: Option<vmc_pet_body::CellPos>,
     /// 機械の CPU 負荷を「環境の厳しさ」として体に伝えるための読み取り役。
     machine_load: MachineLoad,
 }
@@ -118,7 +118,7 @@ impl Pet {
     }
 
     /// ポインタ座標に対応する場のセル。グリッドの外なら `None`。
-    fn cell_under(&self, x: f64, y: f64) -> Option<crate::body::CellPos> {
+    fn cell_under(&self, x: f64, y: f64) -> Option<vmc_pet_body::CellPos> {
         self.grid.cell_at(
             (x, y),
             self.camera.origin(),
@@ -132,7 +132,7 @@ impl Pet {
 /// ペットを起動できない原因。
 #[derive(Debug)]
 pub enum PetError {
-    Animal(crate::body::animal::AnimalError),
+    Animal(vmc_pet_body::animal::AnimalError),
 }
 
 impl std::fmt::Display for PetError {
@@ -390,7 +390,7 @@ mod tests {
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
-    use crate::body::{BodyPort, CellPos, Perturbation};
+    use vmc_pet_body::{BodyPort, CellPos, Perturbation};
 
     /// 体の時間を `steps` ぶん進める。1間隔ずつ刻んで追いつき上限に掛からないようにする。
     fn run(pet: &mut Pet, steps: usize) {

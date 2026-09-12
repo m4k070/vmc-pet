@@ -6,7 +6,7 @@
 
 use std::f32::consts::TAU;
 
-use crate::body::FieldView;
+use vmc_pet_body::FieldView;
 
 /// これ以下の総量しかない場では重心を定めない(原点を据え置く)。
 const NEGLIGIBLE_MASS: f32 = 1e-6;
@@ -93,7 +93,7 @@ fn toroidal_centroid(field: FieldView<'_>) -> Option<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::body::Field;
+    use vmc_pet_body::Field;
 
     use super::*;
 

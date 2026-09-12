@@ -43,9 +43,12 @@ impl KernelCore {
     fn value_at(self, radius: f32) -> f32 {
         const STEP_EDGE: f32 = 0.25;
         match self {
-            Self::Polynomial => (4.0 * radius * (1.0 - radius)).powi(4),
+            Self::Polynomial => {
+                let base = 4.0 * radius * (1.0 - radius);
+                base * base * base * base
+            }
             // radius が 0 または 1 のとき指数は -inf になり、値は 0 に収束する
-            Self::Exponential => (4.0 - 1.0 / (radius * (1.0 - radius))).exp(),
+            Self::Exponential => crate::math::expf(4.0 - 1.0 / (radius * (1.0 - radius))),
             Self::Step => {
                 if (STEP_EDGE..=1.0 - STEP_EDGE).contains(&radius) {
                     1.0
@@ -90,11 +93,11 @@ impl GrowthMapping {
         let deviation = potential - center;
         match self {
             Self::Polynomial => {
-                let base = 1.0 - deviation * deviation / (9.0 * width * width);
-                base.max(0.0).powi(4) * 2.0 - 1.0
+                let base = (1.0 - deviation * deviation / (9.0 * width * width)).max(0.0);
+                base * base * base * base * 2.0 - 1.0
             }
             Self::Exponential => {
-                (-(deviation * deviation) / (2.0 * width * width)).exp() * 2.0 - 1.0
+                crate::math::expf(-(deviation * deviation) / (2.0 * width * width)) * 2.0 - 1.0
             }
             Self::Step => {
                 if deviation.abs() <= width {
@@ -219,14 +222,14 @@ fn build_kernel_taps(params: &LeniaParams) -> Vec<KernelTap> {
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             let distance =
-                ((dx * dx + dy * dy) as f32).sqrt() / params.radius as f32;
+                crate::math::sqrtf((dx * dx + dy * dy) as f32) / params.radius as f32;
             if distance >= 1.0 {
                 continue;
             }
             let scaled = ring_count as f32 * distance;
-            let ring_index = (scaled.floor() as usize).min(ring_count - 1);
-            let weight =
-                params.kernel_core.value_at(scaled.fract()) * params.kernel_peaks[ring_index];
+            let ring_index = (crate::math::floorf(scaled) as usize).min(ring_count - 1);
+            let weight = params.kernel_core.value_at(crate::math::fractf(scaled))
+                * params.kernel_peaks[ring_index];
             if weight <= NEGLIGIBLE_KERNEL_WEIGHT {
                 continue;
             }
@@ -356,7 +359,7 @@ mod tests {
     #[test]
     fn orbium_survives_and_glides_on_a_torus() {
         // Arrange
-        let animal = crate::body::load_animal("O2u").unwrap();
+        let animal = crate::load_animal("O2u").unwrap();
         let mut field = Field::new(64, 64);
         field.place_centered(&animal.pattern);
         let mut lenia = Lenia::new(animal.params);
@@ -393,7 +396,7 @@ mod tests {
     fn growth_scale_has_a_cliff_rather_than_a_gentle_slope() {
         // Arrange / Act / Assert
         for (scale, should_survive) in [(0.80, true), (0.78, true), (0.77, false), (0.75, false)] {
-            let animal = crate::body::load_animal("O2u").unwrap();
+            let animal = crate::load_animal("O2u").unwrap();
             let mut field = Field::new(64, 64);
             field.place_centered(&animal.pattern);
             let mut lenia = Lenia::new(animal.params);

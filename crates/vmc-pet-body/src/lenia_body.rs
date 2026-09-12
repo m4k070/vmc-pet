@@ -120,8 +120,8 @@ impl BodyPort for LeniaBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::load_animal;
-    use crate::body::perturbation::CellPos;
+    use crate::load_animal;
+    use crate::perturbation::CellPos;
 
     fn orbium() -> LeniaBody {
         LeniaBody::new(load_animal("O2u").unwrap(), 32, 32)

@@ -1,0 +1,16 @@
+[package]
+name = "vmc-pet-body"
+version = "0.1.0"
+edition = "2021"
+description = "vmc-pet の体(Lenia場)。Wayland も入力も知らない純粋ロジック。std/no_std 両対応。"
+
+[features]
+# デフォルトはデスクトップ版向けの std。
+# 組み込み向けの体(docs/M5STACK.md)は `default-features = false` で no_std にする。
+default = ["std"]
+std = ["serde/std", "serde_json/std"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+libm = "0.2"

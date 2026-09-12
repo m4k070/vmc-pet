@@ -7,7 +7,7 @@
 //! 体の場(body)と入力の echo(touch_echo)は別データとして受け取り、ここで初めて
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
-use crate::body::{CellPos, FieldView};
+use vmc_pet_body::{CellPos, FieldView};
 use crate::render::TouchEchoView;
 
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
@@ -289,7 +289,7 @@ fn premultiplied_argb8888(red: f32, green: f32, blue: f32, alpha: f32) -> [u8; 4
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::Field;
+    use vmc_pet_body::Field;
     use crate::render::touch_echo::TouchEcho;
 
     /// echo なしの場合の便宜関数。ほとんどのテストは体だけを見ている。
@@ -539,7 +539,7 @@ mod tests {
         // Arrange: 体が存在しないセルに echo だけを置く
         let field = Field::new(32, 32);
         let mut echo = TouchEcho::new(32, 32);
-        echo.touch(&crate::body::Perturbation {
+        echo.touch(&vmc_pet_body::Perturbation {
             at: CellPos { x: 16, y: 16 },
             radius: 2.0,
             amount: 0.5,
@@ -568,7 +568,7 @@ mod tests {
         // Arrange: 体が無いセルへの echo
         let field = Field::new(32, 32);
         let mut echo = TouchEcho::new(32, 32);
-        echo.touch(&crate::body::Perturbation {
+        echo.touch(&vmc_pet_body::Perturbation {
             at: CellPos { x: 16, y: 16 },
             radius: 1.5,
             amount: 0.8,
