@@ -1,17 +1,20 @@
 //! M5Stack CoreS3 上で Lenia を体として動かし、画面にドットグリッドとして描く。
 //!
-//! docs/M5STACK.md の step 4 に対応する。ハードウェア初期化(AXP2101電源・
+//! docs/M5STACK.md の step 4・5 に対応する。ハードウェア初期化(AXP2101電源・
 //! AW9523B経由のリセットなど)は `core-s3` クレートに任せ、ここでは
-//! 「場の値をどう描くか」だけを扱う。PC版(src/render/dot_grid.rs)と考え方は
-//! 同じ(値が大きいほど大きな円・濃い色)だが、Rgb565・embedded-graphics 向けに
-//! 書き直してある。touch_echo に相当する入力の可視化はまだ無い(IF層は step 5)。
+//! 「場の値をどう描くか」と「タッチをどう体・echoに翻訳するか」だけを扱う。
+//! PC版(src/render/dot_grid.rs, src/app.rs)と考え方は同じだが、Rgb565・
+//! embedded-graphics・FT6336U静電容量タッチ向けに書き直してある。
+//!
+//! Touch の意味づけ(体には触れないホバー、安全域の内側に採ったクリックの強さ)
+//! と TouchEcho(入力の可視化。体には一切影響しない)は `vmc_pet_body` 側にある。
+//! PC版と同じ実装・同じ安全性検証済みの定数を共有する
+//! (docs/M5STACK.md「タッチ操作の実装」参照)。
 //!
 //! 実機で確認したところ、毎フレーム画面全体を `clear` してから描き直す素朴な
-//! 実装は、ちらつき(黒く消えてから描き直るまでの間が見える)とフレームレートの
-//! 不安定さ(消して描く総量が毎回違うため)を引き起こした。そこで
-//! `DotRenderer` は前フレームの各セルの半径を覚えておき、**変化したセルだけ**
-//! 消して描き直す。変わっていないセルには一切触れないため、ちらつきが無く、
-//! 1フレームあたりの描画量も動きに応じて自然に少なくなる。
+//! 実装は、ちらつきとフレームレートの不安定さを引き起こした。そこで
+//! `DotRenderer` は前フレームの各セルの半径と色を覚えておき、**変化したセル
+//! だけ**消して描き直す。
 
 #![no_std]
 #![no_main]
@@ -22,34 +25,51 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use embedded_graphics::{
-    pixelcolor::Rgb565,
+    pixelcolor::{Rgb565, RgbColor},
     prelude::*,
     primitives::{Circle, PrimitiveStyle},
 };
 use esp_backtrace as _;
 use esp_hal::{
+    delay::Delay,
     main,
     time::{Duration, Instant},
 };
 
-use core_s3::{bsp::CoreS3DisplayResources, CoreS3};
-use vmc_pet_body::{load_animal, Field, FieldView, Lenia};
+use core_s3::{
+    bsp::CoreS3DisplayResources,
+    touch::{Ft6336u, TouchPhase},
+    CoreS3,
+};
+use vmc_pet_body::{
+    body_perturbation_for, echo_perturbation_for, load_animal, BodyPort, CellPos, FieldView,
+    LeniaBody, Touch, TouchEcho, TouchEchoView,
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// 場の解像度。縦は PC版と同じ 32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
 /// 横は画面(320x240)のアスペクト比に合わせて広げてある。43 は 320/(240/32) の
 /// 近似値で、セルピッチが縦横ほぼ等しくなる(横7.44px・縦7.5px)ように選んだ。
-/// 場を正方形にする制約は無い(Lenia のカーネルは場の形に関係なく円形に定義
-/// される)ことを、PC側で複数のアスペクト比を実測して確かめてから決めた。
 const FIELD_WIDTH: usize = 43;
 const FIELD_HEIGHT: usize = 32;
 
 /// 場を進める頻度の目安(PC版の step_rate と同じ 15/s)。
 const STEP_INTERVAL: Duration = Duration::from_millis(66);
 
+/// タッチを読み取る間隔。touch_demo example に倣った値。
+const TOUCH_POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+/// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
+/// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
+/// 減衰させる。
+const ECHO_DECAY_PER_POLL: f32 = 0.90;
+
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合(dot_grid.rsと同じ)。
 const DOT_GAP_RATIO: f32 = 0.18;
+
+/// これ以下の値のセルは描画しない(dot_grid.rs の MIN_VISIBLE_VALUE と同じ)。
+const MIN_VISIBLE_VALUE: f32 = 0.004;
 
 /// 背景色。前フレームのドットを「消す」ときもこの色で塗る。
 const BACKGROUND_COLOR: Rgb565 = Rgb565::BLACK;
@@ -57,34 +77,45 @@ const BACKGROUND_COLOR: Rgb565 = Rgb565::BLACK;
 /// 体の色(ティール)。PC版の BODY_COLOR と同じ狙い。
 const BODY_COLOR: Rgb565 = Rgb565::new(9, 43, 20);
 
-/// 場の総量。生物が生きているかの目安になる。
-fn mass(field: &Field) -> f32 {
-    let view = field.view();
-    let mut total = 0.0;
-    for y in 0..view.height() {
-        for x in 0..view.width() {
-            total += view.get(x, y);
-        }
+/// 入力 echo の色(暖色の白)。PC版の ECHO_COLOR と同じ狙いで、体の色とはっきり
+/// 区別がつくようにしてある。
+const ECHO_COLOR: Rgb565 = Rgb565::new(31, 58, 22);
+
+/// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
+/// PC版 app.rs の touch() と同じ役割(体に働きかける経路はここだけ)。
+fn apply_touch(body: &mut LeniaBody, echo: &mut TouchEcho, touch: Touch) {
+    if let Some(perturbation) = body_perturbation_for(touch) {
+        body.inject(perturbation);
     }
-    total
+    if let Some(perturbation) = echo_perturbation_for(touch) {
+        echo.touch(&perturbation);
+    }
 }
 
-/// 場を画面いっぱいのドットグリッドとして描く。変化したセルだけを消して描き直す。
-///
-/// セルの縦横のピッチは独立に決める(横 = 画面幅/列数、縦 = 画面高さ/行数)。
-/// 320x240 のような横長画面では、ピッチを画面短辺に合わせて正方形に揃えると
-/// 左右が大きく空いてしまう。ドット自体の大きさ(半径)は重ならないよう
-/// 短い方のピッチを基準にしたまま、ピッチそのものは画面いっぱいに広げることで、
-/// ドットの見た目を変えずに画面を使い切る。
+fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t) as u8
+}
+
+/// 2色を `t`(0.0〜1.0)で線形補間する(dot_grid.rs の lerp_color と同じ)。
+fn lerp_color(a: Rgb565, b: Rgb565, t: f32) -> Rgb565 {
+    Rgb565::new(
+        lerp_channel(a.r(), b.r(), t),
+        lerp_channel(a.g(), b.g(), t),
+        lerp_channel(a.b(), b.b(), t),
+    )
+}
+
+/// 場と echo を画面いっぱいのドットグリッドとして描く。変化したセルだけを
+/// 消して描き直す。座標変換(cell_at)も同じ場所に持たせ、描画と当たり判定が
+/// ずれないようにしてある(PC版の DotGrid::draw / cell_at と同じ考え方)。
 struct DotRenderer {
     /// 前フレームで描いた各セルの半径(ピクセル)。0 は「何も描いていない」。
-    /// 初回はすべて 0 から始まるため、初回フレームは全セルが「描く」対象になる。
     previous_radius: Vec<u32>,
+    /// 前フレームで描いた各セルの色。半径が同じでも色が変わったら描き直す。
+    previous_color: Vec<Rgb565>,
     cell_pitch_x: f32,
     cell_pitch_y: f32,
     max_radius: f32,
-    origin_x: f32,
-    origin_y: f32,
 }
 
 impl DotRenderer {
@@ -95,45 +126,74 @@ impl DotRenderer {
         let max_radius = cell_pitch_x.min(cell_pitch_y) * 0.5 * (1.0 - DOT_GAP_RATIO);
         Self {
             previous_radius: vec![0; FIELD_WIDTH * FIELD_HEIGHT],
+            previous_color: vec![BACKGROUND_COLOR; FIELD_WIDTH * FIELD_HEIGHT],
             cell_pitch_x,
             cell_pitch_y,
             max_radius,
-            origin_x: cell_pitch_x * 0.5,
-            origin_y: cell_pitch_y * 0.5,
         }
     }
 
-    fn update<D>(&mut self, display: &mut D, field: FieldView<'_>)
+    /// 画面上の座標に対応する場のセルを返す。範囲外なら `None`。
+    fn cell_at(&self, screen_x: i32, screen_y: i32) -> Option<CellPos> {
+        let column = (screen_x as f32 / self.cell_pitch_x) as i32;
+        let row = (screen_y as f32 / self.cell_pitch_y) as i32;
+        if column < 0 || column >= FIELD_WIDTH as i32 || row < 0 || row >= FIELD_HEIGHT as i32 {
+            return None;
+        }
+        Some(CellPos {
+            x: column as usize,
+            y: row as usize,
+        })
+    }
+
+    fn update<D>(&mut self, display: &mut D, field: FieldView<'_>, echo: TouchEchoView<'_>)
     where
         D: DrawTarget<Color = Rgb565>,
     {
         for y in 0..FIELD_HEIGHT {
             for x in 0..FIELD_WIDTH {
-                let value = field.get(x, y);
-                // 面積が値に比例するよう半径は sqrt をとる(dot_grid.rs と同じ考え方)
-                let radius = (self.max_radius * libm::sqrtf(value)) as u32;
+                let body_value = field.get(x, y);
+                let echo_value = echo.get(x, y);
+                // 体と echo の値のうち大きい方でドットの大きさを決める
+                // (dot_grid.rs と同じ考え方)。
+                let visibility = body_value.max(echo_value);
+                if visibility <= MIN_VISIBLE_VALUE {
+                    if self.previous_radius[y * FIELD_WIDTH + x] == 0 {
+                        continue;
+                    }
+                }
+                let radius = (self.max_radius * libm::sqrtf(visibility)) as u32;
+                // echo が占める割合。体だけなら 0、echo だけなら 1 になる。
+                let echo_mix = if visibility > 0.0 {
+                    (echo_value / visibility).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let color = lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix);
 
                 let index = y * FIELD_WIDTH + x;
-                let previous = self.previous_radius[index];
-                if radius == previous {
+                let previous_radius = self.previous_radius[index];
+                let previous_color = self.previous_color[index];
+                if radius == previous_radius && (radius == 0 || color == previous_color) {
                     continue;
                 }
 
                 let center = Point::new(
-                    (self.origin_x + self.cell_pitch_x * x as f32) as i32,
-                    (self.origin_y + self.cell_pitch_y * y as f32) as i32,
+                    (self.cell_pitch_x * (x as f32 + 0.5)) as i32,
+                    (self.cell_pitch_y * (y as f32 + 0.5)) as i32,
                 );
-                if previous > 0 {
-                    let _ = Circle::with_center(center, previous * 2)
+                if previous_radius > 0 {
+                    let _ = Circle::with_center(center, previous_radius * 2)
                         .into_styled(PrimitiveStyle::with_fill(BACKGROUND_COLOR))
                         .draw(display);
                 }
                 if radius > 0 {
                     let _ = Circle::with_center(center, radius * 2)
-                        .into_styled(PrimitiveStyle::with_fill(BODY_COLOR))
+                        .into_styled(PrimitiveStyle::with_fill(color))
                         .draw(display);
                 }
                 self.previous_radius[index] = radius;
+                self.previous_color[index] = color;
             }
         }
     }
@@ -169,6 +229,14 @@ fn main() -> ! {
     parts.display.clear(BACKGROUND_COLOR).expect("clear");
     let mut renderer = DotRenderer::new(board.display.width as u32, board.display.height as u32);
 
+    let mut touch = Ft6336u::new(parts.internal_i2c);
+    let touch_ready = touch.init().is_ok();
+    esp_println::println!(
+        "vmc-pet-cores3: touch controller init {}",
+        if touch_ready { "ok" } else { "FAILED" }
+    );
+    let delay = Delay::new();
+
     esp_println::println!("vmc-pet-cores3: loading Orbium unicaudatus");
     let animal = load_animal("O2u").expect("assets/animals.json に O2u が無い");
     esp_println::println!(
@@ -178,23 +246,59 @@ fn main() -> ! {
         animal.params.time_divisor
     );
 
-    let mut field = Field::new(FIELD_WIDTH, FIELD_HEIGHT);
-    field.place_centered(&animal.pattern);
-    let mut lenia = Lenia::new(animal.params);
+    let mut body = LeniaBody::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+    let mut echo = TouchEcho::new(FIELD_WIDTH, FIELD_HEIGHT);
+    // 指が触れている間の位置。撫でている扱いで、毎回 echo を光らせ続ける
+    // (PC版 app.rs の hovering_at と同じ役割)。
+    let mut touching_at: Option<CellPos> = None;
 
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
     loop {
+        if touch_ready {
+            match touch.read_report() {
+                Ok(report) => {
+                    if let Some(event) = report.events.into_iter().flatten().next() {
+                        let cell = renderer.cell_at(event.point.x, event.point.y);
+                        if matches!(event.phase, TouchPhase::Down) {
+                            // 突いた瞬間だけ、体への強い単発注入を発生させる
+                            if let Some(at) = cell {
+                                apply_touch(&mut body, &mut echo, Touch::Click { at });
+                            }
+                        }
+                        touching_at = if matches!(event.phase, TouchPhase::Up) {
+                            None
+                        } else {
+                            cell
+                        };
+                    } else {
+                        touching_at = None;
+                    }
+                }
+                Err(_) => touching_at = None,
+            }
+        }
+
+        if let Some(at) = touching_at {
+            apply_touch(&mut body, &mut echo, Touch::Hover { at });
+        }
+        echo.decay(ECHO_DECAY_PER_POLL);
+
         if last_step.elapsed() >= STEP_INTERVAL {
-            lenia.step(&mut field, 1.0);
+            body.step();
             last_step += STEP_INTERVAL;
             step += 1;
 
-            renderer.update(&mut parts.display, field.view());
-
             if step % 15 == 0 {
-                esp_println::println!("vmc-pet-cores3: step={step:5} mass={:.2}", mass(&field));
+                esp_println::println!(
+                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2}",
+                    body.mass(),
+                    body.energy()
+                );
             }
         }
+
+        renderer.update(&mut parts.display, body.observe(), echo.view());
+        delay.delay(TOUCH_POLL_INTERVAL);
     }
 }
