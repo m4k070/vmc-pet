@@ -66,12 +66,14 @@ impl DotGrid {
     /// 場の値をドットとして描く。`canvas` は premultiplied ARGB8888。
     /// 呼び出し側が canvas をクリア済みであることを前提に、上書きで描く。
     ///
-    /// `origin` は画面左上に対応する場の座標。場はトーラスなので、はみ出した分は
-    /// 反対側から読む。
+    /// `origin` は画面左上に対応する場の座標。整数部がどのセルから読むかを、
+    /// 小数部がドットをずらす量を決める。場の値はリサンプルせずそのまま使い、
+    /// ドットの位置だけをサブピクセルでずらすため、にじみは生じない。
+    /// 場はトーラスなので、はみ出した分は反対側から読む。
     pub fn draw(
         &self,
         field: FieldView<'_>,
-        origin: (usize, usize),
+        origin: (f32, f32),
         canvas: &mut [u8],
         width: u32,
         height: u32,
@@ -83,17 +85,24 @@ impl DotGrid {
         let cell_size = bounds.width as f32 / self.columns as f32;
         let max_radius = cell_size * 0.5 * (1.0 - DOT_GAP_RATIO);
 
-        for row in 0..self.rows {
-            for column in 0..self.columns {
-                let value = pool_cell(field, origin, self.columns, self.rows, column, row);
+        let cell_origin = (origin.0.floor() as i32, origin.1.floor() as i32);
+        let shift = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
+
+        // ずらした分だけ端に隙間ができるため、上下左右へ1列ずつ余分に描く
+        for row in -1..=self.rows as i32 {
+            for column in -1..=self.columns as i32 {
+                let value = pool_cell(field, cell_origin, self.columns, self.rows, column, row);
                 if value <= MIN_VISIBLE_VALUE {
                     continue;
                 }
                 // 面積が値に比例するよう半径は sqrt をとる
-                let radius = max_radius * value.sqrt();
-                let center_x = bounds.x as f32 + (column as f32 + 0.5) * cell_size;
-                let center_y = bounds.y as f32 + (row as f32 + 0.5) * cell_size;
-                draw_dot(canvas, width, height, center_x, center_y, radius, value);
+                let dot = Dot {
+                    center_x: bounds.x as f32 + (column as f32 + 0.5 - shift.0) * cell_size,
+                    center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
+                    radius: max_radius * value.sqrt(),
+                    value,
+                };
+                draw_dot(canvas, width, height, bounds, dot);
             }
         }
     }
@@ -101,59 +110,74 @@ impl DotGrid {
 
 /// 表示セル1つ分に対応する場の矩形を平均する(ボックスフィルタ)。
 /// 場と表示の解像度が割り切れない比でも破綻しないよう、区間を整数で切り出す。
+/// 表示セルの添字は負にもなりうる(端の余分な1列)ため、符号付きで扱う。
 fn pool_cell(
     field: FieldView<'_>,
-    origin: (usize, usize),
+    cell_origin: (i32, i32),
     columns: usize,
     rows: usize,
-    column: usize,
-    row: usize,
+    column: i32,
+    row: i32,
 ) -> f32 {
-    let x_start = column * field.width() / columns;
-    let x_end = ((column + 1) * field.width() / columns).max(x_start + 1);
-    let y_start = row * field.height() / rows;
-    let y_end = ((row + 1) * field.height() / rows).max(y_start + 1);
+    let field_width = field.width() as i32;
+    let field_height = field.height() as i32;
+    let x_start = column * field_width / columns as i32;
+    let x_end = ((column + 1) * field_width / columns as i32).max(x_start + 1);
+    let y_start = row * field_height / rows as i32;
+    let y_end = ((row + 1) * field_height / rows as i32).max(y_start + 1);
 
     let mut total = 0.0;
     let mut count = 0.0;
     for y in y_start..y_end {
         for x in x_start..x_end {
             // 表示原点を足したうえでトーラス上に折り返す
-            let source_x = (x + origin.0) % field.width();
-            let source_y = (y + origin.1) % field.height();
-            total += field.get(source_x, source_y);
+            let source_x = (x + cell_origin.0).rem_euclid(field_width);
+            let source_y = (y + cell_origin.1).rem_euclid(field_height);
+            total += field.get(source_x as usize, source_y as usize);
             count += 1.0;
         }
     }
     total / count
 }
 
-/// 円を1つ描く。縁を1ピクセル分ぼかしてジャギーを消す。
-fn draw_dot(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
+/// 描画する1つのドット。位置はサブピクセル精度で持つ。
+#[derive(Debug, Clone, Copy)]
+struct Dot {
     center_x: f32,
     center_y: f32,
     radius: f32,
     value: f32,
-) {
-    let min_x = (center_x - radius - 1.0).floor().max(0.0) as usize;
-    let min_y = (center_y - radius - 1.0).floor().max(0.0) as usize;
-    let max_x = (center_x + radius + 1.0).ceil().clamp(0.0, width as f32) as usize;
-    let max_y = (center_y + radius + 1.0).ceil().clamp(0.0, height as f32) as usize;
+}
+
+/// 円を1つ描く。縁を1ピクセル分ぼかしてジャギーを消す。
+/// 端の余分な1列がグリッドの外へはみ出さないよう、`bounds` で切り取る。
+fn draw_dot(canvas: &mut [u8], width: u32, height: u32, bounds: GridBounds, dot: Dot) {
+    let clip_left = bounds.x.max(0) as f32;
+    let clip_top = bounds.y.max(0) as f32;
+    let clip_right = ((bounds.x + bounds.width) as f32).min(width as f32);
+    let clip_bottom = ((bounds.y + bounds.height) as f32).min(height as f32);
+
+    let min_x = (dot.center_x - dot.radius - 1.0).floor().max(clip_left) as usize;
+    let min_y = (dot.center_y - dot.radius - 1.0).floor().max(clip_top) as usize;
+    let max_x = (dot.center_x + dot.radius + 1.0)
+        .ceil()
+        .clamp(clip_left, clip_right) as usize;
+    let max_y = (dot.center_y + dot.radius + 1.0)
+        .ceil()
+        .clamp(clip_top, clip_bottom) as usize;
 
     for y in min_y..max_y {
         for x in min_x..max_x {
-            let dx = x as f32 + 0.5 - center_x;
-            let dy = y as f32 + 0.5 - center_y;
+            let dx = x as f32 + 0.5 - dot.center_x;
+            let dy = y as f32 + 0.5 - dot.center_y;
             let distance = (dx * dx + dy * dy).sqrt();
-            let coverage = (radius + EDGE_FEATHER_PIXELS - distance).clamp(0.0, 1.0);
+            let coverage = (dot.radius + EDGE_FEATHER_PIXELS - distance).clamp(0.0, 1.0);
             if coverage <= 0.0 {
                 continue;
             }
             let offset = (y * width as usize + x) * BYTES_PER_PIXEL;
-            let pixel = premultiplied_argb8888(DOT_RED, DOT_GREEN, DOT_BLUE, value * coverage);
+            let pixel =
+                premultiplied_argb8888(DOT_RED, DOT_GREEN, DOT_BLUE, dot.value * coverage);
             canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
         }
     }
@@ -238,7 +262,7 @@ mod tests {
         let mut canvas = vec![0u8; 384 * 384 * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), (0, 0), &mut canvas, 384, 384);
+        grid.draw(field.view(), (0.0, 0.0), &mut canvas, 384, 384);
 
         // Assert
         assert!(canvas.iter().all(|&byte| byte == 0));
@@ -267,7 +291,7 @@ mod tests {
         let mut canvas = vec![0u8; surface_size * surface_size * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), (0, 0), &mut canvas, surface_size as u32, surface_size as u32);
+        grid.draw(field.view(), (0.0, 0.0), &mut canvas, surface_size as u32, surface_size as u32);
 
         // Assert: セル境界(x=12)より右には染み出さない
         let cell_size = surface_size / 32;
@@ -276,5 +300,83 @@ mod tests {
         assert_eq!(canvas[outside + 3], 0, "dot must not bleed into the next cell");
         let inside = (row_offset + cell_size / 2) * BYTES_PER_PIXEL;
         assert_ne!(canvas[inside + 3], 0, "dot must cover its own cell center");
+    }
+    /// 不透明ピクセルの重心を求める。描画位置の検証に使う。
+    fn drawn_centroid(canvas: &[u8], width: usize) -> (f32, f32) {
+        let (mut x_total, mut y_total, mut weight) = (0.0, 0.0, 0.0);
+        for (index, pixel) in canvas.chunks_exact(BYTES_PER_PIXEL).enumerate() {
+            let alpha = pixel[3] as f32;
+            if alpha == 0.0 {
+                continue;
+            }
+            x_total += (index % width) as f32 * alpha;
+            y_total += (index / width) as f32 * alpha;
+            weight += alpha;
+        }
+        (x_total / weight, y_total / weight)
+    }
+
+    #[test]
+    fn a_fractional_origin_shifts_the_dots_by_a_sub_cell_amount() {
+        // Arrange: 1セルだけ点灯させた場を、原点を 0.0 と 0.5 で描き比べる
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if x == 16 && y == 16 { 1.0 } else { 0.0 });
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let cell_size = (surface / 32) as f32;
+
+        // Act
+        let mut aligned = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+        grid.draw(field.view(), (0.0, 0.0), &mut aligned, surface as u32, surface as u32);
+        let mut shifted = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+        grid.draw(field.view(), (0.5, 0.0), &mut shifted, surface as u32, surface as u32);
+
+        // Assert: 原点を半セル進めるとドットは半セルぶん左へ動く。
+        // 整数に丸める実装では両者が一致してしまい、これが揺れの原因になっていた
+        let (aligned_x, aligned_y) = drawn_centroid(&aligned, surface);
+        let (shifted_x, shifted_y) = drawn_centroid(&shifted, surface);
+        let moved = aligned_x - shifted_x;
+        assert!(
+            (moved - cell_size / 2.0).abs() < 0.5,
+            "expected a half-cell shift ({}), got {moved}",
+            cell_size / 2.0
+        );
+        assert!((aligned_y - shifted_y).abs() < 0.01, "y must not move");
+    }
+
+    #[test]
+    fn dots_never_spill_outside_the_grid_bounds() {
+        // Arrange: 場を全点灯させ、原点をずらして端の余分な1列を描かせる
+        let mut field = Field::new(32, 32);
+        field.map(|_x, _y, _value| 1.0);
+        let grid = DotGrid::new(32, 32);
+        // 横長のサーフェスにすると、グリッドの左右に余白ができる
+        let (surface_width, surface_height) = (512usize, 384usize);
+        let mut canvas = vec![0u8; surface_width * surface_height * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw(
+            field.view(),
+            (0.5, 0.5),
+            &mut canvas,
+            surface_width as u32,
+            surface_height as u32,
+        );
+
+        // Assert: グリッドは中央 384px。その外側は透過のままでなければならない
+        let bounds = grid.bounds(surface_width as u32, surface_height as u32);
+        for y in 0..surface_height {
+            for x in 0..surface_width {
+                let inside = (x as i32) >= bounds.x
+                    && (x as i32) < bounds.x + bounds.width
+                    && (y as i32) >= bounds.y
+                    && (y as i32) < bounds.y + bounds.height;
+                if inside {
+                    continue;
+                }
+                let alpha = canvas[(y * surface_width + x) * BYTES_PER_PIXEL + 3];
+                assert_eq!(alpha, 0, "dot spilled outside the grid at ({x}, {y})");
+            }
+        }
     }
 }

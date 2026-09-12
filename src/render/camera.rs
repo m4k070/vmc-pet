@@ -11,16 +11,20 @@ use crate::body::FieldView;
 /// これ以下の総量しかない場では重心を定めない(原点を据え置く)。
 const NEGLIGIBLE_MASS: f32 = 1e-6;
 
-/// 表示の原点。画面左上のドットに対応する場のセルを指す。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 表示の原点。画面左上のドットに対応する場の座標を、小数のまま保持する。
+///
+/// 整数に丸めてしまうと、生物の実位置と表示位置の差が ±0.5 セル(=ドット1個分)の
+/// のこぎり波になって現れ、毎秒数回の揺れとして見える。生物自身の動きは滑らかで
+/// (等速直線への残差 RMS 0.017 セル)、揺れはすべて丸めが作っていた。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
-    x: usize,
-    y: usize,
+    x: f32,
+    y: f32,
 }
 
 impl Camera {
     pub fn new() -> Self {
-        Self { x: 0, y: 0 }
+        Self { x: 0.0, y: 0.0 }
     }
 
     /// 場の重心が表示の中央に来るよう原点を更新する。
@@ -34,7 +38,8 @@ impl Camera {
     }
 
     /// 画面左上に対応する場の座標。
-    pub fn origin(&self) -> (usize, usize) {
+    /// 整数部がどのセルから読むかを、小数部がドットをずらす量を決める。
+    pub fn origin(&self) -> (f32, f32) {
         (self.x, self.y)
     }
 }
@@ -46,9 +51,8 @@ impl Default for Camera {
 }
 
 /// 重心を表示中央に置くための原点を、場の範囲へ折り返して求める。
-fn wrap_origin(centre: f32, visible: usize, field_size: usize) -> usize {
-    let origin = centre.round() as i32 - visible as i32 / 2;
-    origin.rem_euclid(field_size as i32) as usize
+fn wrap_origin(centre: f32, visible: usize, field_size: usize) -> f32 {
+    (centre - visible as f32 / 2.0).rem_euclid(field_size as f32)
 }
 
 /// トーラス上の重心を円周平均で求める。
@@ -154,9 +158,9 @@ mod tests {
 
         // Assert: 原点から見て塊が画面中央付近に来る
         let (origin_x, origin_y) = camera.origin();
-        let centre_on_screen = (31.5 - origin_x as f32).rem_euclid(32.0);
+        let centre_on_screen = (31.5 - origin_x).rem_euclid(32.0);
         assert!(
-            (centre_on_screen - 16.0).abs() <= 1.0,
+            (centre_on_screen - 16.0).abs() <= 0.5,
             "block sits at {centre_on_screen} instead of the middle"
         );
         assert_eq!(
@@ -179,5 +183,20 @@ mod tests {
 
         // Assert
         assert_eq!(camera.origin(), before);
+    }
+
+    #[test]
+    fn origin_keeps_the_sub_cell_part_of_the_centroid() {
+        // Arrange: 重心が 11.5 に来る塊。原点は 11.5 - 16 = -4.5 → 折り返して 27.5
+        let field = field_with_block(32, 10, 10, 4);
+        let mut camera = Camera::new();
+
+        // Act
+        camera.follow(field.view(), 32, 32);
+
+        // Assert: 整数に丸められていないこと。丸めると ±0.5 セルの揺れになる
+        let (x, _y) = camera.origin();
+        assert!((x - 27.5).abs() < 0.05, "got {x}");
+        assert!(x.fract() != 0.0, "the sub-cell part must survive");
     }
 }
