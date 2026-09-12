@@ -1,0 +1,48 @@
+# この crate は vmc-pet 本体のワークスペースには含めない。
+# ESP32-S3(Xtensa)向けの no_std ターゲットで、rustup 管理下の別ツールチェーン
+# (`rust-toolchain.toml` で channel="esp" を指定、espup が用意する)を使うため。
+# デスクトップ版の `cargo build`/`cargo test` に巻き込まれないよう、
+# 空の [workspace] を置いて親のワークスペースから独立させている。
+[workspace]
+
+[package]
+name = "vmc-pet-cores3"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[[bin]]
+name = "vmc-pet-cores3"
+path = "./src/bin/main.rs"
+
+[dependencies]
+vmc-pet-body = { path = "../crates/vmc-pet-body", default-features = false }
+
+esp-hal = { version = "~1.1.0", features = [
+    "esp32s3",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = [
+    "esp32s3",
+] }
+esp-println = { version = "0.17.0", features = [
+    "esp32s3",
+] }
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-alloc = "0.10.0"
+critical-section = "1.2.0"
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1       # LLVM can perform better optimizations using a single thread
+debug = 2               # prefer slower builds but better debugging experience
+lto = 'fat'
+opt-level = 's'
