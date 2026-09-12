@@ -3,6 +3,8 @@
 //! niri はスクロール型タイリングのため通常の xdg-toplevel はタイル配置される。
 //! 「透過・枠なし・最前面」を満たせるのは layer-shell surface のみ。
 
+use std::time::{Duration, Instant};
+
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
@@ -45,6 +47,8 @@ const BYTES_PER_PIXEL: i32 = 4;
 pub struct LayerWindowConfig {
     pub width: u32,
     pub height: u32,
+    /// 描画レート。場の更新レート(step_rate)とは意図的に分離する。
+    pub render_fps: u32,
     /// 画面端からのマージン(論理ピクセル)。
     pub margin_right: i32,
     pub margin_bottom: i32,
@@ -55,6 +59,7 @@ impl Default for LayerWindowConfig {
         Self {
             width: 384,
             height: 384,
+            render_fps: 30,
             margin_right: 32,
             margin_bottom: 32,
         }
@@ -75,6 +80,9 @@ pub struct LayerWindow {
 
     width: u32,
     height: u32,
+    /// 1フレームに与える最小間隔。コンポジタのリフレッシュレートより粗く描く。
+    frame_interval: Duration,
+    last_draw: Instant,
     /// compositor から最初の configure を受け取るまで描画しない。
     configured: bool,
     should_exit: bool,
@@ -130,6 +138,9 @@ impl LayerWindow {
             pool,
             width: config.width,
             height: config.height,
+            frame_interval: frame_interval(config.render_fps),
+            // 初回 configure での描画を待たせないよう、十分に過去の時刻から始める
+            last_draw: Instant::now() - frame_interval(config.render_fps),
             configured: false,
             should_exit: false,
             applied_input_region: None,
@@ -145,8 +156,16 @@ impl LayerWindow {
         Ok(())
     }
 
+    /// 描画せずに次のフレームコールバックだけを要求する。
+    fn request_frame(&self, qh: &QueueHandle<Self>) {
+        let surface = self.layer.wl_surface();
+        surface.frame(qh, surface.clone());
+        surface.commit();
+    }
+
     /// 体に1フレーム描かせ、次のフレームコールバックを要求する。
     fn draw(&mut self, qh: &QueueHandle<Self>) {
+        self.last_draw = Instant::now();
         let stride = self.width as i32 * BYTES_PER_PIXEL;
         let (buffer, canvas) = match self.pool.create_buffer(
             self.width as i32,
@@ -206,6 +225,25 @@ impl LayerWindow {
         };
         self.body.on_pointer(input);
     }
+}
+
+/// 描画機会(vblank)は離散的にしか訪れないため、間隔判定には許容幅を持たせる。
+/// 許容幅がないと、60Hz のディスプレイで 30fps を狙ったときに閾値(33.33ms)と
+/// vblank 2回分(33.34ms)がほぼ一致し、わずかなジッタで1フレーム落ちて実測 24fps まで下がる。
+const FRAME_INTERVAL_TOLERANCE_DIVISOR: u32 = 8;
+
+/// 前回の描画から `elapsed` 経過した時点で、今フレームを描くべきかを判定する。
+fn should_draw(elapsed: Duration, frame_interval: Duration) -> bool {
+    elapsed + frame_interval / FRAME_INTERVAL_TOLERANCE_DIVISOR >= frame_interval
+}
+
+/// 描画レートから1フレームあたりの最小間隔を求める。
+/// 0 fps を指定された場合はコンポジタのリフレッシュレートに任せる。
+fn frame_interval(render_fps: u32) -> Duration {
+    if render_fps == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs_f64(1.0 / render_fps as f64)
 }
 
 /// layer-shell サーフェスの生成に失敗する原因。
@@ -291,6 +329,11 @@ impl CompositorHandler for LayerWindow {
         _time: u32,
     ) {
         if !self.configured {
+            return;
+        }
+        if !should_draw(self.last_draw.elapsed(), self.frame_interval) {
+            // まだ描画時刻ではない。次のコールバックだけ要求して待つ
+            self.request_frame(qh);
             return;
         }
         self.draw(qh);
@@ -423,3 +466,44 @@ delegate_registry!(LayerWindow);
 
 // wl_region はイベントを持たないため、ディスパッチ先を用意するだけでよい
 delegate_noop!(LayerWindow: ignore wl_region::WlRegion);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 60Hz のディスプレイで 30fps を狙う場合の1フレーム分の間隔。
+    const VBLANK_60HZ: Duration = Duration::from_micros(16_667);
+
+    #[test]
+    fn should_draw_skips_a_single_vblank_but_accepts_two() {
+        // Arrange: 30fps 目標 = 33.33ms 間隔
+        let interval = frame_interval(30);
+
+        // Act / Assert
+        assert!(!should_draw(VBLANK_60HZ, interval), "1 vblank is too early");
+        assert!(should_draw(VBLANK_60HZ * 2, interval), "2 vblanks must draw");
+    }
+
+    #[test]
+    fn should_draw_tolerates_jitter_around_the_threshold() {
+        // Arrange: vblank 2回分が閾値をわずかに下回るケース
+        let interval = frame_interval(30);
+        let jittered = interval - Duration::from_micros(500);
+
+        // Act
+        let draws = should_draw(jittered, interval);
+
+        // Assert: 許容幅がないとここで1フレーム落ちて実測 24fps になる
+        assert!(draws, "a sub-millisecond shortfall must not drop the frame");
+    }
+
+    #[test]
+    fn should_draw_always_draws_when_the_rate_is_unlimited() {
+        // Arrange: render_fps 0 はコンポジタ任せを意味する
+        let interval = frame_interval(0);
+
+        // Act / Assert
+        assert_eq!(interval, Duration::ZERO);
+        assert!(should_draw(Duration::ZERO, interval));
+    }
+}
