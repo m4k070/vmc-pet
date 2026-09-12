@@ -1,5 +1,7 @@
 //! 体の場。値域を 0.0..=1.0 に正規化して保持する。
 
+use super::animal::Pattern;
+
 /// 場のセルが取りうる値の範囲。
 const MIN_CELL_VALUE: f32 = 0.0;
 const MAX_CELL_VALUE: f32 = 1.0;
@@ -21,15 +23,32 @@ impl Field {
         }
     }
 
-    /// 全セルを `next` の返り値で置き換える。
-    /// 値域の不変条件はここで守るため、`next` 側は clamp しなくてよい。
-    pub fn fill_with(&mut self, next: impl Fn(usize, usize) -> f32) {
+    /// 全セルを `next` の返り値で置き換える。`next` は現在の値を受け取る。
+    /// 値域の不変条件はここで守るため、呼び出し側は clamp しなくてよい。
+    pub fn map(&mut self, next: impl Fn(usize, usize, f32) -> f32) {
         for y in 0..self.height {
             for x in 0..self.width {
-                self.cells[y * self.width + x] =
-                    next(x, y).clamp(MIN_CELL_VALUE, MAX_CELL_VALUE);
+                let index = y * self.width + x;
+                self.cells[index] =
+                    next(x, y, self.cells[index]).clamp(MIN_CELL_VALUE, MAX_CELL_VALUE);
             }
         }
+    }
+
+    /// 生物のパターンを場の中央に配置する。既存の値は上書きする。
+    pub fn place_centered(&mut self, pattern: &Pattern) {
+        let left = self.width.saturating_sub(pattern.width()) / 2;
+        let top = self.height.saturating_sub(pattern.height()) / 2;
+        self.map(|x, y, value| {
+            if x < left || y < top {
+                return value;
+            }
+            let inside = x - left < pattern.width() && y - top < pattern.height();
+            if !inside {
+                return value;
+            }
+            pattern.get(x - left, y - top)
+        });
     }
 
     /// 読み取り専用ビューを返す。内部の Vec は外へ出さない。
@@ -74,12 +93,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fill_with_clamps_values_into_the_normalized_range() {
+    fn map_clamps_values_into_the_normalized_range() {
         // Arrange
         let mut field = Field::new(2, 2);
 
         // Act: 値域外を返す関数を渡す
-        field.fill_with(|x, _y| if x == 0 { -5.0 } else { 5.0 });
+        field.map(|x, _y, _value| if x == 0 { -5.0 } else { 5.0 });
 
         // Assert
         let view = field.view();
@@ -88,10 +107,25 @@ mod tests {
     }
 
     #[test]
+    fn map_receives_the_current_value() {
+        // Arrange
+        let mut field = Field::new(2, 1);
+        field.map(|x, _y, _value| x as f32 * 0.5);
+
+        // Act
+        field.map(|_x, _y, value| value + 0.25);
+
+        // Assert
+        let view = field.view();
+        assert_eq!(view.get(0, 0), 0.25);
+        assert_eq!(view.get(1, 0), 0.75);
+    }
+
+    #[test]
     fn get_returns_zero_outside_the_field() {
         // Arrange
         let mut field = Field::new(2, 2);
-        field.fill_with(|_x, _y| 1.0);
+        field.map(|_x, _y, _value| 1.0);
 
         // Act
         let view = field.view();
@@ -101,17 +135,4 @@ mod tests {
         assert_eq!(view.get(0, 2), 0.0);
     }
 
-    #[test]
-    fn fill_with_receives_every_coordinate_once() {
-        // Arrange
-        let mut field = Field::new(3, 2);
-
-        // Act: 座標を値に符号化して全セルに行き渡ることを確かめる
-        field.fill_with(|x, y| (y * 3 + x) as f32 / 10.0);
-
-        // Assert
-        let view = field.view();
-        assert_eq!(view.get(0, 0), 0.0);
-        assert!((view.get(2, 1) - 0.5).abs() < f32::EPSILON);
-    }
 }

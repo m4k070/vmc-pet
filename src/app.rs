@@ -1,72 +1,97 @@
-//! 体のプレースホルダ。場をダミー波形で満たして描画経路を確かめる。
-//! step 3 で `fill_with` の中身を Lenia の更新規則に差し替える。
+//! Lenia の場を体として持つペット本体。
+//! 場の更新レートと描画レートを分離し、描画時に経過分だけステップを進める。
 
-use std::f32::consts::TAU;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::body::Field;
+use crate::body::{load_animal, Field, Lenia};
 use crate::render::DotGrid;
 use crate::shell::{InputRegion, PointerInput, Surface};
 
-/// 場の解像度。Lenia の kernel radius R=12 を成立させるため表示より高くとる。
-const FIELD_WIDTH: usize = 96;
-const FIELD_HEIGHT: usize = 96;
+/// 場の解像度。Orbium は R=13 で 20x20 なので、64x64 あれば十分に動き回れる。
+const FIELD_WIDTH: usize = 64;
+const FIELD_HEIGHT: usize = 64;
 
 /// 表示解像度。場を平均プーリングで落として描く。
 const GRID_COLUMNS: usize = 32;
 const GRID_ROWS: usize = 32;
 
-/// ダミー波形の形状。step 3 で Lenia に置き換わる暫定値。
-const WAVE_PERIOD_CELLS: f32 = 22.0;
-const WAVE_SPEED_RADIANS_PER_SEC: f32 = 2.4;
+/// 起動時に読み込む生物。assets/animals.json のコードを指す。
+const INITIAL_ANIMAL_CODE: &str = "O2u";
 
-/// 通常時と、ポインタが触れているときの波の振幅。
-const IDLE_AMPLITUDE: f32 = 0.55;
-const TOUCHED_AMPLITUDE: f32 = 1.0;
+/// 場を進める頻度。描画レートとは独立に決める。
+const STEPS_PER_SECOND: u32 = 15;
 
-/// 場の中心からの減衰が 0 になる距離の、場の半径に対する割合。
-/// DESIGN.md の周辺減衰(生物を画面外へ逃がさない境界条件)の先取り。
-const FALLOFF_RADIUS_RATIO: f32 = 0.95;
+/// 1回の描画でまとめて進めるステップ数の上限。
+/// 復帰直後など大きく遅れた場合に、追いつこうとして固まるのを防ぐ。
+const MAX_CATCH_UP_STEPS: u32 = 4;
 
-/// ポインタが体に触れているか。step 4 で Touch enum に発展させる。
+/// Lenia の場を体として持つペット。
 pub struct Pet {
     field: Field,
+    lenia: Lenia,
     grid: DotGrid,
-    started_at: Instant,
-    is_touched: bool,
+    step_interval: Duration,
+    last_step: Instant,
 }
 
 impl Pet {
-    pub fn new() -> Self {
-        Self {
-            field: Field::new(FIELD_WIDTH, FIELD_HEIGHT),
+    /// 生物を読み込んで場の中央に配置する。
+    /// 生物データは実行ファイルに埋め込んであるため、読み込みに失敗するのは
+    /// データが壊れている場合だけで、その場合は起動を止める。
+    pub fn new() -> Result<Self, PetError> {
+        let animal = load_animal(INITIAL_ANIMAL_CODE).map_err(PetError::Animal)?;
+        eprintln!(
+            "vmc-pet: loaded {} ({}) R={} T={}",
+            animal.name, animal.code, animal.params.radius, animal.params.time_divisor
+        );
+
+        let mut field = Field::new(FIELD_WIDTH, FIELD_HEIGHT);
+        field.place_centered(&animal.pattern);
+
+        Ok(Self {
+            field,
+            lenia: Lenia::new(animal.params),
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
-            started_at: Instant::now(),
-            is_touched: false,
-        }
+            step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
+            last_step: Instant::now(),
+        })
     }
 
-    fn amplitude(&self) -> f32 {
-        if self.is_touched {
-            return TOUCHED_AMPLITUDE;
+    /// 前回のステップからの経過分だけ場を進める。
+    fn advance(&mut self, now: Instant) {
+        let mut steps = 0;
+        while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
+        {
+            self.lenia.step(&mut self.field);
+            self.last_step += self.step_interval;
+            steps += 1;
         }
-        IDLE_AMPLITUDE
+        if steps == MAX_CATCH_UP_STEPS {
+            // 追いつけなかった分は捨てる
+            self.last_step = now;
+        }
     }
 }
 
-impl Default for Pet {
-    fn default() -> Self {
-        Self::new()
+/// ペットを起動できない原因。
+#[derive(Debug)]
+pub enum PetError {
+    Animal(crate::body::animal::AnimalError),
+}
+
+impl std::fmt::Display for PetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Animal(e) => write!(f, "failed to load the initial animal: {e}"),
+        }
     }
 }
+
+impl std::error::Error for PetError {}
 
 impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
-        let elapsed = self.started_at.elapsed().as_secs_f32();
-        let amplitude = self.amplitude();
-        self.field
-            .fill_with(|x, y| dummy_wave(x, y, elapsed, amplitude));
-
+        self.advance(Instant::now());
         canvas.fill(0);
         self.grid.draw(self.field.view(), canvas, width, height);
     }
@@ -82,42 +107,14 @@ impl Surface for Pet {
     }
 
     fn on_pointer(&mut self, input: PointerInput) {
+        // step 4 でここから場への摂動注入につなぐ
         match input {
-            PointerInput::Entered { x, y } => {
-                eprintln!("vmc-pet: pointer entered at ({x:.1}, {y:.1})");
-                self.is_touched = true;
-            }
-            PointerInput::Moved { .. } => {
-                self.is_touched = true;
-            }
             PointerInput::Pressed { x, y } => {
                 eprintln!("vmc-pet: pointer pressed at ({x:.1}, {y:.1})");
-                self.is_touched = true;
             }
-            PointerInput::Left => {
-                eprintln!("vmc-pet: pointer left");
-                self.is_touched = false;
-            }
+            PointerInput::Entered { .. } | PointerInput::Moved { .. } | PointerInput::Left => {}
         }
     }
-}
-
-/// 中心から広がる同心円状の進行波。周縁は減衰させて丸い塊に見せる。
-/// 時刻だけに依存する純粋関数なので、描画レートを変えても見た目の速度は変わらない。
-fn dummy_wave(x: usize, y: usize, elapsed_secs: f32, amplitude: f32) -> f32 {
-    let center_x = FIELD_WIDTH as f32 / 2.0;
-    let center_y = FIELD_HEIGHT as f32 / 2.0;
-    let dx = x as f32 + 0.5 - center_x;
-    let dy = y as f32 + 0.5 - center_y;
-    let distance = (dx * dx + dy * dy).sqrt();
-
-    let phase = distance / WAVE_PERIOD_CELLS * TAU - elapsed_secs * WAVE_SPEED_RADIANS_PER_SEC;
-    let wave = 0.5 + 0.5 * phase.cos();
-
-    let falloff_radius = center_x.min(center_y) * FALLOFF_RADIUS_RATIO;
-    let falloff = (1.0 - distance / falloff_radius).clamp(0.0, 1.0);
-
-    wave * falloff * amplitude
 }
 
 #[cfg(test)]
@@ -125,37 +122,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dummy_wave_stays_within_the_normalized_range() {
-        // Arrange
-        let samples = [(0, 0), (48, 48), (95, 95), (10, 80)];
-
-        // Act / Assert
-        for elapsed in [0.0, 0.37, 5.0] {
-            for (x, y) in samples {
-                let value = dummy_wave(x, y, elapsed, TOUCHED_AMPLITUDE);
-                assert!(
-                    (0.0..=1.0).contains(&value),
-                    "value {value} out of range at ({x}, {y}) t={elapsed}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn dummy_wave_is_zero_at_the_field_corners() {
-        // Arrange: 隅は減衰半径の外側にある
-
-        // Act
-        let value = dummy_wave(0, 0, 1.0, TOUCHED_AMPLITUDE);
-
-        // Assert
-        assert_eq!(value, 0.0);
-    }
-
-    #[test]
     fn input_region_matches_the_drawn_grid() {
         // Arrange
-        let pet = Pet::new();
+        let pet = Pet::new().unwrap();
 
         // Act
         let region = pet.input_region(384, 384);
@@ -165,5 +134,34 @@ mod tests {
         assert_eq!(region.y, 0);
         assert_eq!(region.width, 384);
         assert_eq!(region.height, 384);
+    }
+
+    #[test]
+    fn advance_runs_one_step_per_interval() {
+        // Arrange
+        let mut pet = Pet::new().unwrap();
+        let start = pet.last_step;
+        let interval = pet.step_interval;
+
+        // Act: 2間隔分だけ時刻を進める
+        pet.advance(start + interval * 2);
+
+        // Assert
+        assert_eq!(pet.last_step, start + interval * 2);
+    }
+
+    #[test]
+    fn advance_drops_the_backlog_when_it_falls_too_far_behind() {
+        // Arrange
+        let mut pet = Pet::new().unwrap();
+        let start = pet.last_step;
+        let interval = pet.step_interval;
+
+        // Act: 上限を超える遅れを与える
+        let now = start + interval * (MAX_CATCH_UP_STEPS + 10);
+        pet.advance(now);
+
+        // Assert: 追いつきを諦めて現在時刻に合わせる
+        assert_eq!(pet.last_step, now);
     }
 }

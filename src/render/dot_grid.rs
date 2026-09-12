@@ -199,7 +199,7 @@ mod tests {
     fn pool_cell_averages_the_matching_field_block() {
         // Arrange: 96x96 の場を 32x32 に落とすと 1セル = 3x3 ブロック
         let mut field = Field::new(96, 96);
-        field.fill_with(|x, y| if x < 3 && y < 3 { 1.0 } else { 0.0 });
+        field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
 
         // Act
         let first = pool_cell(field.view(), 32, 32, 0, 0);
@@ -228,7 +228,7 @@ mod tests {
     fn draw_keeps_dots_inside_their_own_cell() {
         // Arrange: 1セルだけ最大値にする
         let mut field = Field::new(96, 96);
-        field.fill_with(|x, y| if x < 3 && y < 3 { 1.0 } else { 0.0 });
+        field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
         let grid = DotGrid::new(32, 32);
         let surface_size = 384;
         let mut canvas = vec![0u8; surface_size * surface_size * BYTES_PER_PIXEL];
