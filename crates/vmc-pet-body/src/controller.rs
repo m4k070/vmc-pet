@@ -13,6 +13,25 @@
 
 use crate::{CellPos, FieldView, Perturbation};
 
+/// コントローラが行動を決めるときに見るもの。
+///
+/// 当初は場(`FieldView`)だけを渡していた。そのためコントローラは「どう扱われて
+/// きたか」を知らず、世話のされ方が振る舞いに出るのは間接的な物理
+/// (エネルギー → growth_scale → 場の力学)経由だけだった。
+/// 読み取りやすさ(`fitness::legibility`)を上げるには、状態に応じて振る舞いを
+/// **変える**必要があるため、内部状態もここから渡す。
+///
+/// 位置引数を増やすのではなく構造体にしてあるのは、ロードマップ上この観測を
+/// さらに広げていく前提があるためと、`maybe_act(field, 0.3)` のような呼び出しが
+/// 何を渡しているのか読めなくなるのを避けるため。
+#[derive(Debug, Clone, Copy)]
+pub struct Observation<'a> {
+    /// 体の場。形の歪みを見るのに使う。
+    pub field: FieldView<'a>,
+    /// 気分状態(0.0..=1.0)。世話され続けていれば高く、放置されると尽きる。
+    pub energy: f32,
+}
+
 /// コントローラの挙動を決める定数一式。
 ///
 /// 元々はモジュール内の定数として直接埋め込んでいたが、パラメータ探索
@@ -54,6 +73,19 @@ pub struct ControllerParams {
     pub nudge_amount: f32,
     /// 重心から自己摂動の位置までの距離(セル)。
     pub nudge_offset_cells: f32,
+    /// エネルギー(気分)が尽きているときに、自己摂動の強さを何倍にするか。
+    ///
+    /// 1.0 なら状態に関係なく同じ強さ(観測にエネルギーを加える前の挙動)、
+    /// 0.0 なら尽きたときは何もしない。元気なときほど活発に、弱ると静かに
+    /// なるので、世話のされ方が見て分かるようになる
+    /// (`fitness::legibility` で測る)。
+    ///
+    /// 同時に安全側にも働く。以前、自己摂動を一律に強めようとして崖に
+    /// ぶつかった(docs/DESIGN.md「丸めで崩壊が反転した」)が、そのとき
+    /// 危ないのは成長が弱まった状態で繰り返し揺らす場合だった。強さを
+    /// エネルギーに連動させると、**体が自己修復できる状態のときだけ強く
+    /// 揺らす**ことになる。
+    pub nudge_amount_when_depleted: f32,
 }
 
 impl Default for ControllerParams {
@@ -64,6 +96,7 @@ impl Default for ControllerParams {
             nudge_radius_cells: 4.7612,
             nudge_amount: 0.0239,
             nudge_offset_cells: 4.2958,
+            nudge_amount_when_depleted: 0.25,
         }
     }
 }
@@ -90,7 +123,8 @@ impl AutonomousController {
 
     /// 体が1ステップ進むたびに呼ぶ。判断のタイミングでないか、偏りが閾値未満
     /// なら `None`(何もしない)。
-    pub fn maybe_act(&mut self, field: FieldView<'_>) -> Option<Perturbation> {
+    pub fn maybe_act(&mut self, observation: Observation<'_>) -> Option<Perturbation> {
+        let Observation { field, energy } = observation;
         self.steps_since_last_evaluation += 1;
         if self.steps_since_last_evaluation < self.params.evaluate_every_steps {
             return None;
@@ -118,13 +152,18 @@ impl AutonomousController {
             height,
         );
 
+        // 元気なほど強く、弱るほど控えめに揺らす。これが「観測から行動への
+        // 小さな式」の最初の1本で、状態に応じて振る舞いが変わる唯一の経路。
+        let vigour = self.params.nudge_amount_when_depleted
+            + (1.0 - self.params.nudge_amount_when_depleted) * energy.clamp(0.0, 1.0);
+
         Some(Perturbation {
             at: CellPos {
                 x: target_x as usize,
                 y: target_y as usize,
             },
             radius: self.params.nudge_radius_cells,
-            amount: self.params.nudge_amount,
+            amount: self.params.nudge_amount * vigour,
         })
     }
 }
@@ -192,6 +231,15 @@ fn skewness(third_moment: f32, variance: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::Field;
+
+    /// 満タンのエネルギーで場を観測する。強さへの影響を見たいテストだけが
+    /// エネルギーを変える。
+    fn observing(field: &Field) -> Observation<'_> {
+        Observation {
+            field: field.view(),
+            energy: 1.0,
+        }
+    }
 
     /// 重さの違う2点(本体・尾に見立てる)だけを持つ、はっきり歪んだ場を作る。
     ///
@@ -261,7 +309,7 @@ mod tests {
 
         // Act / Assert
         for _ in 0..(ControllerParams::default().evaluate_every_steps * 3) {
-            assert!(controller.maybe_act(field.view()).is_none());
+            assert!(controller.maybe_act(observing(&field)).is_none());
         }
     }
 
@@ -274,12 +322,49 @@ mod tests {
         // Act: 判定のタイミングまで進める
         let mut perturbation = None;
         for _ in 0..ControllerParams::default().evaluate_every_steps {
-            perturbation = controller.maybe_act(field.view());
+            perturbation = controller.maybe_act(observing(&field));
         }
 
         // Assert: 何かに向けて軽く注入する
         let perturbation = perturbation.expect("a strongly lopsided field must trigger a nudge");
         assert!(perturbation.amount > 0.0);
+    }
+
+    /// 指定したエネルギーで、1回ぶんの自己摂動を取り出す。
+    fn nudge_at_energy(field: &Field, energy: f32) -> Perturbation {
+        let mut controller = AutonomousController::new();
+        let mut perturbation = None;
+        for _ in 0..ControllerParams::default().evaluate_every_steps {
+            perturbation = controller.maybe_act(Observation {
+                field: field.view(),
+                energy,
+            });
+        }
+        perturbation.expect("a strongly lopsided field must trigger a nudge")
+    }
+
+    #[test]
+    fn a_weakened_pet_stirs_itself_more_gently() {
+        // Arrange
+        let field = lopsided_field(32, 32);
+
+        // Act
+        let lively = nudge_at_energy(&field, 1.0);
+        let weary = nudge_at_energy(&field, 0.0);
+
+        // Assert: 弱っているほど控えめに揺らす。これが世話のされ方を
+        // 見て分かるようにする唯一の経路(fitness::legibility で測る)
+        assert!(
+            weary.amount < lively.amount,
+            "a weakened pet must stir itself more gently; lively={} weary={}",
+            lively.amount,
+            weary.amount
+        );
+        // 尽きても完全に止まりはしない(既定では満タン時の4分の1)
+        assert!(weary.amount > 0.0);
+        // 位置と広がりは状態に依らない
+        assert_eq!(weary.at, lively.at);
+        assert_eq!(weary.radius, lively.radius);
     }
 
     #[test]
@@ -290,7 +375,7 @@ mod tests {
 
         // Act / Assert: 間隔に満たない間は何もしない
         for _ in 0..(ControllerParams::default().evaluate_every_steps - 1) {
-            assert!(controller.maybe_act(field.view()).is_none());
+            assert!(controller.maybe_act(observing(&field)).is_none());
         }
     }
 }

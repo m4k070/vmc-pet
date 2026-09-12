@@ -17,7 +17,7 @@
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
     Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, Habituation,
-    LeniaBody, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
+    LeniaBody, Observation, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
 };
 
 /// 自律コントローラが働きかけたことを echo として光らせる強さ。
@@ -102,7 +102,11 @@ impl Pet {
         // 自律コントローラは人間のタッチとは独立に、体の形を見てそれ自体を
         // ならす。`disturb` を通すため、これによってエネルギーは変化しない
         // (`LeniaBody::disturb` のドキュメント参照)。
-        if let Some(perturbation) = self.controller.maybe_act(self.body.observe()) {
+        let observation = Observation {
+            field: self.body.observe(),
+            energy: self.body.energy(),
+        };
+        if let Some(perturbation) = self.controller.maybe_act(observation) {
             self.body.disturb(perturbation);
             // 体への効き目は安全な弱さに保ったまま、echo 側で見えるようにする。
             // 位置と広がりは実際の摂動と同じものを使い、強さだけ差し替える。

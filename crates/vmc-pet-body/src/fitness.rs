@@ -300,7 +300,9 @@ mod tests {
 
     #[test]
     fn orbium_hides_its_condition_much_better_than_s1s() {
-        // Arrange: 既定の生物(O2u)は、放置されても14%ほど遅くなるだけ
+        // Arrange: 既定の生物(O2u)は、放置されても14%ほど遅くなるだけ。
+        // 差の多くは体そのものではなくコントローラ(弱ると控えめに揺らす)が
+        // 作っている
         let orbium = legibility(
             &cared_for_trajectory("O2u", 32, 900),
             &neglected_trajectory("O2u", 32, 900),
@@ -314,11 +316,39 @@ mod tests {
             32,
         );
 
-        // Assert: 指標が人間の見立て(S1sは一目瞭然、Orbiumは分からない)と
-        // 同じ順位をつけること。これが代理指標として使えるかの最低条件
+        // Assert: 指標が人間の見立て(S1sは一目瞭然、Orbiumは体だけでは分から
+        // ない)と同じ順位をつけること。これが代理指標として使えるかの最低条件。
+        //
+        // かつては `scutium > orbium * 2.0` という余裕を持たせていたが、
+        // コントローラがエネルギーを観測して揺らす強さを変えるようになった時点で
+        // O2u 側が意図的に 0.20 → 0.40 まで上がったため、倍率ではなく順位だけを
+        // 見るようにした。倍率を維持するのは「既定の生物の読み取りやすさを
+        // 上げてはいけない」という、目的と逆の制約になってしまう
         assert!(
-            scutium > orbium * 2.0,
+            scutium > orbium,
             "the metric must agree with the eye; orbium={orbium} scutium={scutium}"
+        );
+    }
+
+    #[test]
+    fn the_controller_makes_even_the_best_hider_somewhat_readable() {
+        // Arrange: O2u は体そのものの変化がごく小さい(放置で14%ほど遅くなるだけ)。
+        // 見て分かるかどうかは、コントローラが弱った体を控えめに揺らすかどうかに
+        // かかっている
+
+        // Act
+        let score = legibility(
+            &cared_for_trajectory("O2u", 32, 900),
+            &neglected_trajectory("O2u", 32, 900),
+            32,
+            32,
+        );
+
+        // Assert: 既定の生物で「見ても分からない」水準(0.2以下)に戻っていないこと。
+        // ここが下がったら、世話が振る舞いに現れるという設計目標が退行している
+        assert!(
+            score > 0.3,
+            "the default animal must visibly reflect how it has been treated, got {score}"
         );
     }
 

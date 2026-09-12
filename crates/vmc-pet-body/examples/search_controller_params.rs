@@ -67,6 +67,12 @@ impl Rng {
 
 /// 各パラメータの探索範囲。現在の採用値を含み、明らかに極端すぎる値
 /// (反応が無くなる・逆に暴れすぎる)は除いてある。
+///
+/// `nudge_amount_when_depleted` はここに入れていない。この探索の目的関数は
+/// 「動きの多さ」(`Trajectory::fitness`)で、弱っているときに**動きを抑える**
+/// ことの価値を測れない。入れれば必ず 1.0(=エネルギーに依らず全力)へ押し
+/// やられ、この値の存在意義(世話のされ方を見て分かるようにする)を消してしまう。
+/// この値は `fitness::legibility` で別に評価する。
 struct Bounds {
     evaluate_every_steps: (u32, u32),
     imbalance_threshold: (f32, f32),
@@ -92,6 +98,7 @@ fn random_params(rng: &mut Rng) -> ControllerParams {
         nudge_radius_cells: rng.range_f32(BOUNDS.nudge_radius_cells.0, BOUNDS.nudge_radius_cells.1),
         nudge_amount: rng.range_f32(BOUNDS.nudge_amount.0, BOUNDS.nudge_amount.1),
         nudge_offset_cells: rng.range_f32(BOUNDS.nudge_offset_cells.0, BOUNDS.nudge_offset_cells.1),
+        ..ControllerParams::default()
     }
 }
 
@@ -119,6 +126,7 @@ fn mutate(parent: &ControllerParams, rng: &mut Rng, spread: f32) -> ControllerPa
         nudge_radius_cells: jitter_within(rng, parent.nudge_radius_cells, BOUNDS.nudge_radius_cells),
         nudge_amount: jitter_within(rng, parent.nudge_amount, BOUNDS.nudge_amount),
         nudge_offset_cells: jitter_within(rng, parent.nudge_offset_cells, BOUNDS.nudge_offset_cells),
+        ..*parent
     }
 }
 
@@ -137,6 +145,7 @@ fn as_written_in_source(params: ControllerParams) -> ControllerParams {
         nudge_radius_cells: round4(params.nudge_radius_cells),
         nudge_amount: round4(params.nudge_amount),
         nudge_offset_cells: round4(params.nudge_offset_cells),
+        nudge_amount_when_depleted: round4(params.nudge_amount_when_depleted),
     }
 }
 
