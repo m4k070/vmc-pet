@@ -122,6 +122,24 @@ fn mutate(parent: &ControllerParams, rng: &mut Rng, spread: f32) -> ControllerPa
     }
 }
 
+/// ソースへ書き下すときの精度(小数4桁)に丸める。
+///
+/// これを入れたのは、探索で見つけた候補をそのまま採用しようとして踏んだ
+/// 失敗から。厳密な値(0.32459584 など)は20000ステップ生き延びたのに、
+/// ソースに書くとき小数4桁へ丸めた値(0.3246)では崩壊した。Lenia はカオス系
+/// なので、1e-5 の差でも2万ステップかけて軌跡が発散し、崩壊するかどうかが
+/// 反転する。**評価するのは、実際に出荷する値でなければ意味がない。**
+fn as_written_in_source(params: ControllerParams) -> ControllerParams {
+    let round4 = |value: f32| (value * 10_000.0).round() / 10_000.0;
+    ControllerParams {
+        evaluate_every_steps: params.evaluate_every_steps,
+        imbalance_threshold: round4(params.imbalance_threshold),
+        nudge_radius_cells: round4(params.nudge_radius_cells),
+        nudge_amount: round4(params.nudge_amount),
+        nudge_offset_cells: round4(params.nudge_offset_cells),
+    }
+}
+
 fn evaluate(code: &str, params: ControllerParams, steps: u32) -> f32 {
     let animal = vmc_pet_body::load_animal(code).unwrap();
     let mut pet = Pet::with_controller_params(animal, FIELD_SIZE, FIELD_SIZE, params);
@@ -144,17 +162,21 @@ fn animal_that_collapses(params: ControllerParams) -> Option<String> {
 /// 近傍を揺らした候補のうち、何個が崩壊せずに済むかを数える。
 ///
 /// 実測で、スコアがほとんど同じ(0.6091 / 0.6090 / 0.6088)でパラメータも
-/// よく似た3候補のうち、1つだけが生き延びて2つは崩壊した。つまり最適点の
-/// すぐ隣に崖がある。スコアが最良の「生き残り」を採用するのは、崖のふちに
-/// 立つのと同じで危ない。そこで採用の判断には、点としてのスコアではなく
-/// **近傍ごと安全か**を見る(このプロジェクトが一貫して採ってきた
-/// 「崖から十分離す」方針の延長)。
+/// よく似た3候補のうち、1つだけが生き延びて2つは崩壊した。さらに、生き延びた
+/// 候補もソースに書く精度へ丸めた途端に崩壊した。つまりこの領域では
+/// 「崩壊するかどうか」は、ほぼ確率的な事象として振る舞う(20000ステップの
+/// 間に一度でも崖に触れるか)。1回の長時間実行で無事だったことは、その
+/// パラメータが安全である証拠として弱い。
+///
+/// そこで近傍を多めに叩いて、**崩壊の起こりにくさ**として見る。ここを
+/// 通らない候補は、点として無事でも採用しない
+/// (このプロジェクトが一貫して採ってきた「崖から十分離す」方針の延長)。
 fn neighbourhood_survivors(params: ControllerParams, rng: &mut Rng) -> (u32, u32) {
-    const PROBES: u32 = 6;
+    const PROBES: u32 = 12;
     const PROBE_SPREAD: f32 = 0.05;
     let mut survivors = 0;
     for _ in 0..PROBES {
-        let probe = mutate(&params, rng, PROBE_SPREAD);
+        let probe = as_written_in_source(mutate(&params, rng, PROBE_SPREAD));
         if evaluate("O2u", probe, LONG_EVAL_STEPS) != COLLAPSE_PENALTY {
             survivors += 1;
         }
@@ -204,7 +226,9 @@ fn main() {
 
     println!();
     println!("verifying the top {FINALISTS}: long window -> every animal -> neighbourhood");
+    println!("(候補は、実際にソースへ書く精度=小数4桁へ丸めてから検証する)");
     for (params, short_score) in ranked.iter().take(FINALISTS) {
+        let params = &as_written_in_source(*params);
         let long_score = evaluate("O2u", *params, LONG_EVAL_STEPS);
         if long_score == COLLAPSE_PENALTY {
             println!("  short={short_score:.4} [COLLAPSED on O2u] {params:?}");
