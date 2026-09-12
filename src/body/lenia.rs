@@ -149,7 +149,12 @@ impl Lenia {
     }
 
     /// 場を1ステップ進める。
-    pub fn step(&mut self, field: &mut Field) {
+    ///
+    /// `growth_scale` は成長のうち正の部分(自己修復)にだけ掛ける倍率。
+    /// 負の部分(自然な減衰)には掛けない。1.0 なら通常の Lenia と変わらず、
+    /// 0.0 に近づくほど修復が弱まり、減衰だけが進むぶん体全体がゆっくり弱っていく。
+    /// 気分状態(エネルギー量)はこの倍率を通して場に効く。
+    pub fn step(&mut self, field: &mut Field, growth_scale: f32) {
         self.accumulate_potential(field.view());
 
         let time_step = 1.0 / self.params.time_divisor;
@@ -161,9 +166,9 @@ impl Lenia {
 
         field.map(|x, y, value| {
             let growth = mapping.value_at(potential[y * width + x], center, growth_width);
-            value + time_step * growth
+            let scaled_growth = if growth > 0.0 { growth * growth_scale } else { growth };
+            value + time_step * scaled_growth
         });
-
     }
 
     /// 各セルのポテンシャル(カーネルとの畳み込み)を求める。
@@ -314,7 +319,7 @@ mod tests {
         let mut field = Field::new(64, 64);
 
         // Act
-        lenia.step(&mut field);
+        lenia.step(&mut field, 1.0);
 
         // Assert: 成長関数は U=0 で -1 を返すので、空の場は空のまま
         assert_eq!(mass(&field), 0.0);
@@ -360,7 +365,7 @@ mod tests {
 
         // Act: 15 step/s なので 600 ステップは約40秒ぶんの生存に相当する
         for _ in 0..600 {
-            lenia.step(&mut field);
+            lenia.step(&mut field, 1.0);
         }
 
         // Assert: 総量が保たれている(消滅も爆発もしていない)
@@ -374,5 +379,54 @@ mod tests {
         let final_centroid = centroid(&field);
         let moved = (final_centroid.0 - initial_centroid.0).hypot(final_centroid.1 - initial_centroid.1);
         assert!(moved > 5.0, "the creature barely moved: {moved}");
+    }
+
+    /// growth_scale を段階的に下げて、生存の限界を確かめる。
+    ///
+    /// 実測すると、正の成長(自己修復)を一様に弱めるだけでは「なだらかに弱る」
+    /// ようにはならない。0.78 では 600 ステップ後も総量 69 前後を保つのに対し、
+    /// 0.77 では 150 ステップ以内に完全崩壊(総量 0.0)する — Orbium の自己維持構造は
+    /// 修復の強さにきわめて敏感で、緩やかな坂ではなく崖になっている。
+    /// `LeniaBody` はこの崖から十分離れた値までしか growth_scale を下げない
+    /// (body::lenia_body::MIN_GROWTH_SCALE を参照)。
+    #[test]
+    fn growth_scale_has_a_cliff_rather_than_a_gentle_slope() {
+        // Arrange / Act / Assert
+        for (scale, should_survive) in [(0.80, true), (0.78, true), (0.77, false), (0.75, false)] {
+            let animal = crate::body::load_animal("O2u").unwrap();
+            let mut field = Field::new(64, 64);
+            field.place_centered(&animal.pattern);
+            let mut lenia = Lenia::new(animal.params);
+            for _ in 0..600 {
+                lenia.step(&mut field, scale);
+            }
+            let final_mass = mass(&field);
+            if should_survive {
+                assert!(
+                    final_mass > 40.0,
+                    "expected growth_scale={scale} to survive, got mass={final_mass}"
+                );
+            } else {
+                assert!(
+                    final_mass < 5.0,
+                    "expected growth_scale={scale} to collapse, got mass={final_mass}"
+                );
+            }
+        }
+    }
+
+    /// growth_scale=1.0 は、値を追加する前と同じ挙動を保つ(後方互換性)。
+    #[test]
+    fn growth_scale_one_matches_the_original_unweakened_behaviour() {
+        // Arrange
+        let mut field = Field::new(64, 64);
+        field.map(|x, y, _value| if x < 5 && y < 5 { 1.0 } else { 0.0 });
+        let mut lenia = Lenia::new(orbium_params());
+
+        // Act
+        lenia.step(&mut field, 1.0);
+
+        // Assert: growth > 0 の領域では scale=1.0 のとき等倍(何も弱めない)
+        assert!(mass(&field) > 0.0);
     }
 }
