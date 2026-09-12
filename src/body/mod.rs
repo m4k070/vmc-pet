@@ -7,7 +7,7 @@ pub mod lenia_body;
 pub mod perturbation;
 pub mod port;
 
-pub use animal::{load_animal, Animal};
+pub use animal::{list_animals, load_animal, Animal};
 pub use field::{Field, FieldView};
 pub use lenia::Lenia;
 pub use lenia_body::LeniaBody;

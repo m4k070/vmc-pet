@@ -101,6 +101,18 @@ pub fn load_animal(code: &str) -> Result<Animal, AnimalError> {
     })
 }
 
+/// 埋め込まれた生物の一覧を `(code, name)` で返す。
+/// CLI の `--list-animals` など、選べる生物を人間に提示する場面で使う。
+pub fn list_animals() -> Result<Vec<(String, String)>, AnimalError> {
+    let document: AnimalsDocument =
+        serde_json::from_str(ANIMALS_JSON).map_err(AnimalError::Parse)?;
+    Ok(document
+        .animals
+        .into_iter()
+        .map(|entry| (entry.code, entry.name))
+        .collect())
+}
+
 #[derive(Deserialize)]
 struct AnimalsDocument {
     animals: Vec<AnimalEntry>,
@@ -308,6 +320,33 @@ mod tests {
         assert_eq!(animal.params.kernel_peaks, vec![1.0]);
         assert_eq!(animal.pattern.width(), 20);
         assert_eq!(animal.pattern.height(), 20);
+    }
+
+    #[test]
+    fn list_animals_includes_every_embedded_code() {
+        // Arrange / Act
+        let animals = list_animals().unwrap();
+
+        // Assert
+        assert_eq!(animals.len(), 4, "expected all 4 vendored animals to be listed");
+        assert!(animals.iter().any(|(code, _)| code == "O2u"));
+        for code in ["O2u", "OG2g", "S1s", "2S1v"] {
+            assert!(
+                animals.iter().any(|(c, _)| c == code),
+                "list_animals must include {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_listed_code_actually_loads() {
+        // Arrange
+        let animals = list_animals().unwrap();
+
+        // Act / Assert: 一覧に出す以上、実際に読み込めなければならない
+        for (code, _name) in animals {
+            assert!(load_animal(&code).is_ok(), "listed code {code} must load");
+        }
     }
 
     #[test]
