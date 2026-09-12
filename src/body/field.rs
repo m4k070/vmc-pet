@@ -1,6 +1,7 @@
 //! 体の場。値域を 0.0..=1.0 に正規化して保持する。
 
 use super::animal::Pattern;
+use super::Perturbation;
 
 /// 場のセルが取りうる値の範囲。
 const MIN_CELL_VALUE: f32 = 0.0;
@@ -33,6 +34,41 @@ impl Field {
                     next(x, y, self.cells[index]).clamp(MIN_CELL_VALUE, MAX_CELL_VALUE);
             }
         }
+    }
+
+    /// 摂動を場に注入する。場はトーラスなので、半径が端を越えた分は反対側へ回り込む。
+    pub fn inject(&mut self, perturbation: &Perturbation) {
+        let reach = perturbation.radius.ceil() as i32;
+        if reach <= 0 {
+            return;
+        }
+        let width = self.width as i32;
+        let height = self.height as i32;
+
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let distance = ((dx * dx + dy * dy) as f32).sqrt();
+                let weight = perturbation.weight_at(distance);
+                if weight <= 0.0 {
+                    continue;
+                }
+                let x = (perturbation.at.x as i32 + dx).rem_euclid(width) as usize;
+                let y = (perturbation.at.y as i32 + dy).rem_euclid(height) as usize;
+                let index = y * self.width + x;
+                self.cells[index] = (self.cells[index] + perturbation.amount * weight)
+                    .clamp(MIN_CELL_VALUE, MAX_CELL_VALUE);
+            }
+        }
+    }
+
+    /// 場を空にする。
+    pub fn clear(&mut self) {
+        self.cells.fill(MIN_CELL_VALUE);
+    }
+
+    /// 場の総量。体が生きているかの目安になる。
+    pub fn mass(&self) -> f32 {
+        self.cells.iter().sum()
     }
 
     /// 生物のパターンを場の中央に配置する。既存の値は上書きする。
@@ -135,4 +171,81 @@ mod tests {
         assert_eq!(view.get(0, 2), 0.0);
     }
 
+}
+
+#[cfg(test)]
+mod injection_tests {
+    use super::*;
+    use crate::body::perturbation::CellPos;
+
+    #[test]
+    fn inject_raises_the_centre_most() {
+        // Arrange
+        let mut field = Field::new(16, 16);
+
+        // Act
+        field.inject(&Perturbation {
+            at: CellPos { x: 8, y: 8 },
+            radius: 3.0,
+            amount: 0.5,
+        });
+
+        // Assert
+        let view = field.view();
+        assert!((view.get(8, 8) - 0.5).abs() < 1e-5);
+        assert!(view.get(9, 8) < view.get(8, 8));
+        assert_eq!(view.get(12, 8), 0.0, "outside the radius must stay untouched");
+    }
+
+    #[test]
+    fn inject_wraps_around_the_torus() {
+        // Arrange: 場の端に注入する
+        let mut field = Field::new(16, 16);
+
+        // Act
+        field.inject(&Perturbation {
+            at: CellPos { x: 0, y: 0 },
+            radius: 3.0,
+            amount: 0.5,
+        });
+
+        // Assert: 反対側の端にも回り込んでいる
+        let view = field.view();
+        assert!(view.get(15, 0) > 0.0, "the blob must wrap to the far edge");
+        assert!(view.get(0, 15) > 0.0);
+    }
+
+    #[test]
+    fn inject_keeps_values_within_the_normalized_range() {
+        // Arrange: すでに満杯の場へさらに注入する
+        let mut field = Field::new(16, 16);
+        field.map(|_x, _y, _value| 1.0);
+
+        // Act
+        field.inject(&Perturbation {
+            at: CellPos { x: 8, y: 8 },
+            radius: 3.0,
+            amount: 5.0,
+        });
+
+        // Assert
+        assert_eq!(field.view().get(8, 8), MAX_CELL_VALUE);
+    }
+
+    #[test]
+    fn a_negative_amount_carves_the_field_out() {
+        // Arrange
+        let mut field = Field::new(16, 16);
+        field.map(|_x, _y, _value| 1.0);
+
+        // Act
+        field.inject(&Perturbation {
+            at: CellPos { x: 8, y: 8 },
+            radius: 3.0,
+            amount: -0.5,
+        });
+
+        // Assert
+        assert!((field.view().get(8, 8) - 0.5).abs() < 1e-5);
+    }
 }
