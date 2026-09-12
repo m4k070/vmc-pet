@@ -51,6 +51,13 @@ nix develop --command cargo run --release
 起動すると画面右下に半透明のドットグリッドが常駐する。周囲の透明部分はクリックが
 下のウィンドウへ抜ける。終了は `Ctrl-C`。
 
+生物は `--animal <code>` で選べる(デフォルトは Orbium unicaudatus)。
+
+```sh
+cargo run --release -- --list-animals   # 選べる生物の一覧
+cargo run --release -- --animal OG2g    # Gyrorbium gyrans で起動
+```
+
 体の上にポインタを乗せると撫でている扱いになり、触れた場所がほんのり光る
 (見た目だけの反応で、体そのものには影響しない)。クリックすると突いた扱いになり、
 体に実際にエネルギーが注入されて反応する。Lenia はカオス系なので触り方によっては
@@ -125,6 +132,7 @@ src/
     touch_echo.rs    # 入力の可視化専用データ。体には一切影響しない
   shell/
     layer.rs         # OS依存部分(wlr-layer-shell)をここに隔離
+  cli.rs             # コマンドライン引数の解釈
   app.rs             # 唯一の可変状態の持ち主
 ```
 
