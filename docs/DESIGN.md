@@ -502,6 +502,10 @@ step 5 の完了は `a_long_neglected_body_survives_indefinitely_at_reduced_mass
 後付けする際にそのまま入出力インターフェースとして使える設計にしてある。
 体を差し替える実験をするなら、この電子ペットが最初の「体」の実例になる。
 
+第二の体として、手元にある M5Stack を使う計画を [docs/M5STACK.md](M5STACK.md)
+にまとめてある。PC版の表示器にはせず、M5Stack 自身が Lenia を計算・描画する
+独立した体として実装する方針。
+
 ## 参考にした先行研究
 
 - **World Models** (Ha & Schmidhuber, 2018) — V(エンコーダ)/M(世界モデル)/C(コントローラ)の三分割
