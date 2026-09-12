@@ -56,6 +56,9 @@ nix develop --command cargo run --release
 体に実際にエネルギーが注入されて反応する。Lenia はカオス系なので触り方によっては
 体が崩壊するが、そのときは自動で生物を置き直す。
 
+マシンの CPU 負荷も体の外側にある環境として反映される。負荷が高いほどエネルギーの
+減衰が速くなり(環境が厳しいという扱い)、放置されて弱りやすくなる。
+
 ## 動作環境
 
 `wlr-layer-shell` に対応した Wayland コンポジタが必要。niri 26.04 で動作を確認して
@@ -90,7 +93,7 @@ layer-rule {
 | 4 | 入力を局所摂動として注入する IF 層 | 完了 |
 | 5 | 気分状態による表現の方向づけ | 完了 |
 
-常駐時の実測値 (release, 2560x1440@60Hz): CPU 1.8% / RSS 4.4MB / 30.00fps。
+常駐時の実測値 (release, 2560x1440@60Hz): CPU 1.9% / RSS 4.5MB / 30.00fps。
 
 体には触れずに触れられないまま放置すると、エネルギーが徐々に減っていき、
 自己修復の力が弱まって総量がわずかに下がる(崩れはしない)。クリックすれば
@@ -109,8 +112,9 @@ src/
     perturbation.rs  # Perturbation / CellPos / accumulate_into(共有ヘルパー)
     port.rs          # trait BodyPort (体が外に見せる唯一の窓口)
     lenia_body.rs    # BodyPort の実装。崩壊からの復帰も持つ
-  interface/       # IF層: 外界 → 摂動 だけを通す
+  interface/       # IF層: 外界 → 体・echoが受け取れる形 だけを通す
     pointer.rs       # Touch → (体への摂動, echoへの摂動)
+    machine_load.rs  # CPU負荷 → 環境ストレス(スカラー)
   render/
     dot_grid.rs      # 体+echo → ピクセルバッファ
     camera.rs        # 重心を画面中央に置く表示原点(場は書き換えない)
