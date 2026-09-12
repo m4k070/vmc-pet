@@ -1,0 +1,62 @@
+{
+  "source": "https://github.com/Chakazul/Lenia",
+  "license": "MIT License, Copyright (c) 2018 Bert Chan",
+  "animals": [
+    {
+      "code": "O2u",
+      "name": "Orbium unicaudatus",
+      "params": {
+        "R": 13,
+        "T": 10,
+        "b": "1",
+        "m": 0.15,
+        "s": 0.015,
+        "kn": 1,
+        "gn": 1
+      },
+      "cells": "7.MD6.qL$6.pKqEqFURpApBRAqQ$5.VqTrSsBrOpXpWpTpWpUpCrQ$4.CQrQsTsWsApITNPpGqGvL$3.IpIpWrOsGsBqXpJ4.LsFrL$A.DpKpSpJpDqOqUqSqE5.ExD$qL.pBpTT2.qCrGrVrWqM5.sTpP$.pGpWpD3.qUsMtItQtJ6.tL$.uFqGH3.pXtOuR2vFsK5.sM$.tUqL4.GuNwAwVxBwNpC4.qXpA$2.uH5.vBxGyEyMyHtW4.qIpL$2.wV5.tIyG3yOxQqW2.FqHpJ$2.tUS4.rM2yOyJyOyHtVpPMpFqNV$2.HsR4.pUxAyOxLxDxEuVrMqBqGqKJ$3.sLpE3.pEuNxHwRwGvUuLsHrCqTpR$3.TrMS2.pFsLvDvPvEuPtNsGrGqIP$4.pRqRpNpFpTrNtGtVtStGsMrNqNpF$5.pMqKqLqRrIsCsLsIrTrFqJpHE$6.RpSqJqPqVqWqRqKpRXE$8.OpBpIpJpFTK!"
+    },
+    {
+      "code": "OG2g",
+      "name": "Gyrorbium gyrans",
+      "params": {
+        "R": 13,
+        "T": 10,
+        "b": "1",
+        "m": 0.156,
+        "s": 0.0224,
+        "kn": 1,
+        "gn": 1
+      },
+      "cells": "10.EL2QLE$7.TpU2qHqCpXpUpNpFL$4.JrVtTuKuPuKtLrXqTqHqCpPpDG$3.qWtDqRpKqEsMuXvBtGrApXpUpSpIO$2.rQrN4.pAuAvRtTrIpUpIpKpFO$.pSsM6.tJwFuNsPsFrVpPpDL$.uFB6.tJ2yO2yLyOyDsKL$pDuC6.pFxW3yOwIwD2xPqH$rNtV5.EsMxCyIyOwXtJsMtJwFuX$sHuSV3.EpDvOwFxEwQsRqR2qHsFvWE$rQvJsWpPQpKpSqCvEvBuCpD3.BpDtGrQ$pXuKvMuPtLsWsCrIuCtBrS6.qWrQ$EsKvEwXyBwLtVrVsCrDqH6.pXrG$.qHtVxJyOwQrQpNqJpPV6.qJqE$.JsUxMyOrX10.pFqRJ$2.rQxPwIpI9.pKqJT$2.qJxEuPpKB7.qCpP$2.EvOvMpPO5.TrGqH$3.sCyOqEpIOEBOqHqEsRtG$4.xMsMqJqCpXqJqRpIqOuCtBsF$5.xPrAqTqMpSE.rSsMrLqRqHV.TpS$6.vErDE2.VpPB$7.pIrNqHpKQ!"
+    },
+    {
+      "code": "S1s",
+      "name": "Scutium solidus",
+      "params": {
+        "R": 13,
+        "T": 10,
+        "b": "1",
+        "m": 0.29,
+        "s": 0.045,
+        "kn": 1,
+        "gn": 1
+      },
+      "cells": "5.pGQ$6.sUsDqRR$4.VpXrJwKvNtXrW$2.ApVrGrWsIwKyOyDwTuNO$2.qArOrIqIpPpTxH2yOyIvKqG$rVpIrNrJpH4.xP3yOvFqWA$sKvNsKqE5.pI4yOuHqPC$sNxBuMpD5.JuN3yOwXsUpN$sGxFyOT5.pCtIyF3yOuKqUH$rPwXyOxT5.qKtSxS3yOvIrQT$pQwK2yOtWXJXqHsGuWxW3yOvPsApC$.vQ3yOuVsLsGsXuMwOyK3yOvHrVpC$.rKyK3yOxEwBwCwXyE3yOxQuMrJU$.WvC5yOyM5yOwFtJqOL$2.rVwO9yOwWuMsApOC$2.pLtBwK6yOyJwQuTsQqLP$3.qHsWvEwUxTyCxRwWvRuGsNqSpA$3.HqBrUtHuGuPuLtVsXrSqIXB$4.DpDqEqW2rIqWqGpJN$6.ENTUPHA!"
+    },
+    {
+      "code": "2S1v",
+      "name": "Scutium serratus vagus",
+      "params": {
+        "R": 10,
+        "T": 10,
+        "b": "1/2,1",
+        "m": 0.27,
+        "s": 0.044,
+        "kn": 1,
+        "gn": 1
+      },
+      "cells": "9.ANWSIA$9.MpRqSrAqKpJMB$6.DFOpPrItBtOtBrUqIpBH$5.pEpVqPrStKvI2wQvQuEsJqRpIL$4.PrSuKwSyI4yOxWwLuHsFqPpGF$4.qNxD9yOwWuDsDqMU$4.tM5yOyNxXxTyN2yOwVuFsFqCH$3.JwU3yOwLwDwBvKvIxJ3yOwJuBrQpG$3.uKwX2yOuDrOsBsHsIsGuFxEyKyOxQvLsXqIF$2.tDuXxIyOvW2.L.HqIsQvLxNyOyLwHtNrAR$FrLtNvOyDxS6.pMtDwHyH2yOwBtAqUU$UrJtRwFyOW6.pWtJxE2yOyLuDrFpUM$AqUtMvXrSG6.pKsTxC2yOwVrRpHMA$.qD.qBrFS6.SsLxG2yOvMqHH$3.VqRqFO5.qNwK3yOuEpQA$4.pOqKqBL3.sU5yOsPpOA$4.OpNqNqJ2pEtByOyNyM2yOvKrBpH$5.IpMqXrXxJyFxFwNwLuNsHqHTG$7.LsRvSvNvBuKI$8.sIsXtJtDU$7.NpLqPrHqA$10.D!"
+    }
+  ]
+}
