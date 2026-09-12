@@ -37,8 +37,12 @@ use vmc_pet_body::{load_animal, Field, FieldView, Lenia};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// 場の解像度。PC版と同じ 32x32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
-const FIELD_WIDTH: usize = 32;
+/// 場の解像度。縦は PC版と同じ 32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
+/// 横は画面(320x240)のアスペクト比に合わせて広げてある。43 は 320/(240/32) の
+/// 近似値で、セルピッチが縦横ほぼ等しくなる(横7.44px・縦7.5px)ように選んだ。
+/// 場を正方形にする制約は無い(Lenia のカーネルは場の形に関係なく円形に定義
+/// される)ことを、PC側で複数のアスペクト比を実測して確かめてから決めた。
+const FIELD_WIDTH: usize = 43;
 const FIELD_HEIGHT: usize = 32;
 
 /// 場を進める頻度の目安(PC版の step_rate と同じ 15/s)。
