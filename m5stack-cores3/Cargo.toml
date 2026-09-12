@@ -18,22 +18,32 @@ path = "./src/bin/main.rs"
 [dependencies]
 vmc-pet-body = { path = "../crates/vmc-pet-body", default-features = false }
 
-esp-hal = { version = "~1.1.0", features = [
+# CoreS3 のディスプレイ(ILI9342C)は AXP2101 電源・AW9523B 経由のリセットなど
+# 初期化がハードウェア固有の手順を要る。それを肩代わりしてくれるボードサポート
+# クレート(MIT, https://github.com/anapeksha/core-s3-rs)を使う。
+# esp-hal/esp-backtrace/esp-println/esp-alloc のバージョンは、core-s3 が
+# ワークスペースで固定しているものに合わせてある(合わせないと esp-backtrace の
+# パニックハンドラが重複するなど、依存関係の衝突が起きる)。
+core-s3 = { version = "0.5.0", features = ["esp-hal"] }
+embedded-graphics = { version = "0.8.2", default-features = false }
+
+esp-hal = { version = "=1.1.2", features = [
     "esp32s3",
 ] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = [
     "esp32s3",
 ] }
-esp-println = { version = "0.17.0", features = [
+esp-println = { version = "=0.15.0", features = [
     "esp32s3",
 ] }
-esp-backtrace = { version = "0.19.0", features = [
+esp-backtrace = { version = "=0.17.0", features = [
     "esp32s3",
     "panic-handler",
     "println",
 ] }
-esp-alloc = "0.10.0"
+esp-alloc = { version = "=0.10.0", features = ["esp32s3"] }
 critical-section = "1.2.0"
+libm = "0.2"
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]
