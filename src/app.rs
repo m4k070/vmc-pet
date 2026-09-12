@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use crate::body::{load_animal, BodyPort, LeniaBody};
-use crate::interface::{perturbation_for, Touch};
-use crate::render::{Camera, DotGrid};
+use crate::interface::{body_perturbation_for, echo_perturbation_for, Touch};
+use crate::render::{Camera, DotGrid, TouchEcho};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
 /// 場の解像度。表示と 1:1 にしてある。Orbium は 20x20 なので画面の 6 割強を占める。
@@ -32,16 +32,24 @@ const COLLAPSE_MASS: f32 = 5.0;
 /// 復帰直後など大きく遅れた場合に、追いつこうとして固まるのを防ぐ。
 const MAX_CATCH_UP_STEPS: u32 = 4;
 
+/// echo(入力の可視化)の、毎フレームの減衰率。
+/// `interface::pointer::HOVER_ECHO_AMOUNT_PER_FRAME` と組み合わさって定常値を決める
+/// (docs/DESIGN.md「入力の可視化を体の場から分離する」参照)。この値では、
+/// 撫で続けたときに約4秒で 0.8 前後へ収束し、離すと1〜2秒ほどで消える。
+const ECHO_DECAY_PER_FRAME: f32 = 0.90;
+
 /// Lenia の場を体として持つペット。
 pub struct Pet {
     body: LeniaBody,
+    /// 入力を可視化するためだけのデータ。体の場とは別に持ち、体には一切影響しない。
+    echo: TouchEcho,
     grid: DotGrid,
     camera: Camera,
     step_interval: Duration,
     last_step: Instant,
     /// 直近のサーフェスの大きさ。ポインタ座標を場のセルへ写すのに要る。
     surface_size: (u32, u32),
-    /// ポインタが体の上にある間の位置。撫でている扱いで毎ステップ弱く注入する。
+    /// ポインタが体の上にある間の位置。撫でている扱いで、毎フレーム echo を光らせる。
     hovering_at: Option<crate::body::CellPos>,
 }
 
@@ -58,6 +66,7 @@ impl Pet {
 
         Ok(Self {
             body: LeniaBody::new(animal, FIELD_WIDTH, FIELD_HEIGHT),
+            echo: TouchEcho::new(FIELD_WIDTH, FIELD_HEIGHT),
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
             camera: Camera::new(),
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
@@ -68,14 +77,11 @@ impl Pet {
     }
 
     /// 前回のステップからの経過分だけ体を進める。
-    /// 撫でられている間は、進める直前に毎回弱く注入する。
+    /// 体に触れるのはクリックだけなので、ここではホバーを一切扱わない。
     fn advance(&mut self, now: Instant) {
         let mut steps = 0;
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
-            if let Some(at) = self.hovering_at {
-                self.touch(Touch::Hover { at });
-            }
             self.body.step();
             if self.body.mass() < COLLAPSE_MASS {
                 eprintln!("vmc-pet: the body collapsed; reviving");
@@ -90,12 +96,15 @@ impl Pet {
         }
     }
 
-    /// 触れ方を摂動に翻訳して体へ渡す。体に働きかける経路はここだけ。
+    /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
+    /// 体に働きかける経路はここだけ。ホバーは echo にしか届かない。
     fn touch(&mut self, touch: Touch) {
-        let Some(perturbation) = perturbation_for(touch) else {
-            return;
-        };
-        self.body.inject(perturbation);
+        if let Some(perturbation) = body_perturbation_for(touch) {
+            self.body.inject(perturbation);
+        }
+        if let Some(perturbation) = echo_perturbation_for(touch) {
+            self.echo.touch(&perturbation);
+        }
     }
 
     /// ポインタ座標に対応する場のセル。グリッドの外なら `None`。
@@ -130,12 +139,26 @@ impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
         self.surface_size = (width, height);
         self.advance(Instant::now());
+
+        // echo(入力の可視化)は体の時間とは独立に、描画のたびに更新する。
+        // 体の場は書き換えないので、ホバーし続けても体には何の影響も無い。
+        if let Some(at) = self.hovering_at {
+            self.touch(Touch::Hover { at });
+        }
+        self.echo.decay(ECHO_DECAY_PER_FRAME);
+
         // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
         self.camera
             .follow(self.body.observe(), GRID_COLUMNS, GRID_ROWS);
         canvas.fill(0);
-        self.grid
-            .draw(self.body.observe(), self.camera.origin(), canvas, width, height);
+        self.grid.draw(
+            self.body.observe(),
+            self.echo.view(),
+            self.camera.origin(),
+            canvas,
+            width,
+            height,
+        );
     }
 
     fn input_region(&self, width: u32, height: u32) -> InputRegion {
@@ -248,6 +271,36 @@ mod tests {
     }
 
     #[test]
+    fn a_click_also_lights_up_the_echo() {
+        // Arrange
+        let mut pet = drawn_pet();
+
+        // Act
+        pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
+
+        // Assert
+        let at = pet.hovering_at.expect("the click must land inside the grid");
+        assert!(pet.echo.view().get(at.x, at.y) > 0.0);
+    }
+
+    #[test]
+    fn hovering_lights_the_echo_without_touching_the_body() {
+        // Arrange
+        let mut pet = drawn_pet();
+        let before = mass(&pet);
+
+        // Act: ポインタを乗せてから描画を1回通す(echo の更新は draw の中で起こる)
+        pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
+        let at = pet.hovering_at.expect("hovering over the grid must resolve a cell");
+        let mut canvas = vec![0u8; 384 * 384 * 4];
+        pet.draw(&mut canvas, 384, 384);
+
+        // Assert: 体の総量は変わらないが、echo は光る
+        assert_eq!(mass(&pet), before, "hovering must not touch the body");
+        assert!(pet.echo.view().get(at.x, at.y) > 0.0, "hovering must light the echo");
+    }
+
+    #[test]
     fn a_pointer_outside_the_grid_touches_nothing() {
         // Arrange
         let mut pet = drawn_pet();
@@ -262,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_stops_the_continuous_hover_injection() {
+    fn leaving_stops_the_hover_tracking() {
         // Arrange
         let mut pet = drawn_pet();
         pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
@@ -289,7 +342,8 @@ mod resilience_tests {
         }
     }
 
-    /// ポインタを動かしながら撫で、ときどき突く、という実際の操作を模す。
+    /// ポインタを動かしながら何度もクリックする、という操作を模す。
+    /// ホバーは体に一切触れないため、体への負荷はクリックだけから来る。
     fn harass(pet: &mut Pet, seed: u64, rounds: usize) {
         let mut state = seed;
         let mut at = CellPos { x: 16, y: 16 };
@@ -304,17 +358,16 @@ mod resilience_tests {
             if round % 3 == 0 {
                 pet.touch(Touch::Click { at });
             }
-            pet.hovering_at = Some(at);
             run(pet, 10);
         }
-        pet.hovering_at = None;
     }
 
     #[test]
     fn the_body_always_comes_back_after_being_harassed() {
-        // Arrange / Act / Assert: 乱暴に触られても、必ず生きた状態へ戻る。
-        // Lenia はカオス系で安全境界が単調にならないため、摂動の強さを絞るだけでは
-        // これを保証できない。崩壊を検知して置き直す仕組みが要る。
+        // Arrange / Act / Assert: 乱暴にクリックされても、必ず生きた状態へ戻る。
+        // ホバーは体に触れないため、以前あった「ホバーとクリックの併用で安全境界が
+        // 単調にならない」という問題(docs/DESIGN.md 参照)はここでは起こりえない。
+        // それでも崩壊検知は防御として残す。
         for seed in [12345u64, 99, 777, 20260912] {
             let mut pet = Pet::new().unwrap();
             harass(&mut pet, seed, 40);
