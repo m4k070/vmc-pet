@@ -1,15 +1,21 @@
 //! 自律コントローラのパラメータ(`ControllerParams`)を、`fitness::Trajectory`
-//! を使ってランダムサーチする。docs/DESIGN.md「学習可能なコントローラへ向けた
-//! 代理指標」参照。
+//! を使って探索する。docs/DESIGN.md「学習可能なコントローラへ向けた代理指標」
+//! および「パラメータ探索を試した」参照。
 //!
-//! 短い評価窓(900ステップ≈60秒)は「動きの多さ」を測るのに使えるが、実際に
-//! 崩壊するかどうかの予兆にはならないことが分かっている(fitness.rs参照)。
-//! そのため、短い窓の評価で上位に残った候補だけを、長い窓(20000ステップ
-//! ≈22分。既存の安全性テストと同じ長さ)で再検証してから報告する。
+//! 探索は3つの段で構成される。段を分けているのは、安さと確かさが逆になって
+//! いるためで、安い評価で候補を絞り、高い評価で確かめる:
 //!
-//! 学習(勾配降下・進化戦略など)はまだしていない。ここではランダムサーチで
-//! 「この評価軸のもとで、手で決めた値よりましな組み合わせがあるか」を
-//! 確かめるだけにとどめる。
+//! 1. **短い窓(900ステップ ≈ 60秒、O2u のみ)** — 動きの多さを測る。安い。
+//!    ただし実際に崩壊するかどうかの予兆にはならないことが分かっている
+//!    (fitness.rs 参照)。実際に、短い窓で1位だった候補が長い窓で崩壊した
+//! 2. **長い窓(20000ステップ ≈ 22分、O2u)** — 崩壊しないことを確かめる
+//! 3. **全生物の長い窓** — コントローラは全生物に出荷されるため、O2u だけで
+//!    検証した値を採用すると別の生物を壊しうる。クリックと違ってコントローラは
+//!    勝手に発火するので、ユーザーが何もしていないのに体が壊れることになる
+//!
+//! 世代交代は素朴な (μ+λ): 各世代で上位 μ 個を残し、その周辺を揺らした子を
+//! λ 個作る。CMA-ES のような本格的な進化戦略ではないが、外部クレートに一切
+//! 頼らず、何をしているか読んで追えることを優先した。
 
 use vmc_pet_body::fitness::{Trajectory, COLLAPSE_PENALTY};
 use vmc_pet_body::{ControllerParams, Pet};
@@ -18,11 +24,17 @@ const FIELD_SIZE: usize = 32;
 const WARMUP_STEPS: u32 = 60;
 const SHORT_EVAL_STEPS: u32 = 900;
 const LONG_EVAL_STEPS: u32 = 20_000;
-const TRIALS: usize = 300;
-const TOP_N: usize = 5;
+
+/// 世代数と、各世代で残す親の数・作る子の数。
+const GENERATIONS: usize = 12;
+const PARENTS: usize = 4;
+const CHILDREN: usize = 24;
+
+/// 最後に長い窓で確かめる候補の数。
+const FINALISTS: usize = 3;
 
 /// 外部クレートに頼らない、この探索専用の決定的な疑似乱数(xorshift64)。
-/// 固定シードにしてあるので、実行するたびに同じ候補列を試す。
+/// 固定シードにしてあるので、実行するたびに同じ探索をやり直せる。
 struct Rng(u64);
 
 impl Rng {
@@ -35,30 +47,83 @@ impl Rng {
         x
     }
 
+    fn unit(&mut self) -> f32 {
+        (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32
+    }
+
     fn range_f32(&mut self, low: f32, high: f32) -> f32 {
-        let fraction = (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
-        low + fraction * (high - low)
+        low + self.unit() * (high - low)
     }
 
     fn range_u32(&mut self, low: u32, high: u32) -> u32 {
         low + (self.next_u64() % (high - low + 1) as u64) as u32
     }
-}
 
-/// 探索範囲。現在の採用値(`ControllerParams::default()`)を中心に、
-/// 明らかに極端すぎる値(反応が無くなる・逆に暴れすぎる)は除いてある。
-fn random_params(rng: &mut Rng) -> ControllerParams {
-    ControllerParams {
-        evaluate_every_steps: rng.range_u32(10, 60),
-        imbalance_threshold: rng.range_f32(0.15, 0.5),
-        nudge_radius_cells: rng.range_f32(2.0, 6.0),
-        nudge_amount: rng.range_f32(0.02, 0.30),
-        nudge_offset_cells: rng.range_f32(1.0, 6.0),
+    /// -1.0..=1.0 のゆらぎ。変異に使う。
+    fn jitter(&mut self) -> f32 {
+        self.range_f32(-1.0, 1.0)
     }
 }
 
-fn evaluate(params: ControllerParams, steps: u32) -> f32 {
-    let animal = vmc_pet_body::load_animal("O2u").unwrap();
+/// 各パラメータの探索範囲。現在の採用値を含み、明らかに極端すぎる値
+/// (反応が無くなる・逆に暴れすぎる)は除いてある。
+struct Bounds {
+    evaluate_every_steps: (u32, u32),
+    imbalance_threshold: (f32, f32),
+    nudge_radius_cells: (f32, f32),
+    nudge_amount: (f32, f32),
+    nudge_offset_cells: (f32, f32),
+}
+
+const BOUNDS: Bounds = Bounds {
+    evaluate_every_steps: (10, 60),
+    imbalance_threshold: (0.15, 0.5),
+    nudge_radius_cells: (2.0, 6.0),
+    nudge_amount: (0.02, 0.30),
+    nudge_offset_cells: (1.0, 6.0),
+};
+
+fn random_params(rng: &mut Rng) -> ControllerParams {
+    ControllerParams {
+        evaluate_every_steps: rng
+            .range_u32(BOUNDS.evaluate_every_steps.0, BOUNDS.evaluate_every_steps.1),
+        imbalance_threshold: rng
+            .range_f32(BOUNDS.imbalance_threshold.0, BOUNDS.imbalance_threshold.1),
+        nudge_radius_cells: rng.range_f32(BOUNDS.nudge_radius_cells.0, BOUNDS.nudge_radius_cells.1),
+        nudge_amount: rng.range_f32(BOUNDS.nudge_amount.0, BOUNDS.nudge_amount.1),
+        nudge_offset_cells: rng.range_f32(BOUNDS.nudge_offset_cells.0, BOUNDS.nudge_offset_cells.1),
+    }
+}
+
+/// 親の周辺を揺らした子を作る。揺らす幅は各パラメータの範囲の `spread` 割。
+fn mutate(parent: &ControllerParams, rng: &mut Rng, spread: f32) -> ControllerParams {
+    let jitter_within = |rng: &mut Rng, value: f32, (low, high): (f32, f32)| {
+        (value + rng.jitter() * (high - low) * spread).clamp(low, high)
+    };
+    let steps_span =
+        (BOUNDS.evaluate_every_steps.1 - BOUNDS.evaluate_every_steps.0) as f32 * spread;
+    let steps = (parent.evaluate_every_steps as f32 + rng.jitter() * steps_span)
+        .round()
+        .clamp(
+            BOUNDS.evaluate_every_steps.0 as f32,
+            BOUNDS.evaluate_every_steps.1 as f32,
+        ) as u32;
+
+    ControllerParams {
+        evaluate_every_steps: steps,
+        imbalance_threshold: jitter_within(
+            rng,
+            parent.imbalance_threshold,
+            BOUNDS.imbalance_threshold,
+        ),
+        nudge_radius_cells: jitter_within(rng, parent.nudge_radius_cells, BOUNDS.nudge_radius_cells),
+        nudge_amount: jitter_within(rng, parent.nudge_amount, BOUNDS.nudge_amount),
+        nudge_offset_cells: jitter_within(rng, parent.nudge_offset_cells, BOUNDS.nudge_offset_cells),
+    }
+}
+
+fn evaluate(code: &str, params: ControllerParams, steps: u32) -> f32 {
+    let animal = vmc_pet_body::load_animal(code).unwrap();
     let mut pet = Pet::with_controller_params(animal, FIELD_SIZE, FIELD_SIZE, params);
     for _ in 0..WARMUP_STEPS {
         pet.step();
@@ -66,34 +131,106 @@ fn evaluate(params: ControllerParams, steps: u32) -> f32 {
     Trajectory::record(&mut pet, steps).fitness(FIELD_SIZE, FIELD_SIZE)
 }
 
+/// 全生物で長い窓を回し、1つでも崩壊したらその生物のコードを返す。
+fn animal_that_collapses(params: ControllerParams) -> Option<String> {
+    for (code, _name) in vmc_pet_body::list_animals().unwrap() {
+        if evaluate(&code, params, LONG_EVAL_STEPS) == COLLAPSE_PENALTY {
+            return Some(code);
+        }
+    }
+    None
+}
+
+/// 近傍を揺らした候補のうち、何個が崩壊せずに済むかを数える。
+///
+/// 実測で、スコアがほとんど同じ(0.6091 / 0.6090 / 0.6088)でパラメータも
+/// よく似た3候補のうち、1つだけが生き延びて2つは崩壊した。つまり最適点の
+/// すぐ隣に崖がある。スコアが最良の「生き残り」を採用するのは、崖のふちに
+/// 立つのと同じで危ない。そこで採用の判断には、点としてのスコアではなく
+/// **近傍ごと安全か**を見る(このプロジェクトが一貫して採ってきた
+/// 「崖から十分離す」方針の延長)。
+fn neighbourhood_survivors(params: ControllerParams, rng: &mut Rng) -> (u32, u32) {
+    const PROBES: u32 = 6;
+    const PROBE_SPREAD: f32 = 0.05;
+    let mut survivors = 0;
+    for _ in 0..PROBES {
+        let probe = mutate(&params, rng, PROBE_SPREAD);
+        if evaluate("O2u", probe, LONG_EVAL_STEPS) != COLLAPSE_PENALTY {
+            survivors += 1;
+        }
+    }
+    (survivors, PROBES)
+}
+
 fn main() {
-    let baseline_short = evaluate(ControllerParams::default(), SHORT_EVAL_STEPS);
-    let baseline_long = evaluate(ControllerParams::default(), LONG_EVAL_STEPS);
+    let default = ControllerParams::default();
     println!(
-        "baseline (current defaults): short={baseline_short:.4} long_run={baseline_long:.4} {:?}",
-        ControllerParams::default()
+        "baseline (current defaults): short={:.4} long={:.4} {default:?}",
+        evaluate("O2u", default, SHORT_EVAL_STEPS),
+        evaluate("O2u", default, LONG_EVAL_STEPS),
     );
     println!();
 
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let mut results: Vec<(ControllerParams, f32)> = Vec::with_capacity(TRIALS);
-    for _ in 0..TRIALS {
-        let params = random_params(&mut rng);
-        let score = evaluate(params, SHORT_EVAL_STEPS);
-        results.push((params, score));
-    }
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    // 第1世代は範囲全体からの無作為。以降は上位の周辺を揺らす。
+    let mut population: Vec<ControllerParams> =
+        (0..CHILDREN).map(|_| random_params(&mut rng)).collect();
+    // 手で決めた値も第1世代に入れておく(それより悪くなっていないかが見える)。
+    population.push(default);
 
-    println!("top {TOP_N} of {TRIALS} random trials (short eval, {SHORT_EVAL_STEPS} steps):");
-    for (params, score) in results.iter().take(TOP_N) {
-        println!("  score={score:.4} {params:?}");
+    let mut ranked: Vec<(ControllerParams, f32)> = Vec::new();
+    for generation in 0..GENERATIONS {
+        ranked = population
+            .iter()
+            .map(|params| (*params, evaluate("O2u", *params, SHORT_EVAL_STEPS)))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        ranked.truncate(PARENTS);
+
+        println!(
+            "generation {generation:2}: best short-window score = {:.4}",
+            ranked[0].1
+        );
+
+        // 次の世代: 親そのもの + 親の周辺を揺らした子。世代が進むほど揺らす幅を
+        // 狭めて、粗く探してから細かく詰める。
+        let spread = 0.30 * (1.0 - generation as f32 / GENERATIONS as f32) + 0.05;
+        population = ranked.iter().map(|(params, _)| *params).collect();
+        for index in 0..CHILDREN {
+            let parent = ranked[index % ranked.len()].0;
+            population.push(mutate(&parent, &mut rng, spread));
+        }
     }
 
     println!();
-    println!("re-verifying top {TOP_N} with a long run ({LONG_EVAL_STEPS} steps, checks for collapse):");
-    for (params, short_score) in results.iter().take(TOP_N) {
-        let long_score = evaluate(*params, LONG_EVAL_STEPS);
-        let verdict = if long_score == COLLAPSE_PENALTY { "COLLAPSED" } else { "survived" };
-        println!("  short={short_score:.4} long_run={long_score:.4} [{verdict}] {params:?}");
+    println!("verifying the top {FINALISTS}: long window -> every animal -> neighbourhood");
+    for (params, short_score) in ranked.iter().take(FINALISTS) {
+        let long_score = evaluate("O2u", *params, LONG_EVAL_STEPS);
+        if long_score == COLLAPSE_PENALTY {
+            println!("  short={short_score:.4} [COLLAPSED on O2u] {params:?}");
+            continue;
+        }
+        if let Some(code) = animal_that_collapses(*params) {
+            println!(
+                "  short={short_score:.4} long={long_score:.4} [COLLAPSED on {code}] {params:?}"
+            );
+            continue;
+        }
+        let (survivors, probes) = neighbourhood_survivors(*params, &mut rng);
+        println!(
+            "  short={short_score:.4} long={long_score:.4} \
+             [safe for every animal; neighbourhood {survivors}/{probes} survive] {params:?}"
+        );
+    }
+
+    println!();
+    println!("同じ検証を、いまの採用値についても行う(比較のため):");
+    let (survivors, probes) = neighbourhood_survivors(default, &mut rng);
+    match animal_that_collapses(default) {
+        Some(code) => println!("  current defaults [COLLAPSED on {code}]"),
+        None => println!(
+            "  current defaults [safe for every animal; \
+             neighbourhood {survivors}/{probes} survive]"
+        ),
     }
 }

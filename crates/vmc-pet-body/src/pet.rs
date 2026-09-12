@@ -391,6 +391,42 @@ mod tests {
         assert!(pet.mass() > 40.0, "got {}", pet.mass());
     }
 
+    /// 自律コントローラは**全生物に出荷される**。にもかかわらず、これまでの
+    /// 安全性検証は O2u(Orbium)だけで行っていた。OG2g が刺激の繰り返しに
+    /// 脆いことが分かった以上(docs/DESIGN.md「未確定」参照)、コントローラの
+    /// 周期的な自己摂動が別の生物を壊す可能性がある。クリックと違って
+    /// コントローラは勝手に発火するので、これが起きるとユーザーが何もして
+    /// いないのに体が壊れる。
+    ///
+    /// パラメータを変えるたび(とくに自動探索で選んだ値を採用するとき)に
+    /// この不変条件が崩れていないか確かめるためのテスト。
+    #[test]
+    fn the_controller_keeps_every_shipped_animal_alive() {
+        for (code, name) in crate::list_animals().unwrap() {
+            // Arrange
+            let mut pet = Pet::load(&code, 32, 32).unwrap();
+
+            // Act: 20000ステップ(≈22分)、一切触らずに動かす
+            let mut collapses = 0u32;
+            for _ in 0..20_000 {
+                if pet.step() {
+                    collapses += 1;
+                }
+            }
+
+            // Assert
+            assert_eq!(
+                collapses, 0,
+                "the controller collapsed {code} ({name}) without any user input"
+            );
+            assert!(
+                pet.mass() > 40.0,
+                "{code} ({name}) must stay alive, got mass {}",
+                pet.mass()
+            );
+        }
+    }
+
     /// 自律コントローラの自己摂動は `disturb` 経由でエネルギーを変えないため、
     /// 「放置されると弱る」という前提(docs/DESIGN.md参照)は、コントローラが
     /// 動いていても壊れないはずである。
