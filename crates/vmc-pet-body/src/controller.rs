@@ -13,43 +13,70 @@
 
 use crate::{CellPos, FieldView, Perturbation};
 
-/// 何ステップに一度、形を観測して判断するか。毎ステップ判断すると、Lenia
-/// 自体のなだらかな変化に対して敏感すぎ、絶えず小刻みに揺れて見た目が
-/// 落ち着かなくなる。15 step/s の設計(docs/DESIGN.md)で 30 ステップ=2秒に
-/// 一度、というゆったりした頻度にしてある。
-const EVALUATE_EVERY_STEPS: u32 = 30;
-
-/// 体の歪み(`imbalance` が返す歪度の大きさ)が、これを超えたらならす方向へ
-/// 軽く注入する。実測(O2u を300ステップ動かして10ステップごとに観測)では
-/// 歪度の大きさが常に 0.6〜0.7 程度で安定していたため、それより十分低い
-/// 閾値にして、健常な体では確実に反応するようにしてある。
-const IMBALANCE_THRESHOLD: f32 = 0.3;
-
-/// 自己摂動の半径・強さ。`touch.rs` の `CLICK_BODY_AMOUNT`(0.20)より弱くして
-/// ある。クリックは一度きりだが、こちらは条件を満たすたびに繰り返し働きかける
-/// ため、1回あたりは控えめにする必要がある。
+/// コントローラの挙動を決める定数一式。
 ///
-/// 最初 0.08 にしていたところ、ユーザーから「自律的な動きが目で分かるほどでは
-/// ない」というフィードバックを受け、強めるにあたって
-/// `the_autonomous_controller_never_collapses_the_body_over_a_long_run`
-/// (20000ステップの連続動作)で安全域を実測した。0.12 までは崩壊せず、
-/// 0.13 で崩壊する崖になっている(`growth_scale` の崖と同種の、Orbium が
-/// 持つ急峻な不安定性)。その崖からは十分離しつつ 0.08 より強めた 0.10 を
-/// 採用した。
-const NUDGE_RADIUS_CELLS: f32 = 4.0;
-const NUDGE_AMOUNT: f32 = 0.10;
+/// 元々はモジュール内の定数として直接埋め込んでいたが、パラメータ探索
+/// (`crates/vmc-pet-body/examples/search_controller_params.rs`)や将来の
+/// 学習可能なコントローラが「同じ規則を、違う定数で試す」ことを必要とするため、
+/// 実行時に差し替えられる構造体に切り出した。`Default` が現在の採用値を持つ。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControllerParams {
+    /// 何ステップに一度、形を観測して判断するか。毎ステップ判断すると、Lenia
+    /// 自体のなだらかな変化に対して敏感すぎ、絶えず小刻みに揺れて見た目が
+    /// 落ち着かなくなる。15 step/s の設計(docs/DESIGN.md)で 30 ステップ=2秒に
+    /// 一度、というゆったりした頻度にしてある。
+    pub evaluate_every_steps: u32,
+    /// 体の歪み(`imbalance` が返す歪度の大きさ)が、これを超えたらならす方向へ
+    /// 軽く注入する。実測(O2u を300ステップ動かして10ステップごとに観測)では
+    /// 歪度の大きさが常に 0.6〜0.7 程度で安定していたため、それより十分低い
+    /// 閾値にして、健常な体では確実に反応するようにしてある。
+    pub imbalance_threshold: f32,
+    /// 自己摂動の半径(セル)。
+    pub nudge_radius_cells: f32,
+    /// 自己摂動の強さ。`touch.rs` の `CLICK_BODY_AMOUNT`(0.20)より弱くしてある。
+    /// クリックは一度きりだが、こちらは条件を満たすたびに繰り返し働きかけるため、
+    /// 1回あたりは控えめにする必要がある。
+    ///
+    /// 最初 0.08 にしていたところ、ユーザーから「自律的な動きが目で分かるほどでは
+    /// ない」というフィードバックを受け、強めるにあたって
+    /// `the_autonomous_controller_never_collapses_the_body_over_a_long_run`
+    /// (20000ステップの連続動作)で安全域を実測した。0.12 までは崩壊せず、
+    /// 0.13 で崩壊する崖になっている(`growth_scale` の崖と同種の、Orbium が
+    /// 持つ急峻な不安定性)。その崖からは十分離しつつ 0.08 より強めた 0.10 を
+    /// 採用した。
+    pub nudge_amount: f32,
+    /// 重心から自己摂動の位置までの距離(セル)。
+    pub nudge_offset_cells: f32,
+}
 
-/// 重心から自己摂動の位置までの距離(セル)。
-const NUDGE_OFFSET_CELLS: f32 = 3.0;
+impl Default for ControllerParams {
+    fn default() -> Self {
+        Self {
+            evaluate_every_steps: 30,
+            imbalance_threshold: 0.3,
+            nudge_radius_cells: 4.0,
+            nudge_amount: 0.10,
+            nudge_offset_cells: 3.0,
+        }
+    }
+}
 
 /// 体の形を観測し、周期的に自己摂動でならす、単純な規則ベースのコントローラ。
 pub struct AutonomousController {
+    params: ControllerParams,
     steps_since_last_evaluation: u32,
 }
 
 impl AutonomousController {
+    /// 現在の採用値(`ControllerParams::default()`)で作る。
     pub fn new() -> Self {
+        Self::with_params(ControllerParams::default())
+    }
+
+    /// パラメータ探索・学習など、既定値以外を試したいときに使う。
+    pub fn with_params(params: ControllerParams) -> Self {
         Self {
+            params,
             steps_since_last_evaluation: 0,
         }
     }
@@ -58,7 +85,7 @@ impl AutonomousController {
     /// なら `None`(何もしない)。
     pub fn maybe_act(&mut self, field: FieldView<'_>) -> Option<Perturbation> {
         self.steps_since_last_evaluation += 1;
-        if self.steps_since_last_evaluation < EVALUATE_EVERY_STEPS {
+        if self.steps_since_last_evaluation < self.params.evaluate_every_steps {
             return None;
         }
         self.steps_since_last_evaluation = 0;
@@ -66,7 +93,7 @@ impl AutonomousController {
         let (centroid_x, centroid_y) = field.toroidal_centroid()?;
         let (imbalance_x, imbalance_y) = imbalance(field, centroid_x, centroid_y);
         let magnitude = crate::math::sqrtf(imbalance_x * imbalance_x + imbalance_y * imbalance_y);
-        if magnitude < IMBALANCE_THRESHOLD {
+        if magnitude < self.params.imbalance_threshold {
             return None;
         }
 
@@ -75,17 +102,22 @@ impl AutonomousController {
         let (direction_x, direction_y) = (imbalance_x / magnitude, imbalance_y / magnitude);
         let width = field.width() as f32;
         let height = field.height() as f32;
-        let target_x = crate::math::rem_euclidf(centroid_x + direction_x * NUDGE_OFFSET_CELLS, width);
-        let target_y =
-            crate::math::rem_euclidf(centroid_y + direction_y * NUDGE_OFFSET_CELLS, height);
+        let target_x = crate::math::rem_euclidf(
+            centroid_x + direction_x * self.params.nudge_offset_cells,
+            width,
+        );
+        let target_y = crate::math::rem_euclidf(
+            centroid_y + direction_y * self.params.nudge_offset_cells,
+            height,
+        );
 
         Some(Perturbation {
             at: CellPos {
                 x: target_x as usize,
                 y: target_y as usize,
             },
-            radius: NUDGE_RADIUS_CELLS,
-            amount: NUDGE_AMOUNT,
+            radius: self.params.nudge_radius_cells,
+            amount: self.params.nudge_amount,
         })
     }
 }
@@ -221,7 +253,7 @@ mod tests {
         let mut controller = AutonomousController::new();
 
         // Act / Assert
-        for _ in 0..(EVALUATE_EVERY_STEPS * 3) {
+        for _ in 0..(ControllerParams::default().evaluate_every_steps * 3) {
             assert!(controller.maybe_act(field.view()).is_none());
         }
     }
@@ -234,7 +266,7 @@ mod tests {
 
         // Act: 判定のタイミングまで進める
         let mut perturbation = None;
-        for _ in 0..EVALUATE_EVERY_STEPS {
+        for _ in 0..ControllerParams::default().evaluate_every_steps {
             perturbation = controller.maybe_act(field.view());
         }
 
@@ -250,7 +282,7 @@ mod tests {
         let mut controller = AutonomousController::new();
 
         // Act / Assert: 間隔に満たない間は何もしない
-        for _ in 0..(EVALUATE_EVERY_STEPS - 1) {
+        for _ in 0..(ControllerParams::default().evaluate_every_steps - 1) {
             assert!(controller.maybe_act(field.view()).is_none());
         }
     }

@@ -16,8 +16,8 @@
 
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
-    Animal, AutonomousController, BodyPort, CellPos, FieldView, LeniaBody, Perturbation, Touch,
-    TouchEcho, TouchEchoView,
+    Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, LeniaBody,
+    Perturbation, Touch, TouchEcho, TouchEchoView,
 };
 
 /// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
@@ -39,19 +39,31 @@ pub struct Pet {
 }
 
 impl Pet {
-    /// 生物を場の中央に配置して作る。
+    /// 生物を場の中央に配置して作る。自律コントローラは既定のパラメータで動く。
     pub fn new(animal: Animal, width: usize, height: usize) -> Self {
-        Self {
-            body: LeniaBody::new(animal, width, height),
-            echo: TouchEcho::new(width, height),
-            touching_at: None,
-            controller: AutonomousController::new(),
-        }
+        Self::with_controller_params(animal, width, height, ControllerParams::default())
     }
 
     /// `code`(assets/animals.json のコード)から生物を読み込んで作る便利関数。
     pub fn load(code: &str, width: usize, height: usize) -> Result<Self, crate::animal::AnimalError> {
         Ok(Self::new(crate::load_animal(code)?, width, height))
+    }
+
+    /// 自律コントローラのパラメータを指定して作る。パラメータ探索
+    /// (`crates/vmc-pet-body/examples/search_controller_params.rs`)や、
+    /// 既定値以外を試したい場面で使う。
+    pub fn with_controller_params(
+        animal: Animal,
+        width: usize,
+        height: usize,
+        controller_params: ControllerParams,
+    ) -> Self {
+        Self {
+            body: LeniaBody::new(animal, width, height),
+            echo: TouchEcho::new(width, height),
+            touching_at: None,
+            controller: AutonomousController::with_params(controller_params),
+        }
     }
 
     /// 体を1ステップ進め、崩壊していたら置き直す。

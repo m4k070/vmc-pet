@@ -34,7 +34,7 @@ pub mod touch_echo;
 
 pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;
-pub use controller::AutonomousController;
+pub use controller::{AutonomousController, ControllerParams};
 pub use field::{Field, FieldView};
 pub use lenia::Lenia;
 pub use lenia_body::LeniaBody;
