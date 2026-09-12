@@ -154,9 +154,9 @@ PC版の `interface::machine_load`(CPU負荷→エネルギー減衰)は、M5Sta
 | 0 | モデル確定・`espup install` でツールチェーン用意 | 完了(CoreS3、`espup install --targets esp32s3`) |
 | 1 | `body` を独立クレートへ切り出す(PC版の挙動は変えない) | 完了(`crates/vmc-pet-body`) |
 | 2 | 数学シム(`sqrtf` 等)を feature flag で追加し、`no_std` ビルドが通ることを確認 | 完了(`cargo check --no-default-features --target xtensa-esp32s3-none-elf -Z build-std=core,alloc` が警告無しで通る) |
-| 3 | Orbium 1体を const 配列で埋め込み、シリアル出力で総量を確認しながら1ステップ動かす | 未着手 |
+| 3 | Orbium を実機で1ステップ動かし、シリアル出力で総量を確認する | 完了 |
 | 4 | `embedded-graphics` で画面へドット描画 | 未着手 |
-| 5 | 物理ボタン/タッチを `Touch` へ変換する IF 層 | 未着手 |
+| 5 | 静電容量タッチを `Touch` へ変換する IF 層 | 未着手 |
 | 6 | (任意)「環境ストレス」の意味づけを考え直して実装する | 未着手 |
 
 step 2 の完了にあたり、`no_std` 下では `Vec`/`String`/`format!`/`vec!` が
@@ -164,11 +164,53 @@ step 2 の完了にあたり、`no_std` 下では `Vec`/`String`/`format!`/`vec!
 明示的に import する必要があることも分かった(std 環境でも同じ import は
 無害に共存できるため、`std`/`no_std` で分岐させる必要は無かった)。
 
+### step 3: 実機で本当に生物が生き続けることを確認した
+
+`m5stack-cores3/`(`vmc-pet-body` に依存する、独立した第二の Cargo プロジェクト。
+デスクトップ版のワークスペースには含めていない — 理由は後述)を作り、
+CoreS3 実機に実際に書き込んで検証した。
+
+当初、生成テンプレートの `log` クレート経由(`log::info!` + `esp_println::logger`)
+では、なぜか ANSI カラーコードと `INFO - ` の接頭辞しかシリアルに出力されず、
+肝心のメッセージ本文が一切出てこないという問題にぶつかった(原因は特定できて
+いない)。`esp_println::println!` に直接切り替えたところ問題なく出力されるように
+なったため、ログは `log` クレートを介さずシンプルな `println!` 系だけを使う
+方針にした。
+
+また `no_std` + `alloc` のビルドには `.cargo/config.toml` の
+`[unstable] build-std = ["core", "alloc"]` が要る(`esp-generate` の既定は
+`["core"]` のみで、`alloc` を使うと `can't find crate for alloc` になる)。
+
+実機でのシリアル出力(抜粋、66ms/step で駆動):
+
+```
+vmc-pet-cores3: loading Orbium unicaudatus
+vmc-pet-cores3: loaded Orbium unicaudatus R=13 T=10
+vmc-pet-cores3: initial mass=76.86
+vmc-pet-cores3: step=   15 mass=73.92
+...
+vmc-pet-cores3: step=  585 mass=73.39
+```
+
+585 ステップ(約39秒)を通じて総量は 73.2〜74.0 の範囲で安定し、PC版で実測した
+健常な Orbium の総量(73.7 前後)と一致する。**同じ Lenia のロジックが、実機の
+上でも同じように生物を生かし続けられることを確認した。** JSON(`assets/animals.json`)
+のパースも `serde_json` の `alloc` フィーチャで実機上に埋め込んだまま動いており、
+懸念していた「フラッシュ・RAM節約のため生物を const 配列に固定する」簡略化は、
+少なくともこの段階では不要だった(バイナリサイズは 140KB、16MB フラッシュの
+0.86%)。
+
+`m5stack-cores3/` はデスクトップ版の Cargo ワークスペースには含めていない。
+含めると `cargo build --workspace` がこの crate も対象にしてしまい、
+デスクトップ向けターゲットでは esp-hal 系の依存が解決できずビルドが壊れる。
+`Cargo.toml` に空の `[workspace]` を置いて親のワークスペースから独立させてある。
+
 ## 未確定・要相談事項
 
 - 表示解像度に応じた見た目の再チューニング(320x240 は PC版よりゆとりがあるため、
   ドットの隙間比率や縁のぼかし幅を調整し直す余地がある)
 - 常時給電か、バッテリー動作を考慮するか
 - 「環境ストレス」に何を割り当てるか(前述)
-- 実機への書き込み(`espflash flash`)・実際の画面表示・タッチ入力の確認は
-  まだ行っていない(コンパイルの確認までが済んだ段階)
+- 画面描画・タッチ入力の確認はまだ行っていない(シリアル出力のみで検証した段階)
+- `log` クレート経由の出力がなぜ本文を欠落させるかは未調査(実害は無いため
+  `println!` に切り替えて回避している)
