@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use crate::body::{load_animal, BodyPort, LeniaBody};
-use crate::interface::{body_perturbation_for, echo_perturbation_for, Touch};
+use crate::interface::{body_perturbation_for, echo_perturbation_for, MachineLoad, Touch};
 use crate::render::{Camera, DotGrid, TouchEcho};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
@@ -51,6 +51,8 @@ pub struct Pet {
     surface_size: (u32, u32),
     /// ポインタが体の上にある間の位置。撫でている扱いで、毎フレーム echo を光らせる。
     hovering_at: Option<crate::body::CellPos>,
+    /// 機械の CPU 負荷を「環境の厳しさ」として体に伝えるための読み取り役。
+    machine_load: MachineLoad,
 }
 
 impl Pet {
@@ -73,6 +75,7 @@ impl Pet {
             last_step: Instant::now(),
             surface_size: (0, 0),
             hovering_at: None,
+            machine_load: MachineLoad::new(),
         })
     }
 
@@ -84,6 +87,8 @@ impl Pet {
         {
             let energy_before = self.body.energy();
             self.body.step();
+            // 機械が忙しいほど、環境が厳しくエネルギーが早く尽きるようにする
+            self.body.apply_environmental_stress(self.machine_load.sample());
             if energy_before > 0.0 && self.body.energy() == 0.0 {
                 eprintln!("vmc-pet: energy depleted; the body is weakening from neglect");
             }
