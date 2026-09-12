@@ -16,6 +16,16 @@ const ENERGY_PER_TOUCH: f32 = 0.15;
 /// 何にも触れられなければ約 150 秒(2分30秒)で 0 まで下がる。
 const ENERGY_DECAY_PER_STEP: f32 = 1.0 / (15.0 * 150.0);
 
+/// 環境ストレス(stress=1.0、CPU 負荷が張り付いている状態)が続いたとき、
+/// 通常の減衰にどれだけ上乗せするか。1.0 は「常に全力の環境ストレスなら
+/// 減衰速度が倍になる(150秒 → 75秒で尽きる)」ことを意味する。
+///
+/// growth_scale には既に崖から十分離れた下限(MIN_GROWTH_SCALE)があるため、
+/// エネルギーがどれだけ速く尽きても、その先で体が崩壊することはない
+/// (sustained_maximum_stress_still_never_collapses_the_body 参照)。
+/// ストレスは「尽きる速さ」だけを変え、尽きた後の安全性には影響しない。
+const STRESS_DECAY_MULTIPLIER: f32 = 1.0;
+
 /// エネルギーが尽きても、成長(自己修復)の強さがここより弱くはならない下限。
 ///
 /// 正の成長を一様に弱めるだけでは「なだらかに弱る」ようにはならないことを実測で
@@ -72,6 +82,17 @@ impl LeniaBody {
     /// 現在のエネルギー(0.0..=1.0)。放置されて弱っているかの目安になる。
     pub fn energy(&self) -> f32 {
         self.energy
+    }
+
+    /// 環境ストレス(0.0..=1.0 目安。CPU 負荷など体の外側にある環境シグナルから
+    /// 決める)に応じて、エネルギーを追加で削る。
+    ///
+    /// `step` とは別のメソッドにしてあるのは、`step` を呼ぶ既存の多くのテストに
+    /// 環境シグナルを持たせる必要をなくすため。呼ぶかどうかは呼び出し側の自由で、
+    /// 呼ばなければ通常の減衰だけが働く。
+    pub fn apply_environmental_stress(&mut self, stress: f32) {
+        let extra_decay = ENERGY_DECAY_PER_STEP * STRESS_DECAY_MULTIPLIER * stress.clamp(0.0, 1.0);
+        self.energy = (self.energy - extra_decay).max(MIN_ENERGY);
     }
 
     /// 場を空にして生物を置き直す。エネルギーも満タンに戻す。
@@ -286,6 +307,60 @@ mod tests {
              neglected={neglected_mass} restored={}",
             body.mass()
         );
+    }
+
+    #[test]
+    fn environmental_stress_speeds_up_the_depletion_of_energy() {
+        // Arrange: ストレス無しと最大ストレスの2体を同じ条件で走らせる
+        let mut calm = orbium();
+        let mut stressed = orbium();
+
+        // Act: 1500ステップ(100秒ぶん)進める
+        for _ in 0..1500 {
+            calm.step();
+            stressed.step();
+            stressed.apply_environmental_stress(1.0);
+        }
+
+        // Assert: 通常の減衰だけならまだ尽きていないが、最大ストレスなら尽きている
+        assert!(calm.energy() > 0.0, "the calm body should still have energy left");
+        assert_eq!(stressed.energy(), MIN_ENERGY, "sustained max stress must exhaust energy sooner");
+    }
+
+    #[test]
+    fn sustained_maximum_stress_still_never_collapses_the_body() {
+        // Arrange
+        let mut body = orbium();
+
+        // Act: 常に最大ストレスを与えながら20000ステップ(≈22分)放置する
+        for _ in 0..20_000 {
+            body.step();
+            body.apply_environmental_stress(1.0);
+        }
+
+        // Assert: エネルギーが速く尽きても、growth_scale の下限が守るので崩壊しない
+        assert!(
+            body.mass() > 40.0,
+            "sustained stress must not collapse the body, got {}",
+            body.mass()
+        );
+    }
+
+    #[test]
+    fn zero_stress_matches_the_original_decay() {
+        // Arrange
+        let mut without_stress = orbium();
+        let mut with_zero_stress = orbium();
+
+        // Act
+        for _ in 0..500 {
+            without_stress.step();
+            with_zero_stress.step();
+            with_zero_stress.apply_environmental_stress(0.0);
+        }
+
+        // Assert: ストレス 0.0 は何も変えない
+        assert_eq!(without_stress.energy(), with_zero_stress.energy());
     }
 
     #[test]
