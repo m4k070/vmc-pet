@@ -182,6 +182,14 @@ impl DotRenderer {
                     (self.cell_pitch_x * (x as f32 + 0.5)) as i32,
                     (self.cell_pitch_y * (y as f32 + 0.5)) as i32,
                 );
+                // erase → draw の2回描画を1回にまとめる最適化(同心円の外接矩形を
+                // 自前の距離判定で塗る案)を試したが、実機で「生き物が動いた後ろに
+                // 薄く跡が残る」問題が起きた。1行ずつの書き込みに分けても再現したため
+                // SPI側の複数行アドレスウィンドウが原因ではなく、embedded-graphics の
+                // `Circle` と自前のラスタライズが1ピクセル単位で厳密には一致していない
+                // ことが原因と見ている。描画コストはそもそも1ステップの1割未満
+                // (docs/M5STACK.md 参照)で最適化の価値が薄いため、正しさを優先し
+                // 素直な2回描画に戻した。
                 if previous_radius > 0 {
                     let _ = Circle::with_center(center, previous_radius * 2)
                         .into_styled(PrimitiveStyle::with_fill(BACKGROUND_COLOR))
@@ -201,6 +209,10 @@ impl DotRenderer {
 
 #[main]
 fn main() -> ! {
+    // esp-hal の既定 CPU クロックは 80MHz(esp-hal の CpuClock::default() 定義を
+    // 参照)。240MHz(CpuClock::max())を試したところ、USB Serial/JTAG 経由の
+    // シリアル接続が反応しなくなり実機との通信が失われた(docs/M5STACK.md 参照)。
+    // 原因未特定のため、いったん既定値に戻してある。
     let peripherals = esp_hal::init(esp_hal::Config::default());
     let board = CoreS3::board();
 

@@ -55,4 +55,7 @@ opt-level = "s"
 codegen-units = 1       # LLVM can perform better optimizations using a single thread
 debug = 2               # prefer slower builds but better debugging experience
 lto = 'fat'
-opt-level = 's'
+# Lenia の畳み込み(体そのもの)が CPU バウンドで、フラッシュ16MBに対して
+# バイナリは1%程度しか使っていない(サイズを削る動機が無い)。esp-generate の
+# テンプレート既定値だった opt-level='s'(サイズ優先)から、速度優先の3に変えた。
+opt-level = 3
