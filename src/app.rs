@@ -4,12 +4,13 @@
 use std::time::{Duration, Instant};
 
 use crate::body::{load_animal, Field, Lenia};
-use crate::render::DotGrid;
+use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
-/// 場の解像度。Orbium は R=13 で 20x20 なので、64x64 あれば十分に動き回れる。
-const FIELD_WIDTH: usize = 64;
-const FIELD_HEIGHT: usize = 64;
+/// 場の解像度。表示と 1:1 にしてある。Orbium は 20x20 なので画面の 6 割強を占める。
+/// この大きさでも生物の挙動が変わらないことは実測で確かめた(docs/DESIGN.md 参照)。
+const FIELD_WIDTH: usize = 32;
+const FIELD_HEIGHT: usize = 32;
 
 /// 表示解像度。場を平均プーリングで落として描く。
 const GRID_COLUMNS: usize = 32;
@@ -30,6 +31,7 @@ pub struct Pet {
     field: Field,
     lenia: Lenia,
     grid: DotGrid,
+    camera: Camera,
     step_interval: Duration,
     last_step: Instant,
 }
@@ -52,6 +54,7 @@ impl Pet {
             field,
             lenia: Lenia::new(animal.params),
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
+            camera: Camera::new(),
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
         })
@@ -92,8 +95,11 @@ impl std::error::Error for PetError {}
 impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
         self.advance(Instant::now());
+        // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
+        self.camera.follow(self.field.view(), GRID_COLUMNS, GRID_ROWS);
         canvas.fill(0);
-        self.grid.draw(self.field.view(), canvas, width, height);
+        self.grid
+            .draw(self.field.view(), self.camera.origin(), canvas, width, height);
     }
 
     fn input_region(&self, width: u32, height: u32) -> InputRegion {
