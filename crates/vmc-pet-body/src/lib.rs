@@ -20,6 +20,7 @@ mod math;
 
 pub mod animal;
 pub mod camera;
+pub mod civil_time;
 pub mod controller;
 pub mod field;
 #[cfg(feature = "std")]
@@ -36,12 +37,13 @@ pub mod touch_echo;
 
 pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;
+pub use civil_time::unix_seconds_from_civil;
 pub use controller::{AutonomousController, ControllerParams, Observation};
 pub use field::{Field, FieldView};
 pub use habituation::Habituation;
 pub use lenia::Lenia;
 pub use lenia_body::LeniaBody;
-pub use memory::{PetMemory, SavedMemory};
+pub use memory::{scan_records, PetMemory, SavedMemory, RECORD_LEN};
 pub use perturbation::{accumulate_into, CellPos, Perturbation};
 pub use pet::Pet;
 pub use port::BodyPort;

@@ -30,6 +30,7 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use embedded_graphics::{
     pixelcolor::{Rgb565, RgbColor},
@@ -48,7 +49,9 @@ use core_s3::{
     touch::{Ft6336u, TouchPhase},
     CoreS3,
 };
+use embedded_hal_bus::i2c::RefCellDevice;
 use vmc_pet_body::{load_animal, Camera, CellPos, FieldView, Pet, TouchEchoView};
+use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -63,6 +66,14 @@ const STEP_INTERVAL: Duration = Duration::from_millis(66);
 
 /// タッチを読み取る間隔。touch_demo example に倣った値。
 const TOUCH_POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+/// 記憶をフラッシュへ書き出す間隔。PC版(app.rs の SAVE_INTERVAL)と同じ30秒。
+///
+/// フラッシュの消去回数の上限(おおむね10万回)に対して安全かどうかは
+/// 素朴には成り立たない。`persistence` が16バイトのレコードを256区画に
+/// 並べて消去を256回に1回へ減らしているので、30秒ごとでも
+/// 100000 × 256 × 30秒 ≒ 24年 もつ。詳しい理屈は persistence.rs 参照。
+const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
 /// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
@@ -285,13 +296,52 @@ fn main() -> ! {
     parts.display.clear(BACKGROUND_COLOR).expect("clear");
     let mut renderer = DotRenderer::new(board.display.width as u32, board.display.height as u32);
 
-    let mut touch = Ft6336u::new(parts.internal_i2c);
+    // タッチコントローラ(FT6336U)と RTC(BM8563)は同じ内部I²Cバスに
+    // いるので、バスを共有する。`main` は決して return しないため、
+    // ここで作った `RefCell` は実質 'static として借り出せる。
+    let internal_i2c = RefCell::new(parts.internal_i2c);
+
+    let mut touch = Ft6336u::new(RefCellDevice::new(&internal_i2c));
     let touch_ready = touch.init().is_ok();
     esp_println::println!(
         "vmc-pet-cores3: touch controller init {}",
         if touch_ready { "ok" } else { "FAILED" }
     );
     let delay = Delay::new();
+
+    // 電源が切れている間も進む時計。これが無いと「停止していた時間」が
+    // 分からず、記憶を持ち越しても再起動のたびに時間が止まったままになる。
+    let mut clock = match Clock::new(RefCellDevice::new(&internal_i2c)) {
+        Ok(clock) => {
+            if clock.lost_its_place() {
+                esp_println::println!(
+                    "vmc-pet-cores3: the RTC lost its time; starting the clock over \
+                     (no offline decay will be applied this boot)"
+                );
+            }
+            Some(clock)
+        }
+        Err(_) => {
+            esp_println::println!("vmc-pet-cores3: RTC unavailable; time away will be ignored");
+            None
+        }
+    };
+
+    // 記憶の置き場所(フラッシュの `pet` パーティション)。
+    let mut memory_store = match MemoryStore::new(peripherals.FLASH) {
+        Ok(store) => {
+            esp_println::println!(
+                "vmc-pet-cores3: memory store ready; {}/{} slots used",
+                store.used_slots(),
+                store.slots()
+            );
+            Some(store)
+        }
+        Err(error) => {
+            esp_println::println!("vmc-pet-cores3: memory unavailable ({error:?}); starting fresh");
+            None
+        }
+    };
 
     esp_println::println!("vmc-pet-cores3: loading Orbium unicaudatus");
     let animal = load_animal("O2u").expect("assets/animals.json に O2u が無い");
@@ -303,12 +353,33 @@ fn main() -> ! {
     );
 
     let mut pet = Pet::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+
+    // 前回の続きから始める。時計が無い・記憶が無い・時計が巻き戻っている
+    // のいずれでも、単に「新品として始まる」だけで先へ進む。
+    if let (Some(store), Some(clock)) = (memory_store.as_ref(), clock.as_mut()) {
+        if let (Some(saved), Ok(now)) = (store.load(), clock.now_unix_seconds()) {
+            let before = saved.memory.energy;
+            let seconds_away = saved.seconds_away(now);
+            pet.restore(saved.memory, seconds_away);
+            // 秒も出すのは、RTC がちゃんと進んでいるかを実機で確かめる手立てが
+            // これしかないため。時間単位だけだと、短い再起動が全部 0.0h に
+            // 見えてしまい、時計が止まっているのと区別がつかない。
+            esp_println::println!(
+                "vmc-pet-cores3: resumed after {:.1}h ({seconds_away:.0}s) away; \
+                 energy {before:.2} -> {:.2}",
+                seconds_away / 3600.0,
+                pet.energy()
+            );
+        }
+    }
+
     // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
     // (PC版 app.rs の Camera と同じもの。docs/DESIGN.md参照)。
     let mut camera = Camera::new();
 
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
+    let mut last_saved = Instant::now();
     loop {
         if touch_ready {
             match touch.read_report() {
@@ -364,6 +435,18 @@ fn main() -> ! {
                     pet.mass(),
                     pet.energy()
                 );
+            }
+        }
+
+        // 保存は体を進めるのとは別の頻度で行う。フラッシュへの書き込みは
+        // CPU を一瞬止める(同じフラッシュから命令を読んでいるため)ので、
+        // 描画と同じループの中で、体のステップとは独立に間隔を測る。
+        if last_saved.elapsed() >= SAVE_INTERVAL {
+            last_saved = Instant::now();
+            if let (Some(store), Some(clock)) = (memory_store.as_mut(), clock.as_mut()) {
+                if let Ok(now) = clock.now_unix_seconds() {
+                    store.save(pet.memory(), now);
+                }
             }
         }
 

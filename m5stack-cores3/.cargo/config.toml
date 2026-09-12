@@ -1,5 +1,9 @@
 [target.xtensa-esp32s3-none-elf]
-runner = "espflash flash --monitor --chip esp32s3"
+# `--partition-table` を渡すのは、記憶を置く `pet` パーティションが
+# espflash の既定のパーティション表には無いため(partitions.csv 参照)。
+# これを忘れると起動時に "memory unavailable (PartitionMissing)" が出て、
+# 記憶を持ち越さない状態で動く。
+runner = "espflash flash --monitor --chip esp32s3 --partition-table partitions.csv"
 
 [env]
 ESP_LOG="info"

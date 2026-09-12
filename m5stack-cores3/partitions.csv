@@ -1,0 +1,17 @@
+# CoreS3(フラッシュ16MB)のパーティション表。
+#
+# espflash が自動生成する既定の表には `nvs` はあるが、そこは ESP-IDF の
+# Non-Volatile Storage 形式のための領域で、この no_std アプリは NVS を使わない。
+# 空いているからといって別形式の生バイト列を書き込むと、名前が約束している
+# 中身と実際の中身が食い違う。そこで記憶用の領域を明示的に切ってある。
+#
+# `pet` は 0x1000(4KB)= フラッシュの消去単位(セクタ)ちょうど1つ。記憶は
+# 16バイトのレコードなので256区画ぶん入る(crates/vmc-pet-body/src/memory.rs
+# の scan_records 参照)。
+#
+# この表は `.cargo/config.toml` の runner が `--partition-table` で渡す。
+# Name,     Type, SubType,   Offset,    Size,     Flags
+nvs,        data, nvs,       0x9000,    0x6000,
+phy_init,   data, phy,       0xf000,    0x1000,
+factory,    app,  factory,   0x10000,   0xf00000,
+pet,        data, undefined, 0xf10000,  0x1000,
