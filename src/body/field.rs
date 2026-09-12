@@ -1,6 +1,7 @@
 //! 体の場。値域を 0.0..=1.0 に正規化して保持する。
 
 use super::animal::Pattern;
+use super::perturbation::accumulate_into;
 use super::Perturbation;
 
 /// 場のセルが取りうる値の範囲。
@@ -38,27 +39,14 @@ impl Field {
 
     /// 摂動を場に注入する。場はトーラスなので、半径が端を越えた分は反対側へ回り込む。
     pub fn inject(&mut self, perturbation: &Perturbation) {
-        let reach = perturbation.radius.ceil() as i32;
-        if reach <= 0 {
-            return;
-        }
-        let width = self.width as i32;
-        let height = self.height as i32;
-
-        for dy in -reach..=reach {
-            for dx in -reach..=reach {
-                let distance = ((dx * dx + dy * dy) as f32).sqrt();
-                let weight = perturbation.weight_at(distance);
-                if weight <= 0.0 {
-                    continue;
-                }
-                let x = (perturbation.at.x as i32 + dx).rem_euclid(width) as usize;
-                let y = (perturbation.at.y as i32 + dy).rem_euclid(height) as usize;
-                let index = y * self.width + x;
-                self.cells[index] = (self.cells[index] + perturbation.amount * weight)
-                    .clamp(MIN_CELL_VALUE, MAX_CELL_VALUE);
-            }
-        }
+        accumulate_into(
+            &mut self.cells,
+            self.width,
+            self.height,
+            perturbation,
+            MIN_CELL_VALUE,
+            MAX_CELL_VALUE,
+        );
     }
 
     /// 場を空にする。

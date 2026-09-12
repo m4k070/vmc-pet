@@ -33,6 +33,41 @@ impl Perturbation {
     }
 }
 
+/// トーラス上のセル配列へ、山型の摂動を加算する。
+///
+/// `body::Field::inject` と、入力を可視化するためだけの `render::TouchEcho::touch` が
+/// この処理を共有する。両者は加算先の配列とクランプ範囲が違うだけで、
+/// 「山型の重みで加算し、端は反対側へ折り返す」という処理そのものは同じであるべき
+/// (予測可能性: 同じ処理は同じパターンで書く)。
+pub fn accumulate_into(
+    cells: &mut [f32],
+    width: usize,
+    height: usize,
+    perturbation: &Perturbation,
+    min: f32,
+    max: f32,
+) {
+    let reach = perturbation.radius.ceil() as i32;
+    if reach <= 0 {
+        return;
+    }
+    let (signed_width, signed_height) = (width as i32, height as i32);
+
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let distance = ((dx * dx + dy * dy) as f32).sqrt();
+            let weight = perturbation.weight_at(distance);
+            if weight <= 0.0 {
+                continue;
+            }
+            let x = (perturbation.at.x as i32 + dx).rem_euclid(signed_width) as usize;
+            let y = (perturbation.at.y as i32 + dy).rem_euclid(signed_height) as usize;
+            let index = y * width + x;
+            cells[index] = (cells[index] + perturbation.amount * weight).clamp(min, max);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +116,77 @@ mod tests {
 
         // Act / Assert
         assert_eq!(perturbation.weight_at(0.0), 0.0);
+    }
+
+    #[test]
+    fn accumulate_into_raises_the_centre_most() {
+        // Arrange
+        let mut cells = vec![0.0f32; 16 * 16];
+
+        // Act
+        accumulate_into(
+            &mut cells,
+            16,
+            16,
+            &Perturbation {
+                at: CellPos { x: 8, y: 8 },
+                radius: 3.0,
+                amount: 0.5,
+            },
+            0.0,
+            1.0,
+        );
+
+        // Assert
+        assert!((cells[8 * 16 + 8] - 0.5).abs() < 1e-5);
+        assert!(cells[8 * 16 + 9] < cells[8 * 16 + 8]);
+        assert_eq!(cells[8 * 16 + 12], 0.0, "outside the radius must stay untouched");
+    }
+
+    #[test]
+    fn accumulate_into_wraps_around_the_torus() {
+        // Arrange: 場の端に注入する
+        let mut cells = vec![0.0f32; 16 * 16];
+
+        // Act
+        accumulate_into(
+            &mut cells,
+            16,
+            16,
+            &Perturbation {
+                at: CellPos { x: 0, y: 0 },
+                radius: 3.0,
+                amount: 0.5,
+            },
+            0.0,
+            1.0,
+        );
+
+        // Assert: 反対側の端にも回り込んでいる
+        assert!(cells[15] > 0.0, "the blob must wrap to the far edge");
+        assert!(cells[15 * 16] > 0.0);
+    }
+
+    #[test]
+    fn accumulate_into_respects_the_given_clamp_range() {
+        // Arrange: すでに上限いっぱいの配列へさらに加算する
+        let mut cells = vec![1.0f32; 16 * 16];
+
+        // Act
+        accumulate_into(
+            &mut cells,
+            16,
+            16,
+            &Perturbation {
+                at: CellPos { x: 8, y: 8 },
+                radius: 3.0,
+                amount: 5.0,
+            },
+            0.0,
+            1.0,
+        );
+
+        // Assert
+        assert_eq!(cells[8 * 16 + 8], 1.0);
     }
 }
