@@ -1,11 +1,15 @@
-//! ペット本体。体・IF層・描画・時間をここで束ねる。
-//! 唯一の可変状態の持ち主であり、体には `BodyPort` 越しにしか働きかけない。
+//! PC版のペット。世界モデル(体・入力の翻訳・崩壊検知・echo)は
+//! `vmc_pet_body::Pet` が持つ。ここが持つのは PC 固有の事情だけ:
+//! 「いつ進めるか」(std::time、追いつき方の方針)、「どう入力を受け取り、
+//! どう描くか」(Wayland のポインタ座標・ドットマトリックス描画)、
+//! CPU 負荷の読み取り。M5Stack版(m5stack-cores3/src/bin/main.rs)とは
+//! この境界のところだけが違い、それ以外の挙動は完全に共有している。
 
 use std::time::{Duration, Instant};
 
-use vmc_pet_body::{load_animal, BodyPort, LeniaBody};
-use crate::interface::{body_perturbation_for, echo_perturbation_for, MachineLoad, Touch};
-use crate::render::{Camera, DotGrid, TouchEcho};
+use vmc_pet_body::Pet as PetCore;
+use crate::interface::MachineLoad;
+use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
 /// 場の解像度。表示と 1:1 にしてある。Orbium は 20x20 なので画面の 6 割強を占める。
@@ -24,34 +28,28 @@ pub const DEFAULT_ANIMAL_CODE: &str = "O2u";
 /// 場を進める頻度。描画レートとは独立に決める。
 const STEPS_PER_SECOND: u32 = 15;
 
-/// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
-/// Lenia はカオス系で、摂動の強さを絞っても履歴次第では崩壊しうるため、
-/// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
-const COLLAPSE_MASS: f32 = 5.0;
-
 /// 1回の描画でまとめて進めるステップ数の上限。
 /// 復帰直後など大きく遅れた場合に、追いつこうとして固まるのを防ぐ。
+/// (この上限そのものはPC版だけの追いつき方針。M5Stack版は毎回1ステップだけ
+/// 進めて自然に遅れるという別の方針を採っている。docs/M5STACK.md 参照)
 const MAX_CATCH_UP_STEPS: u32 = 4;
 
 /// echo(入力の可視化)の、毎フレームの減衰率。
-/// `interface::pointer::HOVER_ECHO_AMOUNT_PER_FRAME` と組み合わさって定常値を決める
-/// (docs/DESIGN.md「入力の可視化を体の場から分離する」参照)。この値では、
-/// 撫で続けたときに約4秒で 0.8 前後へ収束し、離すと1〜2秒ほどで消える。
+/// `interface::pointer.rs`(旧)にあった `HOVER_ECHO_AMOUNT_PER_FRAME` と
+/// 組み合わさって定常値を決める(docs/DESIGN.md「入力の可視化を体の場から
+/// 分離する」参照)。この値では、撫で続けたときに約4秒で 0.8 前後へ収束し、
+/// 離すと1〜2秒ほどで消える。
 const ECHO_DECAY_PER_FRAME: f32 = 0.90;
 
 /// Lenia の場を体として持つペット。
 pub struct Pet {
-    body: LeniaBody,
-    /// 入力を可視化するためだけのデータ。体の場とは別に持ち、体には一切影響しない。
-    echo: TouchEcho,
+    core: PetCore,
     grid: DotGrid,
     camera: Camera,
     step_interval: Duration,
     last_step: Instant,
     /// 直近のサーフェスの大きさ。ポインタ座標を場のセルへ写すのに要る。
     surface_size: (u32, u32),
-    /// ポインタが体の上にある間の位置。撫でている扱いで、毎フレーム echo を光らせる。
-    hovering_at: Option<vmc_pet_body::CellPos>,
     /// 機械の CPU 負荷を「環境の厳しさ」として体に伝えるための読み取り役。
     machine_load: MachineLoad,
 }
@@ -61,41 +59,37 @@ impl Pet {
     /// 生物データは実行ファイルに埋め込んであるため、読み込みに失敗するのは
     /// コードが存在しないか、データが壊れている場合だけで、その場合は起動を止める。
     pub fn new(code: &str) -> Result<Self, PetError> {
-        let animal = load_animal(code).map_err(PetError::Animal)?;
+        let animal = vmc_pet_body::load_animal(code).map_err(PetError::Animal)?;
         eprintln!(
             "vmc-pet: loaded {} ({}) R={} T={}",
             animal.name, animal.code, animal.params.radius, animal.params.time_divisor
         );
 
         Ok(Self {
-            body: LeniaBody::new(animal, FIELD_WIDTH, FIELD_HEIGHT),
-            echo: TouchEcho::new(FIELD_WIDTH, FIELD_HEIGHT),
+            core: PetCore::new(animal, FIELD_WIDTH, FIELD_HEIGHT),
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
             camera: Camera::new(),
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
             surface_size: (0, 0),
-            hovering_at: None,
             machine_load: MachineLoad::new(),
         })
     }
 
     /// 前回のステップからの経過分だけ体を進める。
-    /// 体に触れるのはクリックだけなので、ここではホバーを一切扱わない。
     fn advance(&mut self, now: Instant) {
         let mut steps = 0;
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
-            let energy_before = self.body.energy();
-            self.body.step();
+            let energy_before = self.core.energy();
+            let collapsed = self.core.step();
             // 機械が忙しいほど、環境が厳しくエネルギーが早く尽きるようにする
-            self.body.apply_environmental_stress(self.machine_load.sample());
-            if energy_before > 0.0 && self.body.energy() == 0.0 {
+            self.core.apply_environmental_stress(self.machine_load.sample());
+            if energy_before > 0.0 && self.core.energy() == 0.0 {
                 eprintln!("vmc-pet: energy depleted; the body is weakening from neglect");
             }
-            if self.body.mass() < COLLAPSE_MASS {
+            if collapsed {
                 eprintln!("vmc-pet: the body collapsed; reviving");
-                self.body.revive();
             }
             self.last_step += self.step_interval;
             steps += 1;
@@ -103,17 +97,6 @@ impl Pet {
         if steps == MAX_CATCH_UP_STEPS {
             // 追いつけなかった分は捨てる
             self.last_step = now;
-        }
-    }
-
-    /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
-    /// 体に働きかける経路はここだけ。ホバーは echo にしか届かない。
-    fn touch(&mut self, touch: Touch) {
-        if let Some(perturbation) = body_perturbation_for(touch) {
-            self.body.inject(perturbation);
-        }
-        if let Some(perturbation) = echo_perturbation_for(touch) {
-            self.echo.touch(&perturbation);
         }
     }
 
@@ -152,18 +135,15 @@ impl Surface for Pet {
 
         // echo(入力の可視化)は体の時間とは独立に、描画のたびに更新する。
         // 体の場は書き換えないので、ホバーし続けても体には何の影響も無い。
-        if let Some(at) = self.hovering_at {
-            self.touch(Touch::Hover { at });
-        }
-        self.echo.decay(ECHO_DECAY_PER_FRAME);
+        self.core.tick_input(ECHO_DECAY_PER_FRAME);
 
         // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
         self.camera
-            .follow(self.body.observe(), GRID_COLUMNS, GRID_ROWS);
+            .follow(self.core.observe(), GRID_COLUMNS, GRID_ROWS);
         canvas.fill(0);
         self.grid.draw(
-            self.body.observe(),
-            self.echo.view(),
+            self.core.observe(),
+            self.core.echo_view(),
             self.camera.origin(),
             canvas,
             width,
@@ -184,17 +164,14 @@ impl Surface for Pet {
     fn on_pointer(&mut self, input: PointerInput) {
         match input {
             PointerInput::Entered { x, y } | PointerInput::Moved { x, y } => {
-                self.hovering_at = self.cell_under(x, y);
+                self.core.hover_at(self.cell_under(x, y));
             }
-            PointerInput::Pressed { x, y } => {
-                self.hovering_at = self.cell_under(x, y);
-                if let Some(at) = self.hovering_at {
-                    self.touch(Touch::Click { at });
-                }
-            }
+            PointerInput::Pressed { x, y } => match self.cell_under(x, y) {
+                Some(at) => self.core.click(at),
+                None => self.core.hover_at(None),
+            },
             PointerInput::Left => {
-                self.hovering_at = None;
-                self.touch(Touch::Leave);
+                self.core.leave();
             }
         }
     }
@@ -210,17 +187,6 @@ mod tests {
         let mut canvas = vec![0u8; 384 * 384 * 4];
         pet.draw(&mut canvas, 384, 384);
         pet
-    }
-
-    fn mass(pet: &Pet) -> f32 {
-        let view = pet.body.observe();
-        let mut total = 0.0;
-        for y in 0..view.height() {
-            for x in 0..view.width() {
-                total += view.get(x, y);
-            }
-        }
-        total
     }
 
     #[test]
@@ -271,7 +237,7 @@ mod tests {
     fn being_left_alone_weakens_the_body_without_killing_it() {
         // Arrange
         let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
-        let healthy = mass(&pet);
+        let healthy = pet.core.mass();
 
         // Act: 一切触れずに20000ステップ(≈22分)進める
         for _ in 0..20_000 {
@@ -280,7 +246,7 @@ mod tests {
         }
 
         // Assert: 弱るが、崩壊はしない
-        let neglected = mass(&pet);
+        let neglected = pet.core.mass();
         assert!(neglected > 40.0, "neglect must not kill the body, got {neglected}");
         assert!(
             neglected < healthy * 0.98,
@@ -296,7 +262,7 @@ mod tests {
             let next = pet.last_step + pet.step_interval;
             pet.advance(next);
         }
-        let neglected = mass(&pet);
+        let neglected = pet.core.mass();
 
         // Act: クリックを繰り返して育て直す
         for _ in 0..30 {
@@ -309,9 +275,9 @@ mod tests {
 
         // Assert
         assert!(
-            mass(&pet) > neglected,
+            pet.core.mass() > neglected,
             "clicking must let the body recover; neglected={neglected} restored={}",
-            mass(&pet)
+            pet.core.mass()
         );
     }
 
@@ -319,13 +285,13 @@ mod tests {
     fn a_click_inside_the_grid_feeds_the_body() {
         // Arrange
         let mut pet = drawn_pet();
-        let before = mass(&pet);
+        let before = pet.core.mass();
 
         // Act: サーフェスの中央を押す
         pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
 
         // Assert
-        assert!(mass(&pet) > before, "a click must inject energy");
+        assert!(pet.core.mass() > before, "a click must inject energy");
     }
 
     #[test]
@@ -337,39 +303,39 @@ mod tests {
         pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
 
         // Assert
-        let at = pet.hovering_at.expect("the click must land inside the grid");
-        assert!(pet.echo.view().get(at.x, at.y) > 0.0);
+        let at = pet.core.touching_at().expect("the click must land inside the grid");
+        assert!(pet.core.echo_view().get(at.x, at.y) > 0.0);
     }
 
     #[test]
     fn hovering_lights_the_echo_without_touching_the_body() {
         // Arrange
         let mut pet = drawn_pet();
-        let before = mass(&pet);
+        let before = pet.core.mass();
 
         // Act: ポインタを乗せてから描画を1回通す(echo の更新は draw の中で起こる)
         pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
-        let at = pet.hovering_at.expect("hovering over the grid must resolve a cell");
+        let at = pet.core.touching_at().expect("hovering over the grid must resolve a cell");
         let mut canvas = vec![0u8; 384 * 384 * 4];
         pet.draw(&mut canvas, 384, 384);
 
         // Assert: 体の総量は変わらないが、echo は光る
-        assert_eq!(mass(&pet), before, "hovering must not touch the body");
-        assert!(pet.echo.view().get(at.x, at.y) > 0.0, "hovering must light the echo");
+        assert_eq!(pet.core.mass(), before, "hovering must not touch the body");
+        assert!(pet.core.echo_view().get(at.x, at.y) > 0.0, "hovering must light the echo");
     }
 
     #[test]
     fn a_pointer_outside_the_grid_touches_nothing() {
         // Arrange
         let mut pet = drawn_pet();
-        let before = mass(&pet);
+        let before = pet.core.mass();
 
         // Act: グリッドの外を押す
         pet.on_pointer(PointerInput::Pressed { x: 1000.0, y: 1000.0 });
 
         // Assert
-        assert_eq!(mass(&pet), before);
-        assert!(pet.hovering_at.is_none());
+        assert_eq!(pet.core.mass(), before);
+        assert!(pet.core.touching_at().is_none());
     }
 
     #[test]
@@ -377,13 +343,13 @@ mod tests {
         // Arrange
         let mut pet = drawn_pet();
         pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
-        assert!(pet.hovering_at.is_some());
+        assert!(pet.core.touching_at().is_some());
 
         // Act
         pet.on_pointer(PointerInput::Left);
 
         // Assert
-        assert!(pet.hovering_at.is_none());
+        assert!(pet.core.touching_at().is_none());
     }
 }
 
@@ -414,7 +380,7 @@ mod resilience_tests {
                 y: (at.y + ((state >> 13) % 5) as usize) % FIELD_HEIGHT,
             };
             if round % 3 == 0 {
-                pet.touch(Touch::Click { at });
+                pet.core.click(at);
             }
             run(pet, 10);
         }
@@ -431,7 +397,7 @@ mod resilience_tests {
             harass(&mut pet, seed, 40);
             run(&mut pet, 600);
 
-            let mass = pet.body.mass();
+            let mass = pet.core.mass();
             assert!(
                 mass > 40.0,
                 "the pet must recover after harassment (seed {seed}), got {mass}"
@@ -446,20 +412,20 @@ mod resilience_tests {
         for _ in 0..12 {
             for y in (0..FIELD_HEIGHT).step_by(4) {
                 for x in (0..FIELD_WIDTH).step_by(4) {
-                    pet.body.inject(Perturbation {
+                    pet.core.inject(Perturbation {
                         at: CellPos { x, y },
                         radius: 6.0,
                         amount: 1.0,
                     });
                 }
             }
-            pet.body.step();
+            pet.core.step();
         }
 
         // Act: 崩壊を検知させる
         run(&mut pet, 900);
 
         // Assert
-        assert!(pet.body.mass() > 40.0, "the collapsed body must be revived");
+        assert!(pet.core.mass() > 40.0, "the collapsed body must be revived");
     }
 }

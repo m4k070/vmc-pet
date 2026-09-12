@@ -9,4 +9,4 @@ pub mod dot_grid;
 
 pub use camera::Camera;
 pub use dot_grid::DotGrid;
-pub use vmc_pet_body::{TouchEcho, TouchEchoView};
+pub use vmc_pet_body::TouchEchoView;

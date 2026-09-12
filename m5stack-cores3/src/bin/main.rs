@@ -6,10 +6,12 @@
 //! PC版(src/render/dot_grid.rs, src/app.rs)と考え方は同じだが、Rgb565・
 //! embedded-graphics・FT6336U静電容量タッチ向けに書き直してある。
 //!
-//! Touch の意味づけ(体には触れないホバー、安全域の内側に採ったクリックの強さ)
-//! と TouchEcho(入力の可視化。体には一切影響しない)は `vmc_pet_body` 側にある。
-//! PC版と同じ実装・同じ安全性検証済みの定数を共有する
-//! (docs/M5STACK.md「タッチ操作の実装」参照)。
+//! 体(世界モデル)・入力の翻訳・崩壊検知・echo(入力の可視化。体には一切
+//! 影響しない)は `vmc_pet_body::Pet` にまとめてある。PC版(app.rs)と完全に
+//! 同じ実装・同じ安全性検証済みの定数を共有する(docs/M5STACK.md「PC/M5Stack
+//! どちらでも世界モデルを動かせるようコードを整理する」参照)。ここが持つのは
+//! 「いつ進めるか」(esp_hal::time)と「どう入力を受け取り、どう描くか」
+//! (FT6336U・embedded-graphics)だけ。
 //!
 //! 実機で確認したところ、毎フレーム画面全体を `clear` してから描き直す素朴な
 //! 実装は、ちらつきとフレームレートの不安定さを引き起こした。そこで
@@ -41,10 +43,7 @@ use core_s3::{
     touch::{Ft6336u, TouchPhase},
     CoreS3,
 };
-use vmc_pet_body::{
-    body_perturbation_for, echo_perturbation_for, load_animal, BodyPort, CellPos, FieldView,
-    LeniaBody, Touch, TouchEcho, TouchEchoView,
-};
+use vmc_pet_body::{load_animal, CellPos, FieldView, Pet, TouchEchoView};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -80,17 +79,6 @@ const BODY_COLOR: Rgb565 = Rgb565::new(9, 43, 20);
 /// 入力 echo の色(暖色の白)。PC版の ECHO_COLOR と同じ狙いで、体の色とはっきり
 /// 区別がつくようにしてある。
 const ECHO_COLOR: Rgb565 = Rgb565::new(31, 58, 22);
-
-/// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
-/// PC版 app.rs の touch() と同じ役割(体に働きかける経路はここだけ)。
-fn apply_touch(body: &mut LeniaBody, echo: &mut TouchEcho, touch: Touch) {
-    if let Some(perturbation) = body_perturbation_for(touch) {
-        body.inject(perturbation);
-    }
-    if let Some(perturbation) = echo_perturbation_for(touch) {
-        echo.touch(&perturbation);
-    }
-}
 
 fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t) as u8
@@ -258,11 +246,7 @@ fn main() -> ! {
         animal.params.time_divisor
     );
 
-    let mut body = LeniaBody::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
-    let mut echo = TouchEcho::new(FIELD_WIDTH, FIELD_HEIGHT);
-    // 指が触れている間の位置。撫でている扱いで、毎回 echo を光らせ続ける
-    // (PC版 app.rs の hovering_at と同じ役割)。
-    let mut touching_at: Option<CellPos> = None;
+    let mut pet = Pet::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
 
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
@@ -285,41 +269,40 @@ fn main() -> ! {
                         // Down フェーズのサンプルを一度も読めないまま Move や Up
                         // だけを見ることになり、Down 頼りの判定ではタッチを丸ごと
                         // 見逃していた。
-                        if touching_at.is_none() {
-                            if let Some(at) = new_touching_at {
-                                apply_touch(&mut body, &mut echo, Touch::Click { at });
-                            }
+                        match new_touching_at {
+                            Some(at) if pet.touching_at().is_none() => pet.click(at),
+                            Some(at) => pet.hover_at(Some(at)),
+                            None => pet.leave(),
                         }
-                        touching_at = new_touching_at;
                     } else {
-                        touching_at = None;
+                        pet.leave();
                     }
                 }
-                Err(_) => touching_at = None,
+                Err(_) => pet.leave(),
             }
         }
 
-        if let Some(at) = touching_at {
-            apply_touch(&mut body, &mut echo, Touch::Hover { at });
-        }
-        echo.decay(ECHO_DECAY_PER_POLL);
+        pet.tick_input(ECHO_DECAY_PER_POLL);
 
         // 描画(SPIへの書き込み)は重く、体が実際に1ステップ進んだときだけ行う。
         // タッチのサンプリング(上のポーリング)とは頻度を分離してある。
         // 以前ここを毎ポーリング(40ms)無条件に呼んでいたため、描画頻度が
         // 実質2倍近くに増え、フレームレート全体が悪化していた。
         if last_step.elapsed() >= STEP_INTERVAL {
-            body.step();
+            let collapsed = pet.step();
             last_step += STEP_INTERVAL;
             step += 1;
 
-            renderer.update(&mut parts.display, body.observe(), echo.view());
+            renderer.update(&mut parts.display, pet.observe(), pet.echo_view());
 
+            if collapsed {
+                esp_println::println!("vmc-pet-cores3: the body collapsed; reviving");
+            }
             if step % 15 == 0 {
                 esp_println::println!(
                     "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2}",
-                    body.mass(),
-                    body.energy()
+                    pet.mass(),
+                    pet.energy()
                 );
             }
         }
