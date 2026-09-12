@@ -122,8 +122,8 @@ fn imbalance(field: FieldView<'_>, centroid_x: f32, centroid_y: f32) -> (f32, f3
                 continue;
             }
             mass += value;
-            let dx = signed_offset(x as f32 - centroid_x, width);
-            let dy = signed_offset(y as f32 - centroid_y, height);
+            let dx = crate::field::toroidal_signed_offset(x as f32 - centroid_x, width);
+            let dy = crate::field::toroidal_signed_offset(y as f32 - centroid_y, height);
             variance_x += value * dx * dx;
             variance_y += value * dy * dy;
             third_moment_x += value * dx * dx * dx;
@@ -147,16 +147,6 @@ fn skewness(third_moment: f32, variance: f32) -> f32 {
         return 0.0;
     }
     third_moment / (variance * crate::math::sqrtf(variance))
-}
-
-/// トーラス上の符号付き最短オフセット。`size/2` を超えたら反対側から測り直す。
-fn signed_offset(raw: f32, size: f32) -> f32 {
-    let wrapped = crate::math::rem_euclidf(raw, size);
-    if wrapped > size / 2.0 {
-        wrapped - size
-    } else {
-        wrapped
-    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,8 @@ pub mod animal;
 pub mod camera;
 pub mod controller;
 pub mod field;
+#[cfg(feature = "std")]
+pub mod fitness;
 pub mod lenia;
 pub mod lenia_body;
 pub mod perturbation;

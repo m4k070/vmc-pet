@@ -158,6 +158,18 @@ impl FieldView<'_> {
     }
 }
 
+/// トーラス上の符号付き最短オフセット。`size/2` を超えたら反対側から測り直す。
+/// 「AからBへの最短距離(向き付き)」を求める場面で共通して使う
+/// (`controller.rs` の歪み計算、`fitness.rs` の重心の移動量など)。
+pub(crate) fn toroidal_signed_offset(raw: f32, size: f32) -> f32 {
+    let wrapped = crate::math::rem_euclidf(raw, size);
+    if wrapped > size / 2.0 {
+        wrapped - size
+    } else {
+        wrapped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +213,15 @@ mod tests {
         // Assert: 正しい重心は 31.5
         let error = (x - 31.5).abs().min(32.0 - (x - 31.5).abs());
         assert!(error < 0.1, "got {x}");
+    }
+
+    #[test]
+    fn toroidal_signed_offset_takes_the_short_way_around() {
+        // Arrange / Act / Assert: 32幅の場で 30 → 2 は、素直に引けば -28 だが、
+        // 反対回り(+4)の方が短いのでそちらを返す
+        assert!((toroidal_signed_offset(2.0 - 30.0, 32.0) - 4.0).abs() < 1e-5);
+        // 近い場合はそのまま
+        assert!((toroidal_signed_offset(5.0 - 3.0, 32.0) - 2.0).abs() < 1e-5);
     }
 
     #[test]
