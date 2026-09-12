@@ -17,8 +17,9 @@ const FIELD_HEIGHT: usize = 32;
 const GRID_COLUMNS: usize = 32;
 const GRID_ROWS: usize = 32;
 
-/// 起動時に読み込む生物。assets/animals.json のコードを指す。
-const INITIAL_ANIMAL_CODE: &str = "O2u";
+/// 起動時に読み込む生物のデフォルト。assets/animals.json のコードを指す。
+/// `--animal` 引数(main.rs)で上書きできる。
+pub const DEFAULT_ANIMAL_CODE: &str = "O2u";
 
 /// 場を進める頻度。描画レートとは独立に決める。
 const STEPS_PER_SECOND: u32 = 15;
@@ -56,11 +57,11 @@ pub struct Pet {
 }
 
 impl Pet {
-    /// 生物を読み込んで体を作る。
+    /// `code` の生物を読み込んで体を作る。
     /// 生物データは実行ファイルに埋め込んであるため、読み込みに失敗するのは
-    /// データが壊れている場合だけで、その場合は起動を止める。
-    pub fn new() -> Result<Self, PetError> {
-        let animal = load_animal(INITIAL_ANIMAL_CODE).map_err(PetError::Animal)?;
+    /// コードが存在しないか、データが壊れている場合だけで、その場合は起動を止める。
+    pub fn new(code: &str) -> Result<Self, PetError> {
+        let animal = load_animal(code).map_err(PetError::Animal)?;
         eprintln!(
             "vmc-pet: loaded {} ({}) R={} T={}",
             animal.name, animal.code, animal.params.radius, animal.params.time_divisor
@@ -205,7 +206,7 @@ mod tests {
 
     /// 描画を1回通して、サーフェスの大きさを Pet に教える。
     fn drawn_pet() -> Pet {
-        let mut pet = Pet::new().unwrap();
+        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
         let mut canvas = vec![0u8; 384 * 384 * 4];
         pet.draw(&mut canvas, 384, 384);
         pet
@@ -225,7 +226,7 @@ mod tests {
     #[test]
     fn input_region_matches_the_drawn_grid() {
         // Arrange
-        let pet = Pet::new().unwrap();
+        let pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
 
         // Act
         let region = pet.input_region(384, 384);
@@ -240,7 +241,7 @@ mod tests {
     #[test]
     fn advance_runs_one_step_per_interval() {
         // Arrange
-        let mut pet = Pet::new().unwrap();
+        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
         let start = pet.last_step;
         let interval = pet.step_interval;
 
@@ -254,7 +255,7 @@ mod tests {
     #[test]
     fn advance_drops_the_backlog_when_it_falls_too_far_behind() {
         // Arrange
-        let mut pet = Pet::new().unwrap();
+        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
         let start = pet.last_step;
         let interval = pet.step_interval;
 
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn being_left_alone_weakens_the_body_without_killing_it() {
         // Arrange
-        let mut pet = Pet::new().unwrap();
+        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
         let healthy = mass(&pet);
 
         // Act: 一切触れずに20000ステップ(≈22分)進める
@@ -426,7 +427,7 @@ mod resilience_tests {
         // 単調にならない」という問題(docs/DESIGN.md 参照)はここでは起こりえない。
         // それでも崩壊検知は防御として残す。
         for seed in [12345u64, 99, 777, 20260912] {
-            let mut pet = Pet::new().unwrap();
+            let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
             harass(&mut pet, seed, 40);
             run(&mut pet, 600);
 
@@ -441,7 +442,7 @@ mod resilience_tests {
     #[test]
     fn a_deliberately_scorched_field_is_revived() {
         // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う
-        let mut pet = Pet::new().unwrap();
+        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
         for _ in 0..12 {
             for y in (0..FIELD_HEIGHT).step_by(4) {
                 for x in (0..FIELD_WIDTH).step_by(4) {
