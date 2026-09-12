@@ -106,6 +106,11 @@ struct DotRenderer {
     previous_radius: Vec<u32>,
     /// 前フレームで描いた各セルの色。半径が同じでも色が変わったら描き直す。
     previous_color: Vec<Rgb565>,
+    /// 前フレームで実際に円を描いた画面座標。カメラが動く(重心追従で毎フレーム
+    /// サブピクセル単位にずれる)ようになったため、半径・色が同じでも「前回
+    /// 実際に描いた場所」を覚えておかないと、消す円を今回の(ずれた)位置に
+    /// 描いてしまい、古い位置のドットを消し損ねて残像になる。
+    previous_center: Vec<Point>,
     cell_pitch_x: f32,
     cell_pitch_y: f32,
     max_radius: f32,
@@ -120,6 +125,7 @@ impl DotRenderer {
         Self {
             previous_radius: vec![0; FIELD_WIDTH * FIELD_HEIGHT],
             previous_color: vec![BACKGROUND_COLOR; FIELD_WIDTH * FIELD_HEIGHT],
+            previous_center: vec![Point::zero(); FIELD_WIDTH * FIELD_HEIGHT],
             cell_pitch_x,
             cell_pitch_y,
             max_radius,
@@ -194,12 +200,6 @@ impl DotRenderer {
                 };
                 let color = lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix);
 
-                let previous_radius = self.previous_radius[index];
-                let previous_color = self.previous_color[index];
-                if radius == previous_radius && (radius == 0 || color == previous_color) {
-                    continue;
-                }
-
                 // 場のセルから画面座標への変換は、選ぶセル(cell_origin)と
                 // 画面上の位置(shift)を別々にずらす。これにより、生物の実際の
                 // 動きが1セル未満の単位でも滑らかに見える(dot_grid.rs 参照)。
@@ -207,6 +207,22 @@ impl DotRenderer {
                     (self.cell_pitch_x * (column as f32 + 0.5 - shift_x)) as i32,
                     (self.cell_pitch_y * (row as f32 + 0.5 - shift_y)) as i32,
                 );
+
+                let previous_radius = self.previous_radius[index];
+                let previous_color = self.previous_color[index];
+                let previous_center = self.previous_center[index];
+                // カメラが動くと、半径・色が変わらないセルでも画面上の位置
+                // (center)だけがずれる。これを比較に含めないと、消す円が
+                // 「前回実際に描いた場所」ではなく「今回の(ずれた)位置」に
+                // 描かれてしまい、古い位置のドットを消し損ねて残像になる
+                // (実機でユーザーが確認して見つかったバグ)。
+                if radius == previous_radius
+                    && center == previous_center
+                    && (radius == 0 || color == previous_color)
+                {
+                    continue;
+                }
+
                 // erase → draw の2回描画を1回にまとめる最適化(同心円の外接矩形を
                 // 自前の距離判定で塗る案)を試したが、実機で「生き物が動いた後ろに
                 // 薄く跡が残る」問題が起きた。1行ずつの書き込みに分けても再現したため
@@ -214,9 +230,11 @@ impl DotRenderer {
                 // `Circle` と自前のラスタライズが1ピクセル単位で厳密には一致していない
                 // ことが原因と見ている。描画コストはそもそも1ステップの1割未満
                 // (docs/M5STACK.md 参照)で最適化の価値が薄いため、正しさを優先し
-                // 素直な2回描画に戻した。
+                // 素直な2回描画に戻した。消す円は「前回実際に描いた場所」
+                // (previous_center)に描く。今回の center に描くと、カメラが
+                // 動いた分だけ消し損ねる。
                 if previous_radius > 0 {
-                    let _ = Circle::with_center(center, previous_radius * 2)
+                    let _ = Circle::with_center(previous_center, previous_radius * 2)
                         .into_styled(PrimitiveStyle::with_fill(BACKGROUND_COLOR))
                         .draw(display);
                 }
@@ -227,6 +245,7 @@ impl DotRenderer {
                 }
                 self.previous_radius[index] = radius;
                 self.previous_color[index] = color;
+                self.previous_center[index] = center;
             }
         }
     }
