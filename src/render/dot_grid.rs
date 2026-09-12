@@ -3,8 +3,12 @@
 //! 場(96x96)は表示(32x32)より高解像度なので、セルごとに平均プーリングして落とす。
 //! プーリングは学習も表現も持たない純粋なダウンサンプルであり、
 //! 「V に相当するエンコーダを実装しない」というコンセプトを壊さない。
+//!
+//! 体の場(body)と入力の echo(touch_echo)は別データとして受け取り、ここで初めて
+//! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
 use crate::body::{CellPos, FieldView};
+use crate::render::TouchEchoView;
 
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
 const DOT_GAP_RATIO: f32 = 0.18;
@@ -15,9 +19,12 @@ const MIN_VISIBLE_VALUE: f32 = 0.004;
 /// 円の縁をぼかす幅(ピクセル)。ジャギーを消すために使う。
 const EDGE_FEATHER_PIXELS: f32 = 0.5;
 
-const DOT_RED: f32 = 0.35;
-const DOT_GREEN: f32 = 0.85;
-const DOT_BLUE: f32 = 0.80;
+/// 体そのものの色(ティール)。
+const BODY_COLOR: (f32, f32, f32) = (0.35, 0.85, 0.80);
+
+/// 入力の echo の色(暖色の白)。体の色とはっきり区別がつくよう、あえて系統を変える。
+/// 「これは体の状態ではなく、触れた跡だ」と読み取れることを狙う。
+const ECHO_COLOR: (f32, f32, f32) = (1.0, 0.92, 0.70);
 
 const BYTES_PER_PIXEL: usize = 4;
 
@@ -107,16 +114,23 @@ impl DotGrid {
         })
     }
 
-    /// 場の値をドットとして描く。`canvas` は premultiplied ARGB8888。
-    /// 呼び出し側が canvas をクリア済みであることを前提に、上書きで描く。
+    /// 体の場と入力の echo を1つのドットマトリックスとして描く。
+    /// `canvas` は premultiplied ARGB8888。呼び出し側が canvas をクリア済みであることを
+    /// 前提に、上書きで描く。
     ///
     /// `origin` は画面左上に対応する場の座標。整数部がどのセルから読むかを、
-    /// 小数部がドットをずらす量を決める。場の値はリサンプルせずそのまま使い、
+    /// 小数部がドットをずらす量を決める。値はリサンプルせずそのまま使い、
     /// ドットの位置だけをサブピクセルでずらすため、にじみは生じない。
-    /// 場はトーラスなので、はみ出した分は反対側から読む。
+    /// 場も echo も同じ座標系・同じトーラスとして扱うため、同じ origin を使う。
+    ///
+    /// 1セルの見え方は、体と echo の値のうち大きい方でドットの大きさ(=見えるかどうか)
+    /// を決め、echo が占める割合で色を体の色から echo の色へ寄せる。触れていない
+    /// 場所は純粋に体の色、体が無く echo だけがある場所(空き地を撫でたときなど)は
+    /// 純粋に echo の色になる。
     pub fn draw(
         &self,
         field: FieldView<'_>,
+        echo: TouchEchoView<'_>,
         origin: (f32, f32),
         canvas: &mut [u8],
         width: u32,
@@ -135,16 +149,37 @@ impl DotGrid {
         // ずらした分だけ端に隙間ができるため、上下左右へ1列ずつ余分に描く
         for row in -1..=self.rows as i32 {
             for column in -1..=self.columns as i32 {
-                let value = pool_cell(field, cell_origin, self.columns, self.rows, column, row);
-                if value <= MIN_VISIBLE_VALUE {
+                let body_value = pool_cell(
+                    |x, y| field.get(x, y),
+                    (field.width(), field.height()),
+                    cell_origin,
+                    self.columns,
+                    self.rows,
+                    column,
+                    row,
+                );
+                let echo_value = pool_cell(
+                    |x, y| echo.get(x, y),
+                    (echo.width(), echo.height()),
+                    cell_origin,
+                    self.columns,
+                    self.rows,
+                    column,
+                    row,
+                );
+                let visibility = body_value.max(echo_value);
+                if visibility <= MIN_VISIBLE_VALUE {
                     continue;
                 }
+                // echo が占める割合。体だけなら 0、echo だけなら 1 になる
+                let echo_mix = (echo_value / visibility).clamp(0.0, 1.0);
                 // 面積が値に比例するよう半径は sqrt をとる
                 let dot = Dot {
                     center_x: bounds.x as f32 + (column as f32 + 0.5 - shift.0) * cell_size,
                     center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
-                    radius: max_radius * value.sqrt(),
-                    value,
+                    radius: max_radius * visibility.sqrt(),
+                    value: visibility,
+                    color: lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix),
                 };
                 draw_dot(canvas, width, height, bounds, dot);
             }
@@ -152,32 +187,33 @@ impl DotGrid {
     }
 }
 
-/// 表示セル1つ分に対応する場の矩形を平均する(ボックスフィルタ)。
-/// 場と表示の解像度が割り切れない比でも破綻しないよう、区間を整数で切り出す。
+/// 表示セル1つ分に対応する矩形を平均する(ボックスフィルタ)。
+/// 場・echo のどちらでも使えるよう、値の読み出しをクロージャで受け取る。
+/// 解像度が割り切れない比でも破綻しないよう、区間を整数で切り出す。
 /// 表示セルの添字は負にもなりうる(端の余分な1列)ため、符号付きで扱う。
 fn pool_cell(
-    field: FieldView<'_>,
+    get: impl Fn(usize, usize) -> f32,
+    source_size: (usize, usize),
     cell_origin: (i32, i32),
     columns: usize,
     rows: usize,
     column: i32,
     row: i32,
 ) -> f32 {
-    let field_width = field.width() as i32;
-    let field_height = field.height() as i32;
-    let x_start = column * field_width / columns as i32;
-    let x_end = ((column + 1) * field_width / columns as i32).max(x_start + 1);
-    let y_start = row * field_height / rows as i32;
-    let y_end = ((row + 1) * field_height / rows as i32).max(y_start + 1);
+    let (source_width, source_height) = (source_size.0 as i32, source_size.1 as i32);
+    let x_start = column * source_width / columns as i32;
+    let x_end = ((column + 1) * source_width / columns as i32).max(x_start + 1);
+    let y_start = row * source_height / rows as i32;
+    let y_end = ((row + 1) * source_height / rows as i32).max(y_start + 1);
 
     let mut total = 0.0;
     let mut count = 0.0;
     for y in y_start..y_end {
         for x in x_start..x_end {
             // 表示原点を足したうえでトーラス上に折り返す
-            let source_x = (x + cell_origin.0).rem_euclid(field_width);
-            let source_y = (y + cell_origin.1).rem_euclid(field_height);
-            total += field.get(source_x as usize, source_y as usize);
+            let source_x = (x + cell_origin.0).rem_euclid(source_width);
+            let source_y = (y + cell_origin.1).rem_euclid(source_height);
+            total += get(source_x as usize, source_y as usize);
             count += 1.0;
         }
     }
@@ -191,6 +227,7 @@ struct Dot {
     center_y: f32,
     radius: f32,
     value: f32,
+    color: (f32, f32, f32),
 }
 
 /// 円を1つ描く。縁を1ピクセル分ぼかしてジャギーを消す。
@@ -220,11 +257,21 @@ fn draw_dot(canvas: &mut [u8], width: u32, height: u32, bounds: GridBounds, dot:
                 continue;
             }
             let offset = (y * width as usize + x) * BYTES_PER_PIXEL;
-            let pixel =
-                premultiplied_argb8888(DOT_RED, DOT_GREEN, DOT_BLUE, dot.value * coverage);
+            let pixel = premultiplied_argb8888(
+                dot.color.0,
+                dot.color.1,
+                dot.color.2,
+                dot.value * coverage,
+            );
             canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
         }
     }
+}
+
+/// 2色を `t`(0.0〜1.0)で線形補間する。
+fn lerp_color(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
+    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
 }
 
 /// 0.0〜1.0 の色とアルファを premultiplied ARGB8888 の1ピクセル分に変換する。
@@ -243,6 +290,20 @@ fn premultiplied_argb8888(red: f32, green: f32, blue: f32, alpha: f32) -> [u8; 4
 mod tests {
     use super::*;
     use crate::body::Field;
+    use crate::render::touch_echo::TouchEcho;
+
+    /// echo なしの場合の便宜関数。ほとんどのテストは体だけを見ている。
+    fn draw_body_only(
+        grid: &DotGrid,
+        field: FieldView<'_>,
+        origin: (f32, f32),
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+    ) {
+        let empty_echo = TouchEcho::new(field.width(), field.height());
+        grid.draw(field, empty_echo.view(), origin, canvas, width, height);
+    }
 
     #[test]
     fn premultiplied_argb8888_multiplies_each_channel_by_alpha() {
@@ -284,18 +345,57 @@ mod tests {
     }
 
     #[test]
-    fn pool_cell_averages_the_matching_field_block() {
-        // Arrange: 96x96 の場を 32x32 に落とすと 1セル = 3x3 ブロック
+    fn pool_cell_averages_the_matching_block() {
+        // Arrange: 96x96 を 32x32 に落とすと 1セル = 3x3 ブロック
         let mut field = Field::new(96, 96);
         field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
+        let view = field.view();
 
         // Act
-        let first = pool_cell(field.view(), (0, 0), 32, 32, 0, 0);
-        let second = pool_cell(field.view(), (0, 0), 32, 32, 1, 0);
+        let first = pool_cell(
+            |x, y| view.get(x, y),
+            (view.width(), view.height()),
+            (0, 0),
+            32,
+            32,
+            0,
+            0,
+        );
+        let second = pool_cell(
+            |x, y| view.get(x, y),
+            (view.width(), view.height()),
+            (0, 0),
+            32,
+            32,
+            1,
+            0,
+        );
 
         // Assert
         assert!((first - 1.0).abs() < f32::EPSILON);
         assert_eq!(second, 0.0);
+    }
+
+    #[test]
+    fn pool_cell_wraps_around_the_torus_when_the_origin_moves() {
+        // Arrange: 場の左上隅だけを 1.0 にする
+        let mut field = Field::new(96, 96);
+        field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
+        let view = field.view();
+
+        // Act: 原点を 3 セルずらすと、隅の塊は表示の右端・下端へ回り込む
+        let wrapped = pool_cell(
+            |x, y| view.get(x, y),
+            (view.width(), view.height()),
+            (3, 3),
+            32,
+            32,
+            31,
+            31,
+        );
+
+        // Assert
+        assert!((wrapped - 1.0).abs() < f32::EPSILON, "got {wrapped}");
     }
 
     #[test]
@@ -306,23 +406,10 @@ mod tests {
         let mut canvas = vec![0u8; 384 * 384 * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), (0.0, 0.0), &mut canvas, 384, 384);
+        draw_body_only(&grid, field.view(), (0.0, 0.0), &mut canvas, 384, 384);
 
         // Assert
         assert!(canvas.iter().all(|&byte| byte == 0));
-    }
-
-    #[test]
-    fn pool_cell_wraps_around_the_torus_when_the_origin_moves() {
-        // Arrange: 場の左上隅だけを 1.0 にする
-        let mut field = Field::new(96, 96);
-        field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
-
-        // Act: 原点を 3 セルずらすと、隅の塊は表示の右端・下端へ回り込む
-        let wrapped = pool_cell(field.view(), (3, 3), 32, 32, 31, 31);
-
-        // Assert
-        assert!((wrapped - 1.0).abs() < f32::EPSILON, "got {wrapped}");
     }
 
     #[test]
@@ -335,7 +422,14 @@ mod tests {
         let mut canvas = vec![0u8; surface_size * surface_size * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), (0.0, 0.0), &mut canvas, surface_size as u32, surface_size as u32);
+        draw_body_only(
+            &grid,
+            field.view(),
+            (0.0, 0.0),
+            &mut canvas,
+            surface_size as u32,
+            surface_size as u32,
+        );
 
         // Assert: セル境界(x=12)より右には染み出さない
         let cell_size = surface_size / 32;
@@ -345,6 +439,7 @@ mod tests {
         let inside = (row_offset + cell_size / 2) * BYTES_PER_PIXEL;
         assert_ne!(canvas[inside + 3], 0, "dot must cover its own cell center");
     }
+
     /// 不透明ピクセルの重心を求める。描画位置の検証に使う。
     fn drawn_centroid(canvas: &[u8], width: usize) -> (f32, f32) {
         let (mut x_total, mut y_total, mut weight) = (0.0, 0.0, 0.0);
@@ -371,9 +466,23 @@ mod tests {
 
         // Act
         let mut aligned = vec![0u8; surface * surface * BYTES_PER_PIXEL];
-        grid.draw(field.view(), (0.0, 0.0), &mut aligned, surface as u32, surface as u32);
+        draw_body_only(
+            &grid,
+            field.view(),
+            (0.0, 0.0),
+            &mut aligned,
+            surface as u32,
+            surface as u32,
+        );
         let mut shifted = vec![0u8; surface * surface * BYTES_PER_PIXEL];
-        grid.draw(field.view(), (0.5, 0.0), &mut shifted, surface as u32, surface as u32);
+        draw_body_only(
+            &grid,
+            field.view(),
+            (0.5, 0.0),
+            &mut shifted,
+            surface as u32,
+            surface as u32,
+        );
 
         // Assert: 原点を半セル進めるとドットは半セルぶん左へ動く。
         // 整数に丸める実装では両者が一致してしまい、これが揺れの原因になっていた
@@ -399,7 +508,8 @@ mod tests {
         let mut canvas = vec![0u8; surface_width * surface_height * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(
+        draw_body_only(
+            &grid,
             field.view(),
             (0.5, 0.5),
             &mut canvas,
@@ -422,5 +532,97 @@ mod tests {
                 assert_eq!(alpha, 0, "dot spilled outside the grid at ({x}, {y})");
             }
         }
+    }
+
+    #[test]
+    fn an_empty_cell_touched_by_echo_still_becomes_visible() {
+        // Arrange: 体が存在しないセルに echo だけを置く
+        let field = Field::new(32, 32);
+        let mut echo = TouchEcho::new(32, 32);
+        echo.touch(&crate::body::Perturbation {
+            at: CellPos { x: 16, y: 16 },
+            radius: 2.0,
+            amount: 0.5,
+        });
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw(
+            field.view(),
+            echo.view(),
+            (0.0, 0.0),
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 体は空でも、触れた場所にドットが現れる
+        // ホバーで光らせられなかった元の問題(体を殺さないと見えない)を、echo が解決する
+        assert!(!canvas.iter().all(|&byte| byte == 0), "the touched empty cell must be visible");
+    }
+
+    #[test]
+    fn an_echo_only_dot_uses_the_echo_color_not_the_body_color() {
+        // Arrange: 体が無いセルへの echo
+        let field = Field::new(32, 32);
+        let mut echo = TouchEcho::new(32, 32);
+        echo.touch(&crate::body::Perturbation {
+            at: CellPos { x: 16, y: 16 },
+            radius: 1.5,
+            amount: 0.8,
+        });
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw(
+            field.view(),
+            echo.view(),
+            (0.0, 0.0),
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 中心ピクセルの色が ECHO_COLOR に近く、BODY_COLOR には寄っていない
+        let cell_size = surface / 32;
+        let centre = (16 * cell_size + cell_size / 2) * surface + (16 * cell_size + cell_size / 2);
+        let pixel = &canvas[centre * BYTES_PER_PIXEL..centre * BYTES_PER_PIXEL + 4];
+        let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
+        assert!(a > 0.0, "the centre must be drawn");
+        // premultiplied なので比率で比較する。ECHO_COLOR は赤が緑よりわずかに強い暖色
+        assert!(r / a >= g / a, "an echo-only dot must lean toward the echo color");
+    }
+
+    #[test]
+    fn a_body_only_cell_keeps_the_body_color() {
+        // Arrange: echo が無く、体だけがあるセル
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if x == 16 && y == 16 { 1.0 } else { 0.0 });
+        let echo = TouchEcho::new(32, 32);
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw(
+            field.view(),
+            echo.view(),
+            (0.0, 0.0),
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: BODY_COLOR は緑が赤よりはっきり強い
+        let cell_size = surface / 32;
+        let centre = (16 * cell_size + cell_size / 2) * surface + (16 * cell_size + cell_size / 2);
+        let pixel = &canvas[centre * BYTES_PER_PIXEL..centre * BYTES_PER_PIXEL + 4];
+        let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
+        assert!(a > 0.0, "the centre must be drawn");
+        assert!(g > r, "a body-only dot must keep the body color, not lean toward echo");
     }
 }
