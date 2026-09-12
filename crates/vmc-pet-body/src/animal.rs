@@ -2,6 +2,10 @@
 //!
 //! データの出典とライセンスは `assets/NOTICE.md` を参照。
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use serde::Deserialize;
 
 use super::lenia::{GrowthMapping, KernelCore, LeniaParams};
@@ -67,8 +71,8 @@ pub enum AnimalError {
     NotFound(String),
 }
 
-impl std::fmt::Display for AnimalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AnimalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "failed to parse animals.json: {e}"),
             Self::KernelPeaks(raw) => write!(f, "invalid kernel peaks {raw:?} (expected e.g. \"1\" or \"1/2,1\")"),
@@ -79,7 +83,7 @@ impl std::fmt::Display for AnimalError {
     }
 }
 
-impl std::error::Error for AnimalError {}
+impl core::error::Error for AnimalError {}
 
 /// 埋め込まれた生物データから、コードが一致する1体を読み込む。
 pub fn load_animal(code: &str) -> Result<Animal, AnimalError> {
@@ -207,14 +211,14 @@ fn decode_rle(encoded: &str) -> Result<Pattern, AnimalError> {
         };
 
         if ch == ROW_DELIMITER && prefix.is_none() {
-            rows.push(std::mem::take(&mut row));
+            rows.push(core::mem::take(&mut row));
             // 行区切りに付いた回数は、空行がその数だけ続くことを意味する
             for _ in 1..repeat {
                 rows.push(Vec::new());
             }
         } else {
             let value = decode_value(prefix, ch)? / MAX_ENCODED_VALUE;
-            row.extend(std::iter::repeat_n(value, repeat));
+            row.extend(core::iter::repeat_n(value, repeat));
         }
 
         prefix = None;
@@ -226,7 +230,7 @@ fn decode_rle(encoded: &str) -> Result<Pattern, AnimalError> {
     let mut cells = Vec::with_capacity(width * height);
     for row in &rows {
         cells.extend_from_slice(row);
-        cells.extend(std::iter::repeat_n(0.0, width - row.len()));
+        cells.extend(core::iter::repeat_n(0.0, width - row.len()));
     }
 
     Ok(Pattern {

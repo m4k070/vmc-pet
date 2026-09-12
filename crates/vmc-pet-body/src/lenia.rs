@@ -7,6 +7,8 @@
 //! 端に近いほど場を減衰させる「周辺減衰」も試したが、Orbium は 150 ステップで
 //! 完全に消滅した。減衰は生物を閉じ込めるのではなく殺してしまうため採らない。
 
+use alloc::vec::Vec;
+
 use super::Field;
 use super::FieldView;
 

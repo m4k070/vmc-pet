@@ -1,5 +1,8 @@
 //! 体の場。値域を 0.0..=1.0 に正規化して保持する。
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::animal::Pattern;
 use super::perturbation::accumulate_into;
 use super::Perturbation;
