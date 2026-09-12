@@ -19,6 +19,7 @@ extern crate alloc;
 mod math;
 
 pub mod animal;
+pub mod camera;
 pub mod controller;
 pub mod field;
 pub mod lenia;
@@ -30,6 +31,7 @@ pub mod touch;
 pub mod touch_echo;
 
 pub use animal::{list_animals, load_animal, Animal};
+pub use camera::Camera;
 pub use controller::AutonomousController;
 pub use field::{Field, FieldView};
 pub use lenia::Lenia;

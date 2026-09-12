@@ -4,11 +4,11 @@
 //! したがって表示側で原点をずらしても、体の状態と表示の間にずれは生じない。
 //! 場そのものは書き換えないため、体は純粋なまま保たれる。
 //!
-//! トーラス上の重心そのものの計算(`FieldView::toroidal_centroid`)は
-//! `vmc_pet_body` 側にある。体の形を観測する自律コントローラも同じ計算を
-//! 必要とするため、そちらに一本化してここは再利用するだけ。
+//! PC版(`src/render/dot_grid.rs`)・M5Stack版(`m5stack-cores3/src/bin/main.rs`)
+//! のどちらも「表示の原点を重心へ寄せる」という同じ理由でこれを使うため、
+//! ここに一本化してある(std/no_std どちらでも使える)。
 
-use vmc_pet_body::FieldView;
+use crate::FieldView;
 
 /// 表示の原点。画面左上のドットに対応する場の座標を、小数のまま保持する。
 ///
@@ -51,12 +51,12 @@ impl Default for Camera {
 
 /// 重心を表示中央に置くための原点を、場の範囲へ折り返して求める。
 fn wrap_origin(centre: f32, visible: usize, field_size: usize) -> f32 {
-    (centre - visible as f32 / 2.0).rem_euclid(field_size as f32)
+    crate::math::rem_euclidf(centre - visible as f32 / 2.0, field_size as f32)
 }
 
 #[cfg(test)]
 mod tests {
-    use vmc_pet_body::Field;
+    use crate::Field;
 
     use super::*;
 
@@ -86,7 +86,7 @@ mod tests {
 
         // Assert: 原点から見て塊が画面中央付近に来る
         let (origin_x, origin_y) = camera.origin();
-        let centre_on_screen = (31.5 - origin_x).rem_euclid(32.0);
+        let centre_on_screen = crate::math::rem_euclidf(31.5 - origin_x, 32.0);
         assert!(
             (centre_on_screen - 16.0).abs() <= 0.5,
             "block sits at {centre_on_screen} instead of the middle"

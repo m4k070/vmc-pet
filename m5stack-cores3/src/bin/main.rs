@@ -17,6 +17,11 @@
 //! 実装は、ちらつきとフレームレートの不安定さを引き起こした。そこで
 //! `DotRenderer` は前フレームの各セルの半径と色を覚えておき、**変化したセル
 //! だけ**消して描き直す。
+//!
+//! 表示の原点を重心へ寄せる `Camera` も `vmc_pet_body` 側にあり、PC版
+//! (`src/app.rs`)と同じものを使う。`DotRenderer` の前フレーム比較(dirty-cell
+//! tracking)は「今この画面位置に何が描かれているか」を追跡するだけなので、
+//! カメラが動いて画面位置と場のセルの対応がずれても壊れない。
 
 #![no_std]
 #![no_main]
@@ -43,7 +48,7 @@ use core_s3::{
     touch::{Ft6336u, TouchPhase},
     CoreS3,
 };
-use vmc_pet_body::{load_animal, CellPos, FieldView, Pet, TouchEchoView};
+use vmc_pet_body::{load_animal, Camera, CellPos, FieldView, Pet, TouchEchoView};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -122,31 +127,61 @@ impl DotRenderer {
     }
 
     /// 画面上の座標に対応する場のセルを返す。範囲外なら `None`。
-    fn cell_at(&self, screen_x: i32, screen_y: i32) -> Option<CellPos> {
-        let column = (screen_x as f32 / self.cell_pitch_x) as i32;
-        let row = (screen_y as f32 / self.cell_pitch_y) as i32;
+    ///
+    /// `origin`(`Camera::origin()`)の整数部がどの場のセルから読むかを、
+    /// 小数部が画面上のスロットとのずれをどれだけ補正するかを決める。
+    /// `DotRenderer::update` が描く位置とずれないよう、同じ変換をここでも行う
+    /// (PC版の `DotGrid::cell_at` と同じ考え方)。
+    fn cell_at(&self, screen_x: i32, screen_y: i32, origin: (f32, f32)) -> Option<CellPos> {
+        let cell_origin_x = libm::floorf(origin.0) as i32;
+        let cell_origin_y = libm::floorf(origin.1) as i32;
+        let shift_x = origin.0 - cell_origin_x as f32;
+        let shift_y = origin.1 - cell_origin_y as f32;
+
+        let column = libm::floorf(screen_x as f32 / self.cell_pitch_x + shift_x) as i32;
+        let row = libm::floorf(screen_y as f32 / self.cell_pitch_y + shift_y) as i32;
         if column < 0 || column >= FIELD_WIDTH as i32 || row < 0 || row >= FIELD_HEIGHT as i32 {
             return None;
         }
+        let field_x = (column + cell_origin_x).rem_euclid(FIELD_WIDTH as i32);
+        let field_y = (row + cell_origin_y).rem_euclid(FIELD_HEIGHT as i32);
         Some(CellPos {
-            x: column as usize,
-            y: row as usize,
+            x: field_x as usize,
+            y: field_y as usize,
         })
     }
 
-    fn update<D>(&mut self, display: &mut D, field: FieldView<'_>, echo: TouchEchoView<'_>)
-    where
+    fn update<D>(
+        &mut self,
+        display: &mut D,
+        field: FieldView<'_>,
+        echo: TouchEchoView<'_>,
+        origin: (f32, f32),
+    ) where
         D: DrawTarget<Color = Rgb565>,
     {
-        for y in 0..FIELD_HEIGHT {
-            for x in 0..FIELD_WIDTH {
-                let body_value = field.get(x, y);
-                let echo_value = echo.get(x, y);
+        let cell_origin_x = libm::floorf(origin.0) as i32;
+        let cell_origin_y = libm::floorf(origin.1) as i32;
+        let shift_x = origin.0 - cell_origin_x as f32;
+        let shift_y = origin.1 - cell_origin_y as f32;
+
+        for row in 0..FIELD_HEIGHT {
+            for column in 0..FIELD_WIDTH {
+                // 画面のスロット(column, row)には、カメラの原点ぶんだけずらした
+                // 場のセルを表示する(dot_grid.rs の pool_cell と同じ考え方だが、
+                // 場と画面が1:1なのでプーリングは要らない)。
+                let field_x =
+                    ((column as i32 + cell_origin_x).rem_euclid(FIELD_WIDTH as i32)) as usize;
+                let field_y =
+                    ((row as i32 + cell_origin_y).rem_euclid(FIELD_HEIGHT as i32)) as usize;
+                let body_value = field.get(field_x, field_y);
+                let echo_value = echo.get(field_x, field_y);
                 // 体と echo の値のうち大きい方でドットの大きさを決める
                 // (dot_grid.rs と同じ考え方)。
                 let visibility = body_value.max(echo_value);
+                let index = row * FIELD_WIDTH + column;
                 if visibility <= MIN_VISIBLE_VALUE {
-                    if self.previous_radius[y * FIELD_WIDTH + x] == 0 {
+                    if self.previous_radius[index] == 0 {
                         continue;
                     }
                 }
@@ -159,16 +194,18 @@ impl DotRenderer {
                 };
                 let color = lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix);
 
-                let index = y * FIELD_WIDTH + x;
                 let previous_radius = self.previous_radius[index];
                 let previous_color = self.previous_color[index];
                 if radius == previous_radius && (radius == 0 || color == previous_color) {
                     continue;
                 }
 
+                // 場のセルから画面座標への変換は、選ぶセル(cell_origin)と
+                // 画面上の位置(shift)を別々にずらす。これにより、生物の実際の
+                // 動きが1セル未満の単位でも滑らかに見える(dot_grid.rs 参照)。
                 let center = Point::new(
-                    (self.cell_pitch_x * (x as f32 + 0.5)) as i32,
-                    (self.cell_pitch_y * (y as f32 + 0.5)) as i32,
+                    (self.cell_pitch_x * (column as f32 + 0.5 - shift_x)) as i32,
+                    (self.cell_pitch_y * (row as f32 + 0.5 - shift_y)) as i32,
                 );
                 // erase → draw の2回描画を1回にまとめる最適化(同心円の外接矩形を
                 // 自前の距離判定で塗る案)を試したが、実機で「生き物が動いた後ろに
@@ -247,6 +284,9 @@ fn main() -> ! {
     );
 
     let mut pet = Pet::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+    // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
+    // (PC版 app.rs の Camera と同じもの。docs/DESIGN.md参照)。
+    let mut camera = Camera::new();
 
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
@@ -255,7 +295,7 @@ fn main() -> ! {
             match touch.read_report() {
                 Ok(report) => {
                     if let Some(event) = report.events.into_iter().flatten().next() {
-                        let cell = renderer.cell_at(event.point.x, event.point.y);
+                        let cell = renderer.cell_at(event.point.x, event.point.y, camera.origin());
                         let new_touching_at = if matches!(event.phase, TouchPhase::Up) {
                             None
                         } else {
@@ -293,7 +333,8 @@ fn main() -> ! {
             last_step += STEP_INTERVAL;
             step += 1;
 
-            renderer.update(&mut parts.display, pet.observe(), pet.echo_view());
+            camera.follow(pet.observe(), FIELD_WIDTH, FIELD_HEIGHT);
+            renderer.update(&mut parts.display, pet.observe(), pet.echo_view(), camera.origin());
 
             if collapsed {
                 esp_println::println!("vmc-pet-cores3: the body collapsed; reviving");
