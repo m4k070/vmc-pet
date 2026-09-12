@@ -24,6 +24,7 @@ pub mod controller;
 pub mod field;
 #[cfg(feature = "std")]
 pub mod fitness;
+pub mod habituation;
 pub mod lenia;
 pub mod lenia_body;
 pub mod memory;
@@ -37,6 +38,7 @@ pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;
 pub use controller::{AutonomousController, ControllerParams};
 pub use field::{Field, FieldView};
+pub use habituation::Habituation;
 pub use lenia::Lenia;
 pub use lenia_body::LeniaBody;
 pub use memory::{PetMemory, SavedMemory};

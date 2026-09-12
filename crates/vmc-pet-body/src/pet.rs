@@ -16,8 +16,8 @@
 
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
-    Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, LeniaBody,
-    Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
+    Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, Habituation,
+    LeniaBody, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
 };
 
 /// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
@@ -36,6 +36,8 @@ pub struct Pet {
     touching_at: Option<CellPos>,
     /// 人間のタッチとは独立に、体の形を見て自分から軽くならす自律コントローラ。
     controller: AutonomousController,
+    /// 同じ場所への刺激に慣れる度合い。触れられた場所ごとに覚え、次の刺激を弱める。
+    habituation: Habituation,
 }
 
 impl Pet {
@@ -63,6 +65,7 @@ impl Pet {
             echo: TouchEcho::new(width, height),
             touching_at: None,
             controller: AutonomousController::with_params(controller_params),
+            habituation: Habituation::new(width, height),
         }
     }
 
@@ -79,6 +82,10 @@ impl Pet {
     /// 戻り値は、このステップで崩壊を検知して置き直したかどうか。
     pub fn step(&mut self) -> bool {
         self.body.step();
+        // 慣れは体の時間に乗せて薄れていく。描画フレームではなくここで進めるのは、
+        // フレームレートが PC と M5Stack で違うのに対し、体のステップはどちらも
+        // 15/s で揃っているため(habituation.rs 参照)。
+        self.habituation.recover();
         // 自律コントローラは人間のタッチとは独立に、体の形を見てそれ自体を
         // ならす。`disturb` を通すため、これによってエネルギーは変化しない
         // (`LeniaBody::disturb` のドキュメント参照)。
@@ -153,11 +160,32 @@ impl Pet {
     /// 体に働きかける経路はここだけ。
     fn touch(&mut self, touch: Touch) {
         if let Some(perturbation) = body_perturbation_for(touch) {
-            self.body.inject(perturbation);
+            // 同じ場所を続けて触られるほど効かなくなる(慣れ)。効き目を先に
+            // 読んでから慣れを進めるので、真新しい場所への最初の一撃は必ず
+            // 満額で効く。慣れの広がる範囲は摂動そのものと同じ `at`/`radius`
+            // を使う(habituation.rs 参照)。
+            let attention = self.habituation.attention_at(perturbation.at);
+            self.habituation.record(&perturbation);
+            // いまは場への効き目だけを弱め、エネルギー(気分)の回復は
+            // 弱めていない。慣れきった場所を叩いても機嫌は直る、という状態。
+            // 「慣れた刺激は世話としても数えない」方がペットらしいかもしれないが、
+            // 弱った体を叩いても回復しないのは壊れて見える恐れがあるため、
+            // まず見た目に現れる側だけを変えて様子を見る
+            // (docs/DESIGN.md「慣れ」参照)。
+            self.body.inject(Perturbation {
+                amount: perturbation.amount * attention,
+                ..perturbation
+            });
         }
         if let Some(perturbation) = echo_perturbation_for(touch) {
             self.echo.touch(&perturbation);
         }
+    }
+
+    /// その場所の刺激がいまどれだけ効くか(1.0 = そのまま効く、0.0 = 慣れきって
+    /// 効かない)。描画側が「慣れ」を可視化したくなったときのための窓口。
+    pub fn attention_at(&self, at: CellPos) -> f32 {
+        self.habituation.attention_at(at)
     }
 
     pub fn observe(&self) -> FieldView<'_> {
@@ -305,13 +333,21 @@ mod tests {
 
     #[test]
     fn a_collapsed_body_is_revived_by_step() {
-        // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う
+        // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う。
+        //
+        // クリックではなく素の注入窓口(`BodyPort`)を使う。クリックは慣れ
+        // (habituation)で弱まるようになったため、同じ場所を繰り返し叩いても
+        // もう体を壊せない。ここで確かめたいのは安全装置(崩壊検知と置き直し)
+        // そのものなので、入力の意味づけを経由しない経路で壊す。
         let mut pet = orbium();
         for _ in 0..12 {
             for y in (0..32).step_by(4) {
                 for x in (0..32).step_by(4) {
-                    pet.click(CellPos { x, y });
-                    pet.leave();
+                    pet.inject(Perturbation {
+                        at: CellPos { x, y },
+                        radius: 6.0,
+                        amount: 1.0,
+                    });
                 }
             }
             pet.step();
@@ -428,6 +464,108 @@ mod tests {
 
         // Assert: 下限は守られる
         assert_eq!(pet.energy(), 0.0);
+    }
+
+    /// 場の総量が、クリック1回でどれだけ増えるかを測る。
+    fn mass_gain_from_clicking(pet: &mut Pet, at: CellPos) -> f32 {
+        let before = pet.mass();
+        pet.click(at);
+        pet.leave();
+        pet.mass() - before
+    }
+
+    #[test]
+    fn clicking_the_same_place_over_and_over_stops_affecting_the_body() {
+        // Arrange: 生物から離れた隅(体の脈動に紛れない場所)を使う
+        let mut pet = orbium();
+        let at = CellPos { x: 3, y: 3 };
+        let first_gain = mass_gain_from_clicking(&mut pet, at);
+        assert!(first_gain > 0.0, "the first click must register, got {first_gain}");
+
+        // Act: 同じ場所を続けて叩く
+        for _ in 0..4 {
+            mass_gain_from_clicking(&mut pet, at);
+        }
+        let habituated_gain = mass_gain_from_clicking(&mut pet, at);
+
+        // Assert: ほとんど効かなくなる
+        assert!(
+            habituated_gain < first_gain * 0.1,
+            "clicking the same place must stop registering; \
+             first={first_gain} habituated={habituated_gain}"
+        );
+    }
+
+    #[test]
+    fn a_different_place_still_registers_after_habituating_elsewhere() {
+        // Arrange: 片方の隅に慣れさせる
+        let mut pet = orbium();
+        let familiar = CellPos { x: 3, y: 3 };
+        let first_gain = mass_gain_from_clicking(&mut pet, familiar);
+        for _ in 0..5 {
+            mass_gain_from_clicking(&mut pet, familiar);
+        }
+
+        // Act: 反対側の隅を叩く
+        let fresh_gain = mass_gain_from_clicking(&mut pet, CellPos { x: 28, y: 28 });
+
+        // Assert: 慣れは場所ごとなので、新しい場所は満額で効く
+        assert!(
+            fresh_gain > first_gain * 0.8,
+            "habituation must be specific to the place; first={first_gain} fresh={fresh_gain}"
+        );
+    }
+
+    #[test]
+    fn habituation_wears_off_so_the_same_place_registers_again() {
+        // Arrange: 慣れきるまで叩く
+        let mut pet = orbium();
+        let at = CellPos { x: 3, y: 3 };
+        let first_gain = mass_gain_from_clicking(&mut pet, at);
+        for _ in 0..5 {
+            mass_gain_from_clicking(&mut pet, at);
+        }
+        assert!(mass_gain_from_clicking(&mut pet, at) < first_gain * 0.1);
+
+        // Act: 触らずに45秒ぶん(15 step/s で 675 ステップ)進める
+        for _ in 0..675 {
+            pet.step();
+        }
+
+        // Assert: また効くようになる
+        let recovered_gain = mass_gain_from_clicking(&mut pet, at);
+        assert!(
+            recovered_gain > first_gain * 0.8,
+            "habituation must wear off; first={first_gain} recovered={recovered_gain}"
+        );
+    }
+
+    #[test]
+    fn habituation_does_not_block_the_mood_from_recovering() {
+        // Arrange: エネルギーを使い切ってから、同じ場所に慣れさせる
+        let mut pet = orbium();
+        for _ in 0..10_000 {
+            pet.step();
+        }
+        assert_eq!(pet.energy(), 0.0);
+        let at = CellPos { x: 3, y: 3 };
+        for _ in 0..6 {
+            pet.click(at);
+            pet.leave();
+        }
+        assert!(pet.attention_at(at) < 0.05, "must be fully habituated by now");
+
+        // Act: 慣れきった場所をさらに叩く
+        let energy_before = pet.energy();
+        pet.click(at);
+        pet.leave();
+
+        // Assert: 場への効き目は失っても、機嫌は直る(いまの設計判断。
+        // touch() のコメント参照)
+        assert!(
+            pet.energy() > energy_before,
+            "a habituated touch must still count as care for now"
+        );
     }
 
     #[test]

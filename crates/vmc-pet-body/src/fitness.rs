@@ -102,13 +102,19 @@ mod tests {
 
     #[test]
     fn a_collapsed_trajectory_scores_the_penalty() {
-        // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う
+        // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う。
+        // クリックは慣れ(habituation)で弱まるため体を壊せない。ここで要るのは
+        // 崩壊した軌跡そのものなので、素の注入窓口(`BodyPort`)を使う。
+        use crate::{BodyPort, CellPos, Perturbation};
         let mut pet = Pet::load("O2u", 32, 32).unwrap();
         for _ in 0..12 {
             for y in (0..32).step_by(4) {
                 for x in (0..32).step_by(4) {
-                    pet.click(crate::CellPos { x, y });
-                    pet.leave();
+                    pet.inject(Perturbation {
+                        at: CellPos { x, y },
+                        radius: 6.0,
+                        amount: 1.0,
+                    });
                 }
             }
             pet.step();
