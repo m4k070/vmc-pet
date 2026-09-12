@@ -1,0 +1,12 @@
+[package]
+name = "vmc-pet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+
+[profile.release]
+lto = true
+codegen-units = 1
