@@ -18,13 +18,17 @@ use crate::{CellPos, FieldView, Perturbation};
 /// 元々はモジュール内の定数として直接埋め込んでいたが、パラメータ探索
 /// (`crates/vmc-pet-body/examples/search_controller_params.rs`)や将来の
 /// 学習可能なコントローラが「同じ規則を、違う定数で試す」ことを必要とするため、
-/// 実行時に差し替えられる構造体に切り出した。`Default` が現在の採用値を持つ。
+/// 実行時に差し替えられる構造体に切り出した。
+///
+/// `Default` は、その探索(fitness::Trajectory による「重心の移動量」を
+/// スコアにしたランダムサーチ300通り)で見つかった値になっている。手で
+/// 決めていた値(30ステップに1度・閾値0.3・半径4.0・強さ0.10・距離3.0)から、
+/// より頻繁に(17ステップに1度)・より弱く(0.024)・より遠くへ(4.30セル)
+/// 働きかける組み合わせに変わった。長い実行(20000ステップ)で崩壊しないこと
+/// を確認したうえで採用している(docs/DESIGN.md「パラメータ探索を試した」参照)。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControllerParams {
-    /// 何ステップに一度、形を観測して判断するか。毎ステップ判断すると、Lenia
-    /// 自体のなだらかな変化に対して敏感すぎ、絶えず小刻みに揺れて見た目が
-    /// 落ち着かなくなる。15 step/s の設計(docs/DESIGN.md)で 30 ステップ=2秒に
-    /// 一度、というゆったりした頻度にしてある。
+    /// 何ステップに一度、形を観測して判断するか。
     pub evaluate_every_steps: u32,
     /// 体の歪み(`imbalance` が返す歪度の大きさ)が、これを超えたらならす方向へ
     /// 軽く注入する。実測(O2u を300ステップ動かして10ステップごとに観測)では
@@ -36,14 +40,6 @@ pub struct ControllerParams {
     /// 自己摂動の強さ。`touch.rs` の `CLICK_BODY_AMOUNT`(0.20)より弱くしてある。
     /// クリックは一度きりだが、こちらは条件を満たすたびに繰り返し働きかけるため、
     /// 1回あたりは控えめにする必要がある。
-    ///
-    /// 最初 0.08 にしていたところ、ユーザーから「自律的な動きが目で分かるほどでは
-    /// ない」というフィードバックを受け、強めるにあたって
-    /// `the_autonomous_controller_never_collapses_the_body_over_a_long_run`
-    /// (20000ステップの連続動作)で安全域を実測した。0.12 までは崩壊せず、
-    /// 0.13 で崩壊する崖になっている(`growth_scale` の崖と同種の、Orbium が
-    /// 持つ急峻な不安定性)。その崖からは十分離しつつ 0.08 より強めた 0.10 を
-    /// 採用した。
     pub nudge_amount: f32,
     /// 重心から自己摂動の位置までの距離(セル)。
     pub nudge_offset_cells: f32,
@@ -52,11 +48,11 @@ pub struct ControllerParams {
 impl Default for ControllerParams {
     fn default() -> Self {
         Self {
-            evaluate_every_steps: 30,
-            imbalance_threshold: 0.3,
-            nudge_radius_cells: 4.0,
-            nudge_amount: 0.10,
-            nudge_offset_cells: 3.0,
+            evaluate_every_steps: 17,
+            imbalance_threshold: 0.2543,
+            nudge_radius_cells: 4.7612,
+            nudge_amount: 0.0239,
+            nudge_offset_cells: 4.2958,
         }
     }
 }
