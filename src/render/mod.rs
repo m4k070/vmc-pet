@@ -2,6 +2,8 @@
 
 pub mod camera;
 pub mod dot_grid;
+pub mod touch_echo;
 
 pub use camera::Camera;
 pub use dot_grid::DotGrid;
+pub use touch_echo::{TouchEcho, TouchEchoView};
