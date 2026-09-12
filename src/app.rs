@@ -82,7 +82,11 @@ impl Pet {
         let mut steps = 0;
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
+            let energy_before = self.body.energy();
             self.body.step();
+            if energy_before > 0.0 && self.body.energy() == 0.0 {
+                eprintln!("vmc-pet: energy depleted; the body is weakening from neglect");
+            }
             if self.body.mass() < COLLAPSE_MASS {
                 eprintln!("vmc-pet: the body collapsed; reviving");
                 self.body.revive();
@@ -255,6 +259,54 @@ mod tests {
 
         // Assert: 追いつきを諦めて現在時刻に合わせる
         assert_eq!(pet.last_step, now);
+    }
+
+    #[test]
+    fn being_left_alone_weakens_the_body_without_killing_it() {
+        // Arrange
+        let mut pet = Pet::new().unwrap();
+        let healthy = mass(&pet);
+
+        // Act: 一切触れずに20000ステップ(≈22分)進める
+        for _ in 0..20_000 {
+            let next = pet.last_step + pet.step_interval;
+            pet.advance(next);
+        }
+
+        // Assert: 弱るが、崩壊はしない
+        let neglected = mass(&pet);
+        assert!(neglected > 40.0, "neglect must not kill the body, got {neglected}");
+        assert!(
+            neglected < healthy * 0.98,
+            "neglect must measurably weaken the body; healthy={healthy} neglected={neglected}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_neglected_pet_restores_its_vigor() {
+        // Arrange: 放置して弱らせる
+        let mut pet = drawn_pet();
+        for _ in 0..20_000 {
+            let next = pet.last_step + pet.step_interval;
+            pet.advance(next);
+        }
+        let neglected = mass(&pet);
+
+        // Act: クリックを繰り返して育て直す
+        for _ in 0..30 {
+            pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
+            for _ in 0..50 {
+                let next = pet.last_step + pet.step_interval;
+                pet.advance(next);
+            }
+        }
+
+        // Assert
+        assert!(
+            mass(&pet) > neglected,
+            "clicking must let the body recover; neglected={neglected} restored={}",
+            mass(&pet)
+        );
     }
 
     #[test]
