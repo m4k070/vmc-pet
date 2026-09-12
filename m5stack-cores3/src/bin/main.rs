@@ -284,10 +284,16 @@ fn main() -> ! {
         }
         echo.decay(ECHO_DECAY_PER_POLL);
 
+        // 描画(SPIへの書き込み)は重く、体が実際に1ステップ進んだときだけ行う。
+        // タッチのサンプリング(上のポーリング)とは頻度を分離してある。
+        // 以前ここを毎ポーリング(40ms)無条件に呼んでいたため、描画頻度が
+        // 実質2倍近くに増え、フレームレート全体が悪化していた。
         if last_step.elapsed() >= STEP_INTERVAL {
             body.step();
             last_step += STEP_INTERVAL;
             step += 1;
+
+            renderer.update(&mut parts.display, body.observe(), echo.view());
 
             if step % 15 == 0 {
                 esp_println::println!(
@@ -298,7 +304,6 @@ fn main() -> ! {
             }
         }
 
-        renderer.update(&mut parts.display, body.observe(), echo.view());
         delay.delay(TOUCH_POLL_INTERVAL);
     }
 }
