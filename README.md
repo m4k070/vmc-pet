@@ -6,6 +6,9 @@
 「体」として表示する。体の内部状態がそのまま見た目になるので、別途「見た目を作る
 レイヤー」を実装する必要がない。
 
+![動作中の様子。デスクトップ右下に半透明のドットマトリックスとして常駐し、
+Orbium が場の上を漂っている](docs/media/demo.webp)
+
 ## コンセプト
 
 ここでの体(body)の定義は「知能の出力で書き換えられる持続的な状態があり、その状態を
@@ -112,17 +115,22 @@ layer-rule {
 
 ## 構成
 
-依存方向を一方向に強制してある。`body` は Wayland も入力も一切知らない純粋ロジック。
+依存方向を一方向に強制してある。`vmc-pet-body` は Wayland も入力も一切知らない
+純粋ロジックで、独立したクレートに切り出してある(体を差し替える実験の足場。
+[docs/M5STACK.md](docs/M5STACK.md) 参照)。
 
 ```
-src/
-  body/            # 体 = 場。外部依存ゼロ
-    field.rs         # Field / FieldView
-    lenia.rs         # カーネル・成長関数・更新規則
-    animal.rs        # animals.json の読み込みと RLE デコード
-    perturbation.rs  # Perturbation / CellPos / accumulate_into(共有ヘルパー)
-    port.rs          # trait BodyPort (体が外に見せる唯一の窓口)
-    lenia_body.rs    # BodyPort の実装。崩壊からの復帰も持つ
+crates/
+  vmc-pet-body/    # 体 = 場。外部依存ゼロの純粋ロジック。std/no_std 両対応
+    src/
+      field.rs         # Field / FieldView
+      lenia.rs         # カーネル・成長関数・更新規則
+      animal.rs        # animals.json の読み込みと RLE デコード
+      perturbation.rs  # Perturbation / CellPos / accumulate_into(共有ヘルパー)
+      port.rs          # trait BodyPort (体が外に見せる唯一の窓口)
+      lenia_body.rs    # BodyPort の実装。崩壊からの復帰も持つ
+      math.rs          # 数学関数のシム(std/no_stdで実装を切り替える)
+src/               # デスクトップ版バイナリ(vmc-pet-body に依存)
   interface/       # IF層: 外界 → 体・echoが受け取れる形 だけを通す
     pointer.rs       # Touch → (体への摂動, echoへの摂動)
     machine_load.rs  # CPU負荷 → 環境ストレス(スカラー)
