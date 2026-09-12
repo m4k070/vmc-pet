@@ -1,5 +1,7 @@
 //! 体の場。値域を 0.0..=1.0 に正規化して保持する。
 
+use core::f32::consts::TAU;
+
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -10,6 +12,9 @@ use super::Perturbation;
 /// 場のセルが取りうる値の範囲。
 const MIN_CELL_VALUE: f32 = 0.0;
 const MAX_CELL_VALUE: f32 = 1.0;
+
+/// これ以下の総量しかない場では重心を定めない。
+const NEGLIGIBLE_MASS: f32 = 1e-6;
 
 /// 体の場。セルは行優先で並ぶ。
 pub struct Field {
@@ -113,11 +118,99 @@ impl FieldView<'_> {
         }
         self.cells[y * self.width + x]
     }
+
+    /// トーラス上の重心を円周平均で求める。場が空(総量がほぼ0)なら `None`。
+    ///
+    /// 生物が継ぎ目をまたいでいるとき、単純な算術平均は場の反対側を指してしまう。
+    /// 座標を角度に写してから平均することで、継ぎ目をまたいでも正しい重心が得られる。
+    /// PC版のカメラ追従(表示の原点をずらす)と、体の形の観測(コントローラの
+    /// 判断材料)の両方が同じ計算を必要とするため、ここに一本化してある。
+    pub fn toroidal_centroid(&self) -> Option<(f32, f32)> {
+        let width = self.width as f32;
+        let height = self.height as f32;
+        let (mut x_cos, mut x_sin) = (0.0, 0.0);
+        let (mut y_cos, mut y_sin) = (0.0, 0.0);
+        let mut mass = 0.0;
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let value = self.get(x, y);
+                if value <= 0.0 {
+                    continue;
+                }
+                mass += value;
+                let x_angle = x as f32 / width * TAU;
+                let y_angle = y as f32 / height * TAU;
+                x_cos += value * crate::math::cosf(x_angle);
+                x_sin += value * crate::math::sinf(x_angle);
+                y_cos += value * crate::math::cosf(y_angle);
+                y_sin += value * crate::math::sinf(y_angle);
+            }
+        }
+
+        if mass <= NEGLIGIBLE_MASS {
+            return None;
+        }
+        Some((
+            crate::math::rem_euclidf(crate::math::atan2f(x_sin, x_cos), TAU) / TAU * width,
+            crate::math::rem_euclidf(crate::math::atan2f(y_sin, y_cos), TAU) / TAU * height,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 指定した位置から `extent` 四方だけを 1.0 にした場を作る。トーラス上で折り返す。
+    fn field_with_block(size: usize, left: usize, top: usize, extent: usize) -> Field {
+        let mut field = Field::new(size, size);
+        field.map(|x, y, _value| {
+            let inside_x = (x + size - left) % size < extent;
+            let inside_y = (y + size - top) % size < extent;
+            if inside_x && inside_y {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        field
+    }
+
+    #[test]
+    fn toroidal_centroid_matches_the_arithmetic_mean_away_from_the_seam() {
+        // Arrange: 継ぎ目から離れた位置に 4x4 の塊を置く
+        let field = field_with_block(32, 10, 10, 4);
+
+        // Act
+        let (x, y) = field.view().toroidal_centroid().unwrap();
+
+        // Assert: 10..14 の中心は 11.5
+        assert!((x - 11.5).abs() < 0.1, "got {x}");
+        assert!((y - 11.5).abs() < 0.1, "got {y}");
+    }
+
+    #[test]
+    fn toroidal_centroid_handles_a_block_straddling_the_seam() {
+        // Arrange: x=30,31,0,1 にまたがる塊。算術平均なら 15.5 という誤った答えになる
+        let field = field_with_block(32, 30, 10, 4);
+
+        // Act
+        let (x, _y) = field.view().toroidal_centroid().unwrap();
+
+        // Assert: 正しい重心は 31.5
+        let error = (x - 31.5).abs().min(32.0 - (x - 31.5).abs());
+        assert!(error < 0.1, "got {x}");
+    }
+
+    #[test]
+    fn toroidal_centroid_is_undefined_for_an_empty_field() {
+        // Arrange
+        let field = Field::new(32, 32);
+
+        // Act / Assert
+        assert!(field.view().toroidal_centroid().is_none());
+    }
 
     #[test]
     fn map_clamps_values_into_the_normalized_range() {

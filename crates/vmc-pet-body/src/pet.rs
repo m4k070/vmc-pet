@@ -16,7 +16,8 @@
 
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
-    Animal, BodyPort, CellPos, FieldView, LeniaBody, Perturbation, Touch, TouchEcho, TouchEchoView,
+    Animal, AutonomousController, BodyPort, CellPos, FieldView, LeniaBody, Perturbation, Touch,
+    TouchEcho, TouchEchoView,
 };
 
 /// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
@@ -33,6 +34,8 @@ pub struct Pet {
     /// 触れている(またはホバーしている)位置。撫でている扱いで、
     /// `tick_input` のたびに echo を光らせ続ける。
     touching_at: Option<CellPos>,
+    /// 人間のタッチとは独立に、体の形を見て自分から軽くならす自律コントローラ。
+    controller: AutonomousController,
 }
 
 impl Pet {
@@ -42,6 +45,7 @@ impl Pet {
             body: LeniaBody::new(animal, width, height),
             echo: TouchEcho::new(width, height),
             touching_at: None,
+            controller: AutonomousController::new(),
         }
     }
 
@@ -63,6 +67,12 @@ impl Pet {
     /// 戻り値は、このステップで崩壊を検知して置き直したかどうか。
     pub fn step(&mut self) -> bool {
         self.body.step();
+        // 自律コントローラは人間のタッチとは独立に、体の形を見てそれ自体を
+        // ならす。`disturb` を通すため、これによってエネルギーは変化しない
+        // (`LeniaBody::disturb` のドキュメント参照)。
+        if let Some(perturbation) = self.controller.maybe_act(self.body.observe()) {
+            self.body.disturb(perturbation);
+        }
         if self.body.mass() < COLLAPSE_MASS {
             self.body.revive();
             true
@@ -292,5 +302,54 @@ mod tests {
         // Assert
         assert!(revived, "a collapsing body must be revived by step");
         assert!(pet.mass() > 40.0);
+    }
+
+    /// 自律コントローラ(体の形を見て自分から軽くならす)が常に動いている状態で、
+    /// 長時間(20000ステップ ≈ 22分ぶん)動かしても崩壊しないことを確かめる。
+    /// `AutonomousController` を実際に組み込んだのは `Pet::step` なので、ここで
+    /// 検証する。
+    #[test]
+    fn the_autonomous_controller_never_collapses_the_body_over_a_long_run() {
+        // Arrange
+        let mut pet = orbium();
+
+        // Act
+        let mut collapsed_at_least_once = false;
+        for _ in 0..20_000 {
+            if pet.step() {
+                collapsed_at_least_once = true;
+            }
+        }
+
+        // Assert: 自律コントローラの自己摂動だけで崩壊しないこと
+        assert!(
+            !collapsed_at_least_once,
+            "the autonomous controller must not collapse a healthy, untouched body"
+        );
+        assert!(pet.mass() > 40.0, "got {}", pet.mass());
+    }
+
+    /// 自律コントローラの自己摂動は `disturb` 経由でエネルギーを変えないため、
+    /// 「放置されると弱る」という前提(docs/DESIGN.md参照)は、コントローラが
+    /// 動いていても壊れないはずである。
+    #[test]
+    fn the_autonomous_controller_does_not_prevent_neglect_from_weakening_the_body() {
+        // Arrange
+        let mut pet = orbium();
+        let healthy_mass = pet.mass();
+
+        // Act: 一切タッチせずに20000ステップ進める(コントローラは動き続ける)
+        for _ in 0..20_000 {
+            pet.step();
+        }
+
+        // Assert: コントローラが「世話」の代わりになって放置の効果を消してはいない
+        let neglected_mass = pet.mass();
+        assert!(
+            neglected_mass < healthy_mass * 0.98,
+            "the controller must not substitute for real touch; \
+             healthy={healthy_mass} neglected={neglected_mass}"
+        );
+        assert_eq!(pet.energy(), 0.0, "energy must still bottom out despite the controller");
     }
 }

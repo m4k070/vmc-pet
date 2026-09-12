@@ -104,6 +104,18 @@ impl LeniaBody {
         self.field.place_centered(&self.animal.pattern);
         self.energy = MAX_ENERGY;
     }
+
+    /// `inject`(`BodyPort` 経由の、人間の触れ方に対応する窓口)と違い、
+    /// 場だけを揺らしエネルギーは一切変えない。
+    ///
+    /// `inject` が必ずエネルギーを回復させるのは、それが「世話をされた」ことの
+    /// 表れだからだ(放置されると弱る、という設計の前提)。自律コントローラの
+    /// 自己摂動まで同じ経路を通すと、自分で自分を回復させ続けられてしまい、
+    /// その前提が壊れる。これは体そのものの物理的な揺らぎであって、世話では
+    /// ないという区別を、型ではなく経路(メソッド)で表している。
+    pub fn disturb(&mut self, perturbation: Perturbation) {
+        self.field.inject(&perturbation);
+    }
 }
 
 impl BodyPort for LeniaBody {
@@ -180,6 +192,28 @@ mod tests {
 
         // Assert
         assert!(body.energy() > MIN_ENERGY, "a touch must raise energy");
+    }
+
+    #[test]
+    fn disturb_moves_the_field_without_raising_energy() {
+        // Arrange: まずエネルギーを使い切る
+        let mut body = orbium();
+        for _ in 0..10_000 {
+            body.step();
+        }
+        assert_eq!(body.energy(), MIN_ENERGY, "energy must be able to bottom out");
+        let mass_before = body.mass();
+
+        // Act
+        body.disturb(Perturbation {
+            at: CellPos { x: 2, y: 2 },
+            radius: 3.0,
+            amount: 0.1,
+        });
+
+        // Assert: 場は動くが、エネルギーは(世話ではないので)回復しない
+        assert!(body.mass() > mass_before, "disturb must still move the field");
+        assert_eq!(body.energy(), MIN_ENERGY, "disturb must not raise energy");
     }
 
     #[test]

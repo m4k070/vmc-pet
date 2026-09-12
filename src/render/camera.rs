@@ -3,13 +3,12 @@
 //! 場はトーラスなので、平行移動は力学に対する厳密な対称性である。
 //! したがって表示側で原点をずらしても、体の状態と表示の間にずれは生じない。
 //! 場そのものは書き換えないため、体は純粋なまま保たれる。
-
-use std::f32::consts::TAU;
+//!
+//! トーラス上の重心そのものの計算(`FieldView::toroidal_centroid`)は
+//! `vmc_pet_body` 側にある。体の形を観測する自律コントローラも同じ計算を
+//! 必要とするため、そちらに一本化してここは再利用するだけ。
 
 use vmc_pet_body::FieldView;
-
-/// これ以下の総量しかない場では重心を定めない(原点を据え置く)。
-const NEGLIGIBLE_MASS: f32 = 1e-6;
 
 /// 表示の原点。画面左上のドットに対応する場の座標を、小数のまま保持する。
 ///
@@ -30,7 +29,7 @@ impl Camera {
     /// 場の重心が表示の中央に来るよう原点を更新する。
     /// 場が空の場合は直前の原点を保つ。
     pub fn follow(&mut self, field: FieldView<'_>, columns: usize, rows: usize) {
-        let Some((centre_x, centre_y)) = toroidal_centroid(field) else {
+        let Some((centre_x, centre_y)) = field.toroidal_centroid() else {
             return;
         };
         self.x = wrap_origin(centre_x, columns, field.width());
@@ -55,42 +54,6 @@ fn wrap_origin(centre: f32, visible: usize, field_size: usize) -> f32 {
     (centre - visible as f32 / 2.0).rem_euclid(field_size as f32)
 }
 
-/// トーラス上の重心を円周平均で求める。
-///
-/// 生物が継ぎ目をまたいでいるとき、単純な算術平均は場の反対側を指してしまう。
-/// 座標を角度に写してから平均することで、継ぎ目をまたいでも正しい重心が得られる。
-fn toroidal_centroid(field: FieldView<'_>) -> Option<(f32, f32)> {
-    let width = field.width() as f32;
-    let height = field.height() as f32;
-    let (mut x_cos, mut x_sin) = (0.0, 0.0);
-    let (mut y_cos, mut y_sin) = (0.0, 0.0);
-    let mut mass = 0.0;
-
-    for y in 0..field.height() {
-        for x in 0..field.width() {
-            let value = field.get(x, y);
-            if value <= 0.0 {
-                continue;
-            }
-            mass += value;
-            let x_angle = x as f32 / width * TAU;
-            let y_angle = y as f32 / height * TAU;
-            x_cos += value * x_angle.cos();
-            x_sin += value * x_angle.sin();
-            y_cos += value * y_angle.cos();
-            y_sin += value * y_angle.sin();
-        }
-    }
-
-    if mass <= NEGLIGIBLE_MASS {
-        return None;
-    }
-    Some((
-        x_sin.atan2(x_cos).rem_euclid(TAU) / TAU * width,
-        y_sin.atan2(y_cos).rem_euclid(TAU) / TAU * height,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use vmc_pet_body::Field;
@@ -110,41 +73,6 @@ mod tests {
             }
         });
         field
-    }
-
-    #[test]
-    fn centroid_matches_the_arithmetic_mean_away_from_the_seam() {
-        // Arrange: 継ぎ目から離れた位置に 4x4 の塊を置く
-        let field = field_with_block(32, 10, 10, 4);
-
-        // Act
-        let (x, y) = toroidal_centroid(field.view()).unwrap();
-
-        // Assert: 10..14 の中心は 11.5
-        assert!((x - 11.5).abs() < 0.1, "got {x}");
-        assert!((y - 11.5).abs() < 0.1, "got {y}");
-    }
-
-    #[test]
-    fn centroid_handles_a_block_straddling_the_seam() {
-        // Arrange: x=30,31,0,1 にまたがる塊。算術平均なら 15.5 という誤った答えになる
-        let field = field_with_block(32, 30, 10, 4);
-
-        // Act
-        let (x, _y) = toroidal_centroid(field.view()).unwrap();
-
-        // Assert: 正しい重心は 31.5
-        let error = (x - 31.5).abs().min(32.0 - (x - 31.5).abs());
-        assert!(error < 0.1, "got {x}");
-    }
-
-    #[test]
-    fn centroid_is_undefined_for_an_empty_field() {
-        // Arrange
-        let field = Field::new(32, 32);
-
-        // Act / Assert
-        assert!(toroidal_centroid(field.view()).is_none());
     }
 
     #[test]
