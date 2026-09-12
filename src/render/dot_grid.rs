@@ -290,7 +290,7 @@ fn premultiplied_argb8888(red: f32, green: f32, blue: f32, alpha: f32) -> [u8; 4
 mod tests {
     use super::*;
     use vmc_pet_body::Field;
-    use crate::render::touch_echo::TouchEcho;
+    use crate::render::TouchEcho;
 
     /// echo なしの場合の便宜関数。ほとんどのテストは体だけを見ている。
     fn draw_body_only(
