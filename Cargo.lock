@@ -399,6 +399,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 name = "vmc-pet"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "smithay-client-toolkit",
  "vmc-pet-body",
  "wayland-client",

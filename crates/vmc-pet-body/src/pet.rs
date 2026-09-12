@@ -17,7 +17,7 @@
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
     Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, LeniaBody,
-    Perturbation, Touch, TouchEcho, TouchEchoView,
+    Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
 };
 
 /// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
@@ -97,6 +97,20 @@ impl Pet {
     /// 呼び出し側が必要なときだけ呼ぶ(例: PC版のCPU負荷。M5Stack版は呼ばない)。
     pub fn apply_environmental_stress(&mut self, stress: f32) {
         self.body.apply_environmental_stress(stress);
+    }
+
+    /// いま持ち越すべき状態を取り出す(保存用)。
+    pub fn memory(&self) -> PetMemory {
+        PetMemory {
+            energy: self.body.energy(),
+        }
+    }
+
+    /// 保存されていた状態を復元し、起動していなかった時間ぶんの減衰を適用する。
+    /// 起動時に一度だけ呼ぶ。`seconds_away` は呼び出し側(時計を持つ層)が求める。
+    pub fn restore(&mut self, memory: PetMemory, seconds_away: f32) {
+        self.body.restore_energy(memory.energy);
+        self.body.apply_offline_decay(seconds_away);
     }
 
     /// 触れている(またはホバーしている)位置を更新するだけで、体には一切触れない。
@@ -363,5 +377,68 @@ mod tests {
              healthy={healthy_mass} neglected={neglected_mass}"
         );
         assert_eq!(pet.energy(), 0.0, "energy must still bottom out despite the controller");
+    }
+
+    #[test]
+    fn memory_round_trips_when_no_time_has_passed() {
+        // Arrange: 少し放置してエネルギーを減らした状態を保存する
+        let mut pet = orbium();
+        for _ in 0..500 {
+            pet.step();
+        }
+        let saved = pet.memory();
+        assert!(saved.energy < 1.0, "energy must have decayed before saving");
+
+        // Act: 別個体として作り直し、間を置かずに復元する
+        let mut resumed = orbium();
+        resumed.restore(saved, 0.0);
+
+        // Assert: 保存した気分状態がそのまま戻る
+        assert_eq!(resumed.energy(), saved.energy);
+    }
+
+    #[test]
+    fn a_night_away_weakens_the_pet_without_fully_draining_it() {
+        // Arrange: 満タンで保存された状態
+        let mut pet = orbium();
+        let saved = pet.memory();
+        assert_eq!(saved.energy, 1.0);
+
+        // Act: 8時間(一晩ほど)離れてから復元する
+        pet.restore(saved, 8.0 * 60.0 * 60.0);
+
+        // Assert: はっきり弱っているが、尽き切ってはいない
+        // (ユーザーと相談して選んだ「進むが、減衰はゆるやかに」の狙い)
+        let resumed_energy = pet.energy();
+        assert!(resumed_energy > 0.0, "a night away must not fully drain it, got {resumed_energy}");
+        assert!(
+            resumed_energy < 0.5,
+            "a night away must clearly weaken it, got {resumed_energy}"
+        );
+    }
+
+    #[test]
+    fn a_long_absence_drains_the_pet_but_never_goes_negative() {
+        // Arrange
+        let mut pet = orbium();
+        let saved = pet.memory();
+
+        // Act: 1週間離れる
+        pet.restore(saved, 7.0 * 24.0 * 60.0 * 60.0);
+
+        // Assert: 下限は守られる
+        assert_eq!(pet.energy(), 0.0);
+    }
+
+    #[test]
+    fn a_corrupt_memory_cannot_push_energy_out_of_range() {
+        // Arrange: 保存ファイルが壊れて、値域外の値が入っていた場合
+        let mut pet = orbium();
+
+        // Act
+        pet.restore(PetMemory { energy: 99.0 }, 0.0);
+
+        // Assert: 上限に丸められる(体の値域の不変条件は保存ファイルより強い)
+        assert_eq!(pet.energy(), 1.0);
     }
 }

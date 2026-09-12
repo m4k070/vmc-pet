@@ -26,6 +26,15 @@ const ENERGY_DECAY_PER_STEP: f32 = 1.0 / (15.0 * 150.0);
 /// ストレスは「尽きる速さ」だけを変え、尽きた後の安全性には影響しない。
 const STRESS_DECAY_MULTIPLIER: f32 = 1.0;
 
+/// 起動していない間にエネルギーが尽きるまでの時間。
+///
+/// 停止中も時間は進める方針(ユーザーとの相談で決定。docs/DESIGN.md
+/// 「プロセスをまたぐ記憶」参照)だが、実行中と同じ速さ(約150秒で尽きる)で
+/// 減らすと、少し席を外しただけで毎回尽き切ってしまう。そこで停止中だけは
+/// 「12時間で尽きる」ゆるやかな速さにしてある。一晩(8時間ほど)離れると
+/// 0.3 前後まで下がってはっきり弱るが、尽き切ってはいない、という加減。
+const OFFLINE_DEPLETION_SECONDS: f32 = 12.0 * 60.0 * 60.0;
+
 /// エネルギーが尽きても、成長(自己修復)の強さがここより弱くはならない下限。
 ///
 /// 正の成長を一様に弱めるだけでは「なだらかに弱る」ようにはならないことを実測で
@@ -103,6 +112,22 @@ impl LeniaBody {
         self.field.clear();
         self.field.place_centered(&self.animal.pattern);
         self.energy = MAX_ENERGY;
+    }
+
+    /// 保存されていたエネルギーを復元する(起動時に一度だけ呼ぶ)。
+    /// 保存ファイルが壊れていても値域の不変条件は守る。
+    pub fn restore_energy(&mut self, energy: f32) {
+        self.energy = energy.clamp(MIN_ENERGY, MAX_ENERGY);
+    }
+
+    /// 起動していなかった時間ぶん、エネルギーを減らす(`OFFLINE_DEPLETION_SECONDS`
+    /// 参照)。実行中の減衰(`step`)とは別の、ゆるやかな速さで効く。
+    pub fn apply_offline_decay(&mut self, seconds_away: f32) {
+        if seconds_away <= 0.0 {
+            return;
+        }
+        let decay = seconds_away / OFFLINE_DEPLETION_SECONDS;
+        self.energy = (self.energy - decay).max(MIN_ENERGY);
     }
 
     /// `inject`(`BodyPort` 経由の、人間の触れ方に対応する窓口)と違い、

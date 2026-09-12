@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use vmc_pet_body::Pet as PetCore;
 use crate::interface::MachineLoad;
+use crate::persistence::{now_unix_seconds, MemoryStore};
 use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
 
@@ -41,6 +42,13 @@ const MAX_CATCH_UP_STEPS: u32 = 4;
 /// 離すと1〜2秒ほどで消える。
 const ECHO_DECAY_PER_FRAME: f32 = 0.90;
 
+/// 記憶を書き出す間隔。
+///
+/// 終了時にまとめて保存する作りにはしていない。Wayland のクライアントは
+/// コンポジタごと落ちることもあり、確実に終了処理が走るとは限らないため、
+/// 定期的に書いておく方が「突然終わっても直前まで覚えている」状態に近づく。
+const SAVE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Lenia の場を体として持つペット。
 pub struct Pet {
     core: PetCore,
@@ -52,6 +60,9 @@ pub struct Pet {
     surface_size: (u32, u32),
     /// 機械の CPU 負荷を「環境の厳しさ」として体に伝えるための読み取り役。
     machine_load: MachineLoad,
+    /// プロセスをまたぐ記憶の読み書き役。
+    memory_store: MemoryStore,
+    last_saved: Instant,
 }
 
 impl Pet {
@@ -59,20 +70,43 @@ impl Pet {
     /// 生物データは実行ファイルに埋め込んであるため、読み込みに失敗するのは
     /// コードが存在しないか、データが壊れている場合だけで、その場合は起動を止める。
     pub fn new(code: &str) -> Result<Self, PetError> {
+        Self::with_memory_store(code, MemoryStore::new())
+    }
+
+    /// 記憶の読み書き役を明示して作る。テストは
+    /// `MemoryStore::disabled()` を渡し、実行環境に既にある保存ファイルに
+    /// 左右されないようにする。
+    pub fn with_memory_store(code: &str, memory_store: MemoryStore) -> Result<Self, PetError> {
         let animal = vmc_pet_body::load_animal(code).map_err(PetError::Animal)?;
         eprintln!(
             "vmc-pet: loaded {} ({}) R={} T={}",
             animal.name, animal.code, animal.params.radius, animal.params.time_divisor
         );
 
+        let mut core = PetCore::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+        // 前回の記憶があれば、離れていた時間ぶん弱った状態で目を覚ます
+        // (docs/DESIGN.md「プロセスをまたぐ記憶」参照)。
+        if let Some(saved) = memory_store.load() {
+            let seconds_away = saved.seconds_away(now_unix_seconds());
+            core.restore(saved.memory, seconds_away);
+            eprintln!(
+                "vmc-pet: resumed after {:.1}h away; energy {:.2} -> {:.2}",
+                seconds_away / 3600.0,
+                saved.memory.energy,
+                core.energy()
+            );
+        }
+
         Ok(Self {
-            core: PetCore::new(animal, FIELD_WIDTH, FIELD_HEIGHT),
+            core,
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
             camera: Camera::new(),
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
             surface_size: (0, 0),
             machine_load: MachineLoad::new(),
+            memory_store,
+            last_saved: Instant::now(),
         })
     }
 
@@ -131,7 +165,13 @@ impl std::error::Error for PetError {}
 impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
         self.surface_size = (width, height);
-        self.advance(Instant::now());
+        let now = Instant::now();
+        self.advance(now);
+
+        if now.duration_since(self.last_saved) >= SAVE_INTERVAL {
+            self.memory_store.save(self.core.memory());
+            self.last_saved = now;
+        }
 
         // echo(入力の可視化)は体の時間とは独立に、描画のたびに更新する。
         // 体の場は書き換えないので、ホバーし続けても体には何の影響も無い。
@@ -181,9 +221,15 @@ impl Surface for Pet {
 mod tests {
     use super::*;
 
+    /// 記憶を読まないペット。実行環境に既にある保存ファイル(実際にペットを
+    /// 動かすと作られる)にテストが左右されないよう、必ずこれを使う。
+    fn fresh_pet() -> Pet {
+        Pet::with_memory_store(DEFAULT_ANIMAL_CODE, MemoryStore::disabled()).unwrap()
+    }
+
     /// 描画を1回通して、サーフェスの大きさを Pet に教える。
     fn drawn_pet() -> Pet {
-        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let mut pet = fresh_pet();
         let mut canvas = vec![0u8; 384 * 384 * 4];
         pet.draw(&mut canvas, 384, 384);
         pet
@@ -192,7 +238,7 @@ mod tests {
     #[test]
     fn input_region_matches_the_drawn_grid() {
         // Arrange
-        let pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let pet = fresh_pet();
 
         // Act
         let region = pet.input_region(384, 384);
@@ -207,7 +253,7 @@ mod tests {
     #[test]
     fn advance_runs_one_step_per_interval() {
         // Arrange
-        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let mut pet = fresh_pet();
         let start = pet.last_step;
         let interval = pet.step_interval;
 
@@ -221,7 +267,7 @@ mod tests {
     #[test]
     fn advance_drops_the_backlog_when_it_falls_too_far_behind() {
         // Arrange
-        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let mut pet = fresh_pet();
         let start = pet.last_step;
         let interval = pet.step_interval;
 
@@ -236,7 +282,7 @@ mod tests {
     #[test]
     fn being_left_alone_weakens_the_body_without_killing_it() {
         // Arrange
-        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let mut pet = fresh_pet();
         let healthy = pet.core.mass();
 
         // Act: 一切触れずに20000ステップ(≈22分)進める
@@ -351,12 +397,52 @@ mod tests {
         // Assert
         assert!(pet.core.touching_at().is_none());
     }
+
+    /// 起動時に記憶を読んで復元する配線そのものを確かめる
+    /// (保存 → 別プロセスとして起動し直す、を1つのテストで模す)。
+    #[test]
+    fn a_restarted_pet_wakes_up_with_the_saved_energy() {
+        // Arrange: 弱った状態を保存しておく
+        let path = std::env::temp_dir()
+            .join(format!("vmc-pet-test-{}-restart", std::process::id()))
+            .join("state.json");
+        let mut store = MemoryStore::at(path.clone());
+        store.save(vmc_pet_body::PetMemory { energy: 0.25 });
+
+        // Act: その保存ファイルを読むペットを起動する
+        let pet = Pet::with_memory_store(DEFAULT_ANIMAL_CODE, MemoryStore::at(path.clone()))
+            .unwrap();
+
+        // Assert: 満タン(1.0)ではなく、保存されていた値で目を覚ます。
+        // 保存直後なので離れていた時間はごくわずかで、減衰も無視できる。
+        let energy = pet.core.energy();
+        assert!(
+            (energy - 0.25).abs() < 0.01,
+            "a restarted pet must remember how it was left, got {energy}"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_pet_with_no_saved_memory_starts_fresh() {
+        // Arrange / Act: 初回起動(保存ファイルが無い)
+        let pet = fresh_pet();
+
+        // Assert
+        assert_eq!(pet.core.energy(), 1.0);
+    }
 }
 
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
     use vmc_pet_body::{BodyPort, CellPos, Perturbation};
+
+    /// 記憶を読まないペット(tests モジュールの同名関数と同じ理由)。
+    fn fresh_pet() -> Pet {
+        Pet::with_memory_store(DEFAULT_ANIMAL_CODE, MemoryStore::disabled()).unwrap()
+    }
 
     /// 体の時間を `steps` ぶん進める。1間隔ずつ刻んで追いつき上限に掛からないようにする。
     fn run(pet: &mut Pet, steps: usize) {
@@ -393,7 +479,7 @@ mod resilience_tests {
         // 単調にならない」という問題(docs/DESIGN.md 参照)はここでは起こりえない。
         // それでも崩壊検知は防御として残す。
         for seed in [12345u64, 99, 777, 20260912] {
-            let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+            let mut pet = fresh_pet();
             harass(&mut pet, seed, 40);
             run(&mut pet, 600);
 
@@ -408,7 +494,7 @@ mod resilience_tests {
     #[test]
     fn a_deliberately_scorched_field_is_revived() {
         // Arrange: 場じゅうに最大の摂動を撃ち込んで焼き払う
-        let mut pet = Pet::new(DEFAULT_ANIMAL_CODE).unwrap();
+        let mut pet = fresh_pet();
         for _ in 0..12 {
             for y in (0..FIELD_HEIGHT).step_by(4) {
                 for x in (0..FIELD_WIDTH).step_by(4) {

@@ -11,6 +11,9 @@ edition = "2021"
 vmc-pet-body = { path = "crates/vmc-pet-body" }
 smithay-client-toolkit = "0.19"
 wayland-client = "0.31"
+# 記憶の保存ファイル(src/persistence.rs)。体の側が serde で形を決めているため、
+# 読み書きにはこちらも同じ serde_json を使う。
+serde_json = "1"
 
 [profile.release]
 lto = true

@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod interface;
+mod persistence;
 mod render;
 mod shell;
 
