@@ -20,6 +20,19 @@ use crate::{
     LeniaBody, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
 };
 
+/// 自律コントローラが働きかけたことを echo として光らせる強さ。
+///
+/// 体への摂動そのものを強めて動きを見せる道は行き止まりだった —— 出荷する精度へ
+/// 丸めるだけで崩壊するかどうかが反転してしまう(docs/DESIGN.md「丸めで崩壊が
+/// 反転した」参照)。echo は体に一切影響しない描画専用データなので、安定性とは
+/// 無関係に好きなだけ目立たせられる。「ホバーで光らせようとすると体が死ぬ」
+/// 問題を echo で構造的に解いたのと同じ手を、もう一度使っている
+/// (docs/DESIGN.md「入力の可視化を体の場から分離する」参照)。
+///
+/// クリックの echo(1.0 の強いフラッシュ)より弱くしてある。突かれたのではなく
+/// 自分で身じろぎした、という見え方を狙った値。
+const SELF_ACTION_ECHO_AMOUNT: f32 = 0.5;
+
 /// 体が崩壊したとみなす総量。健全な Orbium はおよそ 73.7 を保つ。
 /// Lenia はカオス系で、摂動の強さを絞っても履歴次第では崩壊しうるため、
 /// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
@@ -91,6 +104,12 @@ impl Pet {
         // (`LeniaBody::disturb` のドキュメント参照)。
         if let Some(perturbation) = self.controller.maybe_act(self.body.observe()) {
             self.body.disturb(perturbation);
+            // 体への効き目は安全な弱さに保ったまま、echo 側で見えるようにする。
+            // 位置と広がりは実際の摂動と同じものを使い、強さだけ差し替える。
+            self.echo.touch(&Perturbation {
+                amount: SELF_ACTION_ECHO_AMOUNT,
+                ..perturbation
+            });
         }
         if self.body.mass() < COLLAPSE_MASS {
             self.body.revive();
@@ -389,6 +408,50 @@ mod tests {
             "the autonomous controller must not collapse a healthy, untouched body"
         );
         assert!(pet.mass() > 40.0, "got {}", pet.mass());
+    }
+
+    /// 場じゅうで一番明るい echo の値。
+    fn brightest_echo(pet: &Pet) -> f32 {
+        let echo = pet.echo_view();
+        let mut brightest = 0.0f32;
+        for y in 0..echo.height() {
+            for x in 0..echo.width() {
+                brightest = brightest.max(echo.get(x, y));
+            }
+        }
+        brightest
+    }
+
+    #[test]
+    fn the_pets_own_action_lights_the_echo_without_being_touched() {
+        // Arrange: 一切触れない
+        let mut pet = orbium();
+        assert_eq!(brightest_echo(&pet), 0.0, "nothing should glow before anything happens");
+
+        // Act: コントローラが判断する間隔(既定17ステップ)を超えて進める
+        let mut lit = false;
+        for _ in 0..40 {
+            pet.step();
+            if brightest_echo(&pet) > 0.0 {
+                lit = true;
+                break;
+            }
+        }
+
+        // Assert: 触られていないのに光る(自分から動いたことが見える)
+        assert!(lit, "the controller's own action must be visible through the echo");
+    }
+
+    #[test]
+    fn the_pets_own_action_does_not_count_as_being_cared_for() {
+        // Arrange: echo で光るようになっても、それは世話ではない
+        let mut pet = orbium();
+        for _ in 0..10_000 {
+            pet.step();
+        }
+
+        // Act / Assert: 自分で身じろぎし続けてもエネルギーは尽きる
+        assert_eq!(pet.energy(), 0.0);
     }
 
     /// 自律コントローラは**全生物に出荷される**。にもかかわらず、これまでの
