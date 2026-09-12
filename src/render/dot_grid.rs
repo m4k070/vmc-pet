@@ -65,7 +65,17 @@ impl DotGrid {
 
     /// 場の値をドットとして描く。`canvas` は premultiplied ARGB8888。
     /// 呼び出し側が canvas をクリア済みであることを前提に、上書きで描く。
-    pub fn draw(&self, field: FieldView<'_>, canvas: &mut [u8], width: u32, height: u32) {
+    ///
+    /// `origin` は画面左上に対応する場の座標。場はトーラスなので、はみ出した分は
+    /// 反対側から読む。
+    pub fn draw(
+        &self,
+        field: FieldView<'_>,
+        origin: (usize, usize),
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+    ) {
         let bounds = self.bounds(width, height);
         if bounds.width == 0 {
             return;
@@ -75,7 +85,7 @@ impl DotGrid {
 
         for row in 0..self.rows {
             for column in 0..self.columns {
-                let value = pool_cell(field, self.columns, self.rows, column, row);
+                let value = pool_cell(field, origin, self.columns, self.rows, column, row);
                 if value <= MIN_VISIBLE_VALUE {
                     continue;
                 }
@@ -91,7 +101,14 @@ impl DotGrid {
 
 /// 表示セル1つ分に対応する場の矩形を平均する(ボックスフィルタ)。
 /// 場と表示の解像度が割り切れない比でも破綻しないよう、区間を整数で切り出す。
-fn pool_cell(field: FieldView<'_>, columns: usize, rows: usize, column: usize, row: usize) -> f32 {
+fn pool_cell(
+    field: FieldView<'_>,
+    origin: (usize, usize),
+    columns: usize,
+    rows: usize,
+    column: usize,
+    row: usize,
+) -> f32 {
     let x_start = column * field.width() / columns;
     let x_end = ((column + 1) * field.width() / columns).max(x_start + 1);
     let y_start = row * field.height() / rows;
@@ -101,7 +118,10 @@ fn pool_cell(field: FieldView<'_>, columns: usize, rows: usize, column: usize, r
     let mut count = 0.0;
     for y in y_start..y_end {
         for x in x_start..x_end {
-            total += field.get(x, y);
+            // 表示原点を足したうえでトーラス上に折り返す
+            let source_x = (x + origin.0) % field.width();
+            let source_y = (y + origin.1) % field.height();
+            total += field.get(source_x, source_y);
             count += 1.0;
         }
     }
@@ -202,8 +222,8 @@ mod tests {
         field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
 
         // Act
-        let first = pool_cell(field.view(), 32, 32, 0, 0);
-        let second = pool_cell(field.view(), 32, 32, 1, 0);
+        let first = pool_cell(field.view(), (0, 0), 32, 32, 0, 0);
+        let second = pool_cell(field.view(), (0, 0), 32, 32, 1, 0);
 
         // Assert
         assert!((first - 1.0).abs() < f32::EPSILON);
@@ -218,10 +238,23 @@ mod tests {
         let mut canvas = vec![0u8; 384 * 384 * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), &mut canvas, 384, 384);
+        grid.draw(field.view(), (0, 0), &mut canvas, 384, 384);
 
         // Assert
         assert!(canvas.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn pool_cell_wraps_around_the_torus_when_the_origin_moves() {
+        // Arrange: 場の左上隅だけを 1.0 にする
+        let mut field = Field::new(96, 96);
+        field.map(|x, y, _value| if x < 3 && y < 3 { 1.0 } else { 0.0 });
+
+        // Act: 原点を 3 セルずらすと、隅の塊は表示の右端・下端へ回り込む
+        let wrapped = pool_cell(field.view(), (3, 3), 32, 32, 31, 31);
+
+        // Assert
+        assert!((wrapped - 1.0).abs() < f32::EPSILON, "got {wrapped}");
     }
 
     #[test]
@@ -234,7 +267,7 @@ mod tests {
         let mut canvas = vec![0u8; surface_size * surface_size * BYTES_PER_PIXEL];
 
         // Act
-        grid.draw(field.view(), &mut canvas, surface_size as u32, surface_size as u32);
+        grid.draw(field.view(), (0, 0), &mut canvas, surface_size as u32, surface_size as u32);
 
         // Assert: セル境界(x=12)より右には染み出さない
         let cell_size = surface_size / 32;
