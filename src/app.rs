@@ -1,39 +1,56 @@
-//! step 1 時点の体のプレースホルダ。
-//! ドットグリッド描画(step 2)と Lenia 場(step 3)で中身を差し替える。
+//! 体のプレースホルダ。場をダミー波形で満たして描画経路を確かめる。
+//! step 3 で `fill_with` の中身を Lenia の更新規則に差し替える。
 
+use std::f32::consts::TAU;
+use std::time::Instant;
+
+use crate::body::Field;
+use crate::render::DotGrid;
 use crate::shell::{InputRegion, PointerInput, Surface};
 
-/// サーフェス端から体までの余白(論理ピクセル)。
-/// この余白部分は完全透過かつ入力領域外になり、クリックが下のウィンドウへ抜ける。
-const BODY_INSET: i32 = 64;
+/// 場の解像度。Lenia の kernel radius R=12 を成立させるため表示より高くとる。
+const FIELD_WIDTH: usize = 96;
+const FIELD_HEIGHT: usize = 96;
 
-/// 余白が占めてよい各辺の割合の上限の逆数。
-/// 小さいサーフェスを configure されても体が消えないよう、余白側を先に縮める。
-const MIN_BODY_FRACTION_DIVISOR: i32 = 4;
+/// 表示解像度。場を平均プーリングで落として描く。
+const GRID_COLUMNS: usize = 32;
+const GRID_ROWS: usize = 32;
 
-/// 通常時と、ポインタが乗っているときの体の不透明度。
-const IDLE_OPACITY: f32 = 0.35;
-const TOUCHED_OPACITY: f32 = 0.65;
+/// ダミー波形の形状。step 3 で Lenia に置き換わる暫定値。
+const WAVE_PERIOD_CELLS: f32 = 22.0;
+const WAVE_SPEED_RADIANS_PER_SEC: f32 = 2.4;
 
-const BODY_RED: f32 = 0.35;
-const BODY_GREEN: f32 = 0.85;
-const BODY_BLUE: f32 = 0.80;
+/// 通常時と、ポインタが触れているときの波の振幅。
+const IDLE_AMPLITUDE: f32 = 0.55;
+const TOUCHED_AMPLITUDE: f32 = 1.0;
 
-/// ポインタが体に触れているかどうか。step 4 で Touch enum に発展させる。
+/// 場の中心からの減衰が 0 になる距離の、場の半径に対する割合。
+/// DESIGN.md の周辺減衰(生物を画面外へ逃がさない境界条件)の先取り。
+const FALLOFF_RADIUS_RATIO: f32 = 0.95;
+
+/// ポインタが体に触れているか。step 4 で Touch enum に発展させる。
 pub struct Pet {
+    field: Field,
+    grid: DotGrid,
+    started_at: Instant,
     is_touched: bool,
 }
 
 impl Pet {
     pub fn new() -> Self {
-        Self { is_touched: false }
+        Self {
+            field: Field::new(FIELD_WIDTH, FIELD_HEIGHT),
+            grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
+            started_at: Instant::now(),
+            is_touched: false,
+        }
     }
 
-    fn opacity(&self) -> f32 {
+    fn amplitude(&self) -> f32 {
         if self.is_touched {
-            return TOUCHED_OPACITY;
+            return TOUCHED_AMPLITUDE;
         }
-        IDLE_OPACITY
+        IDLE_AMPLITUDE
     }
 }
 
@@ -45,24 +62,23 @@ impl Default for Pet {
 
 impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
+        let elapsed = self.started_at.elapsed().as_secs_f32();
+        let amplitude = self.amplitude();
+        self.field
+            .fill_with(|x, y| dummy_wave(x, y, elapsed, amplitude));
+
         canvas.fill(0);
-
-        let region = self.input_region(width, height);
-        let alpha = self.opacity();
-        // wl_shm の Argb8888 は premultiplied alpha を要求する
-        let pixel = premultiplied_argb8888(BODY_RED, BODY_GREEN, BODY_BLUE, alpha);
-
-        for y in region.y..region.y + region.height {
-            let row_start = (y as usize * width as usize + region.x as usize) * 4;
-            let row_end = row_start + region.width as usize * 4;
-            for chunk in canvas[row_start..row_end].chunks_exact_mut(4) {
-                chunk.copy_from_slice(&pixel);
-            }
-        }
+        self.grid.draw(self.field.view(), canvas, width, height);
     }
 
     fn input_region(&self, width: u32, height: u32) -> InputRegion {
-        body_rect(width, height)
+        let bounds = self.grid.bounds(width, height);
+        InputRegion {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        }
     }
 
     fn on_pointer(&mut self, input: PointerInput) {
@@ -86,29 +102,22 @@ impl Surface for Pet {
     }
 }
 
-/// 余白を取った後の体の矩形を返す。
-/// サーフェスが余白の2倍より小さい場合は余白側を縮め、体のサイズが負にならないようにする。
-fn body_rect(width: u32, height: u32) -> InputRegion {
-    let inset_x = BODY_INSET.min(width as i32 / MIN_BODY_FRACTION_DIVISOR);
-    let inset_y = BODY_INSET.min(height as i32 / MIN_BODY_FRACTION_DIVISOR);
-    InputRegion {
-        x: inset_x,
-        y: inset_y,
-        width: width as i32 - inset_x * 2,
-        height: height as i32 - inset_y * 2,
-    }
-}
+/// 中心から広がる同心円状の進行波。周縁は減衰させて丸い塊に見せる。
+/// 時刻だけに依存する純粋関数なので、描画レートを変えても見た目の速度は変わらない。
+fn dummy_wave(x: usize, y: usize, elapsed_secs: f32, amplitude: f32) -> f32 {
+    let center_x = FIELD_WIDTH as f32 / 2.0;
+    let center_y = FIELD_HEIGHT as f32 / 2.0;
+    let dx = x as f32 + 0.5 - center_x;
+    let dy = y as f32 + 0.5 - center_y;
+    let distance = (dx * dx + dy * dy).sqrt();
 
-/// 0.0〜1.0 の色とアルファを premultiplied ARGB8888 の1ピクセル分に変換する。
-/// リトルエンディアン環境では u32 0xAARRGGBB がバイト列 [B, G, R, A] になる。
-fn premultiplied_argb8888(red: f32, green: f32, blue: f32, alpha: f32) -> [u8; 4] {
-    let to_byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    [
-        to_byte(blue * alpha),
-        to_byte(green * alpha),
-        to_byte(red * alpha),
-        to_byte(alpha),
-    ]
+    let phase = distance / WAVE_PERIOD_CELLS * TAU - elapsed_secs * WAVE_SPEED_RADIANS_PER_SEC;
+    let wave = 0.5 + 0.5 * phase.cos();
+
+    let falloff_radius = center_x.min(center_y) * FALLOFF_RADIUS_RATIO;
+    let falloff = (1.0 - distance / falloff_radius).clamp(0.0, 1.0);
+
+    wave * falloff * amplitude
 }
 
 #[cfg(test)]
@@ -116,60 +125,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn premultiplied_argb8888_multiplies_each_channel_by_alpha() {
+    fn dummy_wave_stays_within_the_normalized_range() {
         // Arrange
-        let alpha = 0.5;
+        let samples = [(0, 0), (48, 48), (95, 95), (10, 80)];
 
-        // Act
-        let pixel = premultiplied_argb8888(1.0, 0.0, 1.0, alpha);
-
-        // Assert
-        assert_eq!(pixel, [128, 0, 128, 128]);
+        // Act / Assert
+        for elapsed in [0.0, 0.37, 5.0] {
+            for (x, y) in samples {
+                let value = dummy_wave(x, y, elapsed, TOUCHED_AMPLITUDE);
+                assert!(
+                    (0.0..=1.0).contains(&value),
+                    "value {value} out of range at ({x}, {y}) t={elapsed}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn input_region_leaves_the_inset_as_click_through_area() {
+    fn dummy_wave_is_zero_at_the_field_corners() {
+        // Arrange: 隅は減衰半径の外側にある
+
+        // Act
+        let value = dummy_wave(0, 0, 1.0, TOUCHED_AMPLITUDE);
+
+        // Assert
+        assert_eq!(value, 0.0);
+    }
+
+    #[test]
+    fn input_region_matches_the_drawn_grid() {
         // Arrange
         let pet = Pet::new();
 
         // Act
         let region = pet.input_region(384, 384);
 
-        // Assert
-        assert_eq!(region.x, BODY_INSET);
-        assert_eq!(region.width, 384 - BODY_INSET * 2);
-    }
-
-    #[test]
-    fn body_rect_never_goes_negative_on_a_small_surface() {
-        // Arrange: 余白の2倍より小さいサーフェスを configure された場合
-        let width = 32;
-        let height = 32;
-
-        // Act
-        let region = body_rect(width, height);
-
-        // Assert
-        assert!(region.width > 0, "body width must stay positive");
-        assert!(region.height > 0, "body height must stay positive");
-        assert!(region.x + region.width <= width as i32);
-        assert!(region.y + region.height <= height as i32);
-    }
-
-    #[test]
-    fn draw_leaves_the_inset_fully_transparent() {
-        // Arrange
-        let mut pet = Pet::new();
-        let width = 128;
-        let height = 128;
-        let mut canvas = vec![0xffu8; width * height * 4];
-
-        // Act
-        pet.draw(&mut canvas, width as u32, height as u32);
-
-        // Assert: 左上隅は余白なので透過、中心は体なので不透明
-        assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
-        let center = (height / 2 * width + width / 2) * 4;
-        assert_ne!(canvas[center + 3], 0);
+        // Assert: 384px を 32 セルで割り切るのでサーフェス全体を覆う
+        assert_eq!(region.x, 0);
+        assert_eq!(region.y, 0);
+        assert_eq!(region.width, 384);
+        assert_eq!(region.height, 384);
     }
 }

@@ -1,4 +1,6 @@
 mod app;
+mod body;
+mod render;
 mod shell;
 
 use app::Pet;
