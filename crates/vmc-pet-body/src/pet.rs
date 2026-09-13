@@ -187,8 +187,10 @@ impl Pet {
             // 読んでから慣れを進めるので、真新しい場所への最初の一撃は必ず
             // 満額で効く。慣れの広がる範囲は摂動そのものと同じ `at`/`radius`
             // を使う(habituation.rs 参照)。
-            let attention = self.habituation.attention_at(perturbation.at);
-            self.habituation.record(&perturbation);
+            // 慣れは体の部位ごとに覚えるので、そのときの体の中心を添える。
+            let body_centre = self.body_centre();
+            let attention = self.habituation.attention_at(perturbation.at, body_centre);
+            self.habituation.record(&perturbation, body_centre);
             // 場への効き目と、世話として数える度合い(エネルギーの回復)の
             // 両方を同じ `attention` で弱める。同じ場所を機械的に叩き続けるのは
             // 世話ではない、という扱い。当初は「弱った体を叩いても回復しないと
@@ -209,7 +211,24 @@ impl Pet {
     /// その場所の刺激がいまどれだけ効くか(1.0 = そのまま効く、0.0 = 慣れきって
     /// 効かない)。描画側が「慣れ」を可視化したくなったときのための窓口。
     pub fn attention_at(&self, at: CellPos) -> f32 {
-        self.habituation.attention_at(at)
+        self.habituation.attention_at(at, self.body_centre())
+    }
+
+    /// 体の中心(重心)に最も近いセル。慣れを体の部位ごとに覚えるための基準。
+    ///
+    /// 場が空(重心が無い)のときは原点を返す。そのときは慣れが世界の座標で
+    /// 記録されるだけで、体が無い以上それで困ることはない。
+    fn body_centre(&self) -> CellPos {
+        let field = self.body.observe();
+        let Some((x, y)) = field.toroidal_centroid() else {
+            return CellPos { x: 0, y: 0 };
+        };
+        // 重心は 0..width の範囲にあるので、0.5 を足して切り捨てれば四捨五入になる
+        // (no_std では f32::round が使えない)。
+        CellPos {
+            x: (x + 0.5) as usize % field.width(),
+            y: (y + 0.5) as usize % field.height(),
+        }
     }
 
     pub fn observe(&self) -> FieldView<'_> {
@@ -620,6 +639,19 @@ mod tests {
         );
     }
 
+    /// 体の中心から見て `(dx, dy)` だけ離れた、場のセル。
+    ///
+    /// 慣れは体の部位ごとに覚えるので、体が動いたあとに「同じ場所」を
+    /// 触るには、世界の座標ではなくこれで位置を求める必要がある。
+    fn on_body(pet: &Pet, dx: usize, dy: usize) -> CellPos {
+        let centre = pet.body_centre();
+        let field = pet.observe();
+        CellPos {
+            x: (centre.x + dx) % field.width(),
+            y: (centre.y + dy) % field.height(),
+        }
+    }
+
     #[test]
     fn habituation_wears_off_so_the_same_place_registers_again() {
         // Arrange: 慣れきるまで叩く
@@ -630,17 +662,52 @@ mod tests {
             mass_gain_from_clicking(&mut pet, at);
         }
         assert!(mass_gain_from_clicking(&mut pet, at) < first_gain * 0.1);
+        let centre = pet.body_centre();
+        let field_width = pet.observe().width();
+        let field_height = pet.observe().height();
+        let (dx, dy) = (
+            (at.x + field_width - centre.x) % field_width,
+            (at.y + field_height - centre.y) % field_height,
+        );
 
         // Act: 触らずに45秒ぶん(15 step/s で 675 ステップ)進める
         for _ in 0..675 {
             pet.step();
         }
 
-        // Assert: また効くようになる
-        let recovered_gain = mass_gain_from_clicking(&mut pet, at);
+        // Assert: 体の同じ部位が、また慣れていない状態に戻っている。
+        // 体はこの間に大きく移動しているので、世界の同じ座標(3, 3)を
+        // 見ても回復を確かめたことにならない
+        let attention = pet.attention_at(on_body(&pet, dx, dy));
         assert!(
-            recovered_gain > first_gain * 0.8,
-            "habituation must wear off; first={first_gain} recovered={recovered_gain}"
+            attention > 0.9,
+            "habituation must wear off; attention on the same part of the body = {attention}"
+        );
+    }
+
+    #[test]
+    fn touching_the_same_spot_on_a_gliding_body_once_a_second_habituates() {
+        // Arrange: O2u は1秒に約9セル滑るように進む。画面上(=体基準)で
+        // 同じ位置を1秒おきに触る、M5Stack で実際に起きていた状況を再現する
+        let mut pet = orbium();
+        let (dx, dy) = (0, 10);
+
+        // Act
+        for _ in 0..6 {
+            pet.click(on_body(&pet, dx, dy));
+            pet.leave();
+            for _ in 0..15 {
+                pet.step();
+            }
+        }
+
+        // Assert: 世界の座標では毎回違う場所だが、体の同じ部位として慣れる。
+        // 場の座標で慣れを覚えていた頃は、同じ状況を模した計測で7回目でも
+        // 9割以上効いていた(habituation.rs 先頭のコメント参照)
+        let attention = pet.attention_at(on_body(&pet, dx, dy));
+        assert!(
+            attention < 0.3,
+            "touching the same part of a moving body must habituate; attention = {attention}"
         );
     }
 
