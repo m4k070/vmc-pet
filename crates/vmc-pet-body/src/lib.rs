@@ -20,6 +20,7 @@ mod math;
 
 pub mod animal;
 pub mod camera;
+pub mod care_prediction;
 pub mod civil_time;
 pub mod controller;
 pub mod field;
@@ -37,6 +38,7 @@ pub mod touch_echo;
 
 pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;
+pub use care_prediction::{CarePredictor, CarePredictorParams};
 pub use civil_time::unix_seconds_from_civil;
 pub use controller::{AutonomousController, ControllerParams, Observation};
 pub use field::{Field, FieldView};

@@ -1,0 +1,428 @@
+//! 世話がいつ来るかを、経験から予測する学習モデル。
+//!
+//! docs/DESIGN.md のロードマップ「4. 観測から行動への小さな式 → 学習可能なモデル」
+//! にあたる。「経験に基づいて変化する生き物」のうち、ここで学ぶのは
+//! **その人の生活リズム**(1日のうちのいつ触ってもらえるか)である。
+//!
+//! # なぜ「予測」なのか
+//!
+//! 学習の信号をユーザーと相談して決めた。「触られること」を報酬として最大化する
+//! 案は、以前採らないと決めている(この一台の履歴だけではデータが足りず、目立とうと
+//! 暴れる方向へ偏りやすい)。legibility はシミュレーションで2つの条件を比べる指標で、
+//! 実機の1回きりの生活からは計算できない。
+//!
+//! 予測なら、1分ごとの「触られた/触られなかった」がそのまま学習データになり、
+//! 1日に1440件集まる。何かを最大化するわけではないので、暴れる方向へ偏る
+//! こともない。予測がどう振る舞いに現れるか(先回りしてそわそわする、など)は
+//! このモジュールの外で決める。
+//!
+//! # モデル
+//!
+//! 1日のうちの時刻を、sin/cos の3倍音(1日周期・12時間周期・8時間周期)で表した
+//! 特徴量に対するロジスティック回帰。重みは7個だけで、何を覚えたかを数値で
+//! 読める(このプロジェクトが一貫して採ってきた「なぜ動くかが説明できる」方針)。
+//! 3倍音あれば「朝と夜の2回」のような複数の山も表せる。
+//!
+//! 学習は1件ずつの確率的勾配降下で、学習率は一定にしてある。一定の学習率は
+//! 新しい経験ほど重く効く(古い経験が指数的に薄れる)ことと同じなので、
+//! 生活リズムが変わればそれに追従する。これが「継続的に学習する」の中身である。
+//!
+//! # 観測していない時間は学ばない
+//!
+//! 電源が切れていた間は、触られなかったのではなく**見ていなかった**。そこを
+//! 「触られなかった」として学ぶと、電源を切る時間帯ほど世話が来ないと誤って
+//! 覚えてしまう。そこで観測に空白があったら、その間は学習せずに集計をやり直す。
+//! 時計が巻き戻った場合(RTC の電池切れで基準時刻へ戻った、など)も同じ扱いにする。
+//!
+//! 時計を読むのはプラットフォーム側で、ここは Unix 時刻を数値として受け取るだけ
+//! (`Pet` が時計を知らないという既存の方針と揃えてある)。
+
+use crate::math::{cosf, expf, sinf};
+
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// 集計の単位(秒)。この間に1回でも触られたら「触られた」とする。
+const BUCKET_SECONDS: u64 = 60;
+
+/// 時刻を表す sin/cos の倍音の数。
+const HARMONICS: usize = 3;
+
+/// 特徴量の数(定数項 + 倍音ごとの sin/cos)。
+pub const FEATURES: usize = 1 + 2 * HARMONICS;
+
+/// まだ何も学んでいないときの予測(1分の間に触られる確率)。
+///
+/// 重みを全部 0 から始めると、どの時刻も 0.5(=2分に1回は触られる)と予測する
+/// ことになり、初日から「世話が来るはず」と思い込んだ個体になる。そうならない
+/// よう、定数項だけをこの確率に対応する値から始める。
+const PRIOR_EXPECTATION: f32 = 0.02;
+
+/// これより長く観測が途切れたら、その間は見ていなかったとみなす。
+///
+/// 描画・体のステップのたびに観測されるので、動いている間の空白は1秒にも
+/// 満たない。集計単位2つぶんを超える空白は、止まっていたとしか考えられない。
+const MAX_OBSERVATION_GAP_SECONDS: u64 = 2 * BUCKET_SECONDS;
+
+/// 学習の設定。学習率を計測で選べるよう、定数ではなく構造体にしてある
+/// (`ControllerParams` と同じ扱い)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarePredictorParams {
+    /// 1件ごとの勾配降下の歩幅。大きいほど新しい経験に早く追従するが、
+    /// 日々のばらつきに振り回されやすくなる。
+    pub learning_rate: f32,
+}
+
+impl Default for CarePredictorParams {
+    /// 学習率 0.02 は計測で選んだ(docs/DESIGN.md「世話の予測」)。
+    ///
+    /// 合成したユーザー(14日間は毎晩20時台に触る)で比べると、0.05 以上では
+    /// **たまたま朝に触った日が1日あるだけで、2週間ぶんの「夜に来る」をほぼ
+    /// 打ち消した**(夜/朝の予測比 263 → 0.8)。0.02 なら同じ日を経ても夜を
+    /// 予測し続け(比 5.7)、2日で元の確信へ戻る。一方で習慣が本当に変われば
+    /// 2日で追従する。0.01 は例外にはさらに強いが、本当の変化に3日かかる。
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.02,
+        }
+    }
+}
+
+/// 世話がいつ来るかの予測モデル。
+#[derive(Debug, Clone)]
+pub struct CarePredictor {
+    params: CarePredictorParams,
+    weights: [f32; FEATURES],
+    /// いま集計している単位の開始時刻。まだ何も観測していなければ `None`。
+    bucket_start: Option<u64>,
+    /// いまの集計単位の間に触られたか。
+    touched_in_bucket: bool,
+}
+
+impl CarePredictor {
+    pub fn new() -> Self {
+        Self::with_params(CarePredictorParams::default())
+    }
+
+    pub fn with_params(params: CarePredictorParams) -> Self {
+        let mut weights = [0.0; FEATURES];
+        weights[0] = logit(PRIOR_EXPECTATION);
+        Self {
+            params,
+            weights,
+            bucket_start: None,
+            touched_in_bucket: false,
+        }
+    }
+
+    /// その時刻の1分の間に触られる確率の予測(0.0..1.0)。
+    pub fn expectation_at(&self, unix_seconds: u64) -> f32 {
+        sigmoid(dot(&self.weights, &features(unix_seconds)))
+    }
+
+    /// いまの時刻を知らせる。描画や体のステップのたびに呼んでよい。
+    ///
+    /// 集計単位が切り替わっていたら、終わった単位を1件の経験として学ぶ。
+    pub fn observe(&mut self, now_unix_seconds: u64) {
+        let bucket = now_unix_seconds - now_unix_seconds % BUCKET_SECONDS;
+        let Some(start) = self.bucket_start else {
+            self.start_bucket(bucket);
+            return;
+        };
+        if bucket == start {
+            return;
+        }
+        // 時計の巻き戻り、または長い空白(止まっていた)。見ていなかった時間は学ばない。
+        let observed_continuously =
+            bucket > start && bucket - start <= MAX_OBSERVATION_GAP_SECONDS;
+        if !observed_continuously {
+            self.start_bucket(bucket);
+            return;
+        }
+
+        self.learn(start, self.touched_in_bucket);
+        // 空白が短く、途中の単位を丸ごと飛ばした場合は、そこは触られなかったとして学ぶ
+        let mut skipped = start + BUCKET_SECONDS;
+        while skipped < bucket {
+            self.learn(skipped, false);
+            skipped += BUCKET_SECONDS;
+        }
+        self.start_bucket(bucket);
+    }
+
+    /// 触られた(クリックされた)ことを知らせる。
+    pub fn record_touch(&mut self, now_unix_seconds: u64) {
+        self.observe(now_unix_seconds);
+        self.touched_in_bucket = true;
+    }
+
+    /// 学んだ重み。何を覚えたかを読むため、また保存するためにある。
+    pub fn weights(&self) -> [f32; FEATURES] {
+        self.weights
+    }
+
+    fn start_bucket(&mut self, bucket: u64) {
+        self.bucket_start = Some(bucket);
+        self.touched_in_bucket = false;
+    }
+
+    /// 1件の経験から学ぶ(ロジスティック回帰の確率的勾配降下)。
+    fn learn(&mut self, bucket_start: u64, touched: bool) {
+        // 集計単位の中央の時刻で特徴量を作る
+        let x = features(bucket_start + BUCKET_SECONDS / 2);
+        let predicted = sigmoid(dot(&self.weights, &x));
+        let observed = if touched { 1.0 } else { 0.0 };
+        let error = observed - predicted;
+        for (weight, feature) in self.weights.iter_mut().zip(x.iter()) {
+            *weight += self.params.learning_rate * error * feature;
+        }
+    }
+}
+
+impl Default for CarePredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 1日のうちの時刻を、定数項と sin/cos の倍音で表す。
+fn features(unix_seconds: u64) -> [f32; FEATURES] {
+    let seconds_into_day = (unix_seconds % SECONDS_PER_DAY) as f32;
+    let phase = core::f32::consts::TAU * seconds_into_day / SECONDS_PER_DAY as f32;
+    let mut x = [0.0; FEATURES];
+    x[0] = 1.0;
+    for harmonic in 1..=HARMONICS {
+        let angle = phase * harmonic as f32;
+        x[2 * harmonic - 1] = sinf(angle);
+        x[2 * harmonic] = cosf(angle);
+    }
+    x
+}
+
+fn dot(weights: &[f32; FEATURES], x: &[f32; FEATURES]) -> f32 {
+    weights.iter().zip(x.iter()).map(|(w, v)| w * v).sum()
+}
+
+/// 数値的に安定なロジスティック関数(大きな負の入力で exp が溢れないようにする)。
+fn sigmoid(z: f32) -> f32 {
+    if z >= 0.0 {
+        1.0 / (1.0 + expf(-z))
+    } else {
+        let e = expf(z);
+        e / (1.0 + e)
+    }
+}
+
+/// `sigmoid` の逆関数。確率から、それを予測する定数項を求める。
+fn logit(probability: f32) -> f32 {
+    crate::math::lnf(probability / (1.0 - probability))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ある日の0時(UTC)。
+    const MIDNIGHT: u64 = 20_000 * SECONDS_PER_DAY;
+
+    fn at(hour: u64, minute: u64) -> u64 {
+        MIDNIGHT + hour * 3_600 + minute * 60
+    }
+
+    #[test]
+    fn a_fresh_predictor_expects_little_care_and_the_same_at_every_hour() {
+        // Arrange / Act
+        let predictor = CarePredictor::new();
+
+        // Assert: どの時刻も同じ低い予測から始まる
+        for hour in 0..24 {
+            let expectation = predictor.expectation_at(at(hour, 0));
+            assert!(
+                (expectation - PRIOR_EXPECTATION).abs() < 1e-4,
+                "hour {hour}: got {expectation}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_minute_with_a_touch_raises_the_expectation_at_that_time() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+        let before = predictor.expectation_at(at(20, 30));
+
+        // Act: 20:30 の1分間に触り、次の1分へ進めて学ばせる
+        predictor.observe(at(20, 30));
+        predictor.record_touch(at(20, 30) + 10);
+        predictor.observe(at(20, 31));
+
+        // Assert
+        assert!(predictor.expectation_at(at(20, 30)) > before);
+    }
+
+    #[test]
+    fn nothing_is_learned_until_the_minute_is_over() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+        let before = predictor.weights();
+
+        // Act: 同じ1分の中で触って時間を進めるだけ
+        predictor.observe(at(20, 30));
+        predictor.record_touch(at(20, 30) + 10);
+        predictor.observe(at(20, 30) + 50);
+
+        // Assert
+        assert_eq!(predictor.weights(), before);
+    }
+
+    #[test]
+    fn many_touches_in_one_minute_count_as_one() {
+        // Arrange
+        let mut once = CarePredictor::new();
+        let mut many = CarePredictor::new();
+
+        // Act
+        once.record_touch(at(20, 30));
+        once.observe(at(20, 31));
+        for second in 0..30 {
+            many.record_touch(at(20, 30) + second);
+        }
+        many.observe(at(20, 31));
+
+        // Assert: 連打しても1回の世話としか数えない
+        assert_eq!(once.weights(), many.weights());
+    }
+
+    #[test]
+    fn time_while_switched_off_is_not_learned_as_neglect() {
+        // Arrange: 観測を始める
+        let mut predictor = CarePredictor::new();
+        predictor.observe(at(8, 0));
+        let before = predictor.weights();
+
+        // Act: 8時間止まっていて、再び観測する
+        predictor.observe(at(16, 0));
+
+        // Assert: 見ていなかった8時間ぶんを「触られなかった」として学んではいない
+        assert_eq!(predictor.weights(), before);
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_is_not_learned_from() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+        predictor.observe(at(20, 30));
+        predictor.record_touch(at(20, 30));
+        let before = predictor.weights();
+
+        // Act: 時計が昼へ巻き戻る(RTC が基準時刻に戻った、など)
+        predictor.observe(at(12, 0));
+
+        // Assert: 巻き戻った時刻で学ばない。そのときの触れた記録も捨てる
+        assert_eq!(predictor.weights(), before);
+        predictor.observe(at(12, 1));
+        assert!(
+            predictor.expectation_at(at(12, 0)) < PRIOR_EXPECTATION,
+            "the touch before the clock jumped must not be credited to the new time"
+        );
+    }
+
+    /// テスト専用の決定的な疑似乱数(xorshift64)。
+    struct Rng(u64);
+
+    impl Rng {
+        fn unit(&mut self) -> f32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    /// 合成したユーザーと `days` 日暮らす。`habit_hour(day)` の時間帯は1分ごとに
+    /// 確率0.5で、それ以外はまれに(0.005)触る。
+    fn live(predictor: &mut CarePredictor, days: u64, habit_hour: impl Fn(u64) -> u64) {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for day in 0..days {
+            for minute in 0..1_440 {
+                let now = MIDNIGHT + day * SECONDS_PER_DAY + minute * 60;
+                let probability = if minute / 60 == habit_hour(day) { 0.5 } else { 0.005 };
+                predictor.observe(now);
+                if rng.unit() < probability {
+                    predictor.record_touch(now + 5);
+                }
+            }
+        }
+    }
+
+    fn evening_over_morning(predictor: &CarePredictor) -> f32 {
+        predictor.expectation_at(at(20, 30)) / predictor.expectation_at(at(8, 30))
+    }
+
+    #[test]
+    fn a_week_of_evening_visits_is_learned_as_an_evening_habit() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+
+        // Act: 1週間、毎晩20時台に触る
+        live(&mut predictor, 7, |_| 20);
+
+        // Assert: 夜を朝よりずっと強く予測する(計測では約66倍)
+        let ratio = evening_over_morning(&predictor);
+        assert!(ratio > 20.0, "got evening/morning = {ratio}");
+    }
+
+    #[test]
+    fn a_single_unusual_day_does_not_overturn_a_habit() {
+        // Arrange: 2週間の夜の習慣
+        let mut predictor = CarePredictor::new();
+
+        // Act: 15日目だけ朝に触り、また夜に戻る
+        live(&mut predictor, 15, |day| if day == 14 { 8 } else { 20 });
+        let right_after = evening_over_morning(&predictor);
+        let mut recovering = CarePredictor::new();
+        live(&mut recovering, 17, |day| if day == 14 { 8 } else { 20 });
+        let two_days_later = evening_over_morning(&recovering);
+
+        // Assert: 例外の1日を経ても夜を予測し続け(計測では約5.7倍)、
+        // 2日で確信を取り戻す(約24倍)。学習率を上げすぎるとここが崩れる
+        assert!(right_after > 2.0, "one odd day must not flip the habit; got {right_after}");
+        assert!(two_days_later > 10.0, "the habit must come back; got {two_days_later}");
+    }
+
+    #[test]
+    fn a_habit_that_really_changes_is_followed_within_a_few_days() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+
+        // Act: 2週間夜に触ったあと、3日間朝に触る
+        live(&mut predictor, 17, |day| if day < 14 { 20 } else { 8 });
+
+        // Assert: 朝を夜より強く予測するようになっている
+        let ratio = evening_over_morning(&predictor);
+        assert!(ratio < 1.0, "a lasting change must be followed; got evening/morning = {ratio}");
+    }
+
+    #[test]
+    fn the_expectation_is_always_a_probability() {
+        // Arrange: 極端に偏った経験を大量に積む
+        let mut predictor = CarePredictor::with_params(CarePredictorParams {
+            learning_rate: 1.0,
+        });
+
+        // Act
+        for minute in 0..(10 * 1_440) {
+            let now = MIDNIGHT + minute * 60;
+            predictor.record_touch(now);
+        }
+
+        // Assert
+        for hour in 0..24 {
+            let expectation = predictor.expectation_at(at(hour, 0));
+            assert!(
+                (0.0..=1.0).contains(&expectation) && expectation.is_finite(),
+                "hour {hour}: got {expectation}"
+            );
+        }
+    }
+}

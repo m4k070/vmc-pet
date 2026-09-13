@@ -55,6 +55,15 @@ pub fn expf(x: f32) -> f32 {
 }
 
 #[cfg(feature = "std")]
+pub fn lnf(x: f32) -> f32 {
+    x.ln()
+}
+#[cfg(not(feature = "std"))]
+pub fn lnf(x: f32) -> f32 {
+    libm::logf(x)
+}
+
+#[cfg(feature = "std")]
 pub fn floorf(x: f32) -> f32 {
     x.floor()
 }
