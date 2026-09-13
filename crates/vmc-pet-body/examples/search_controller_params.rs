@@ -123,9 +123,17 @@ fn mutate(parent: &ControllerParams, rng: &mut Rng, spread: f32) -> ControllerPa
             parent.imbalance_threshold,
             BOUNDS.imbalance_threshold,
         ),
-        nudge_radius_cells: jitter_within(rng, parent.nudge_radius_cells, BOUNDS.nudge_radius_cells),
+        nudge_radius_cells: jitter_within(
+            rng,
+            parent.nudge_radius_cells,
+            BOUNDS.nudge_radius_cells,
+        ),
         nudge_amount: jitter_within(rng, parent.nudge_amount, BOUNDS.nudge_amount),
-        nudge_offset_cells: jitter_within(rng, parent.nudge_offset_cells, BOUNDS.nudge_offset_cells),
+        nudge_offset_cells: jitter_within(
+            rng,
+            parent.nudge_offset_cells,
+            BOUNDS.nudge_offset_cells,
+        ),
         ..*parent
     }
 }

@@ -350,7 +350,10 @@ mod tests {
 
         // Assert: 崩壊せず、滑空している分だけ正のスコアになるはず
         let score = trajectory.fitness(32, 32);
-        assert!(score > 0.0, "a gliding, healthy body should score positively, got {score}");
+        assert!(
+            score > 0.0,
+            "a gliding, healthy body should score positively, got {score}"
+        );
     }
 
     #[test]
@@ -400,7 +403,10 @@ mod tests {
         let score = legibility(&cared_for, &neglected, 32, 32);
 
         // Assert: 一目で分かる変化なので、高いスコアになるべき
-        assert!(score > 0.5, "stopping outright must read as legible, got {score}");
+        assert!(
+            score > 0.5,
+            "stopping outright must read as legible, got {score}"
+        );
     }
 
     #[test]

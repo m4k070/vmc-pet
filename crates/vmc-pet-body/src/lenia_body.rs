@@ -89,7 +89,8 @@ impl LeniaBody {
     /// ただし `MIN_GROWTH_SCALE` を下限とし、実測で見つかった崩壊の崖には触れさせない。
     pub fn step(&mut self) {
         let growth_scale = MIN_GROWTH_SCALE + (1.0 - MIN_GROWTH_SCALE) * self.energy;
-        self.lenia.step_at_tempo(&mut self.field, growth_scale, self.tempo);
+        self.lenia
+            .step_at_tempo(&mut self.field, growth_scale, self.tempo);
         self.energy = (self.energy - ENERGY_DECAY_PER_STEP).max(MIN_ENERGY);
     }
 
@@ -236,7 +237,11 @@ mod tests {
         for _ in 0..10_000 {
             body.step();
         }
-        assert_eq!(body.energy(), MIN_ENERGY, "energy must be able to bottom out");
+        assert_eq!(
+            body.energy(),
+            MIN_ENERGY,
+            "energy must be able to bottom out"
+        );
 
         // Act
         body.inject(Perturbation {
@@ -256,7 +261,11 @@ mod tests {
         for _ in 0..10_000 {
             body.step();
         }
-        assert_eq!(body.energy(), MIN_ENERGY, "energy must be able to bottom out");
+        assert_eq!(
+            body.energy(),
+            MIN_ENERGY,
+            "energy must be able to bottom out"
+        );
         let mass_before = body.mass();
 
         // Act
@@ -267,7 +276,10 @@ mod tests {
         });
 
         // Assert: 場は動くが、エネルギーは(世話ではないので)回復しない
-        assert!(body.mass() > mass_before, "disturb must still move the field");
+        assert!(
+            body.mass() > mass_before,
+            "disturb must still move the field"
+        );
         assert_eq!(body.energy(), MIN_ENERGY, "disturb must not raise energy");
     }
 
@@ -318,7 +330,10 @@ mod tests {
             !(5.0..=120.0).contains(&collapsed),
             "the body must be off its normal state, got {collapsed}"
         );
-        assert!((body.mass() - 76.86).abs() < 1.0, "revive must restore the original pattern");
+        assert!(
+            (body.mass() - 76.86).abs() < 1.0,
+            "revive must restore the original pattern"
+        );
     }
 
     #[test]
@@ -335,7 +350,11 @@ mod tests {
         body.revive();
 
         // Assert
-        assert_eq!(body.observe().get(0, 0), 0.0, "the field must be cleared first");
+        assert_eq!(
+            body.observe().get(0, 0),
+            0.0,
+            "the field must be cleared first"
+        );
     }
 
     #[test]
@@ -412,8 +431,15 @@ mod tests {
         }
 
         // Assert: 通常の減衰だけならまだ尽きていないが、最大ストレスなら尽きている
-        assert!(calm.energy() > 0.0, "the calm body should still have energy left");
-        assert_eq!(stressed.energy(), MIN_ENERGY, "sustained max stress must exhaust energy sooner");
+        assert!(
+            calm.energy() > 0.0,
+            "the calm body should still have energy left"
+        );
+        assert_eq!(
+            stressed.energy(),
+            MIN_ENERGY,
+            "sustained max stress must exhaust energy sooner"
+        );
     }
 
     #[test]

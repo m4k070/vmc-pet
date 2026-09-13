@@ -7,11 +7,11 @@
 
 use std::time::{Duration, Instant};
 
-use vmc_pet_body::Pet as PetCore;
 use crate::interface::MachineLoad;
 use crate::persistence::{now_unix_seconds, MemoryStore};
 use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
+use vmc_pet_body::Pet as PetCore;
 
 /// 場の解像度。表示と 1:1 にしてある。Orbium は 20x20 なので画面の 6 割強を占める。
 /// この大きさでも生物の挙動が変わらないことは実測で確かめた(docs/DESIGN.md 参照)。
@@ -118,7 +118,8 @@ impl Pet {
             let energy_before = self.core.energy();
             let collapsed = self.core.step();
             // 機械が忙しいほど、環境が厳しくエネルギーが早く尽きるようにする
-            self.core.apply_environmental_stress(self.machine_load.sample());
+            self.core
+                .apply_environmental_stress(self.machine_load.sample());
             if energy_before > 0.0 && self.core.energy() == 0.0 {
                 eprintln!("vmc-pet: energy depleted; the body is weakening from neglect");
             }
@@ -296,7 +297,10 @@ mod tests {
 
         // Assert: 弱るが、崩壊はしない
         let neglected = pet.core.mass();
-        assert!(neglected > 40.0, "neglect must not kill the body, got {neglected}");
+        assert!(
+            neglected > 40.0,
+            "neglect must not kill the body, got {neglected}"
+        );
         assert!(
             neglected < healthy * 0.98,
             "neglect must measurably weaken the body; healthy={healthy} neglected={neglected}"
@@ -352,7 +356,10 @@ mod tests {
         pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
 
         // Assert
-        let at = pet.core.touching_at().expect("the click must land inside the grid");
+        let at = pet
+            .core
+            .touching_at()
+            .expect("the click must land inside the grid");
         assert!(pet.core.echo_view().get(at.x, at.y) > 0.0);
     }
 
@@ -364,13 +371,19 @@ mod tests {
 
         // Act: ポインタを乗せてから描画を1回通す(echo の更新は draw の中で起こる)
         pet.on_pointer(PointerInput::Entered { x: 192.0, y: 192.0 });
-        let at = pet.core.touching_at().expect("hovering over the grid must resolve a cell");
+        let at = pet
+            .core
+            .touching_at()
+            .expect("hovering over the grid must resolve a cell");
         let mut canvas = vec![0u8; 384 * 384 * 4];
         pet.draw(&mut canvas, 384, 384);
 
         // Assert: 体の総量は変わらないが、echo は光る
         assert_eq!(pet.core.mass(), before, "hovering must not touch the body");
-        assert!(pet.core.echo_view().get(at.x, at.y) > 0.0, "hovering must light the echo");
+        assert!(
+            pet.core.echo_view().get(at.x, at.y) > 0.0,
+            "hovering must light the echo"
+        );
     }
 
     #[test]
@@ -380,7 +393,10 @@ mod tests {
         let before = pet.core.mass();
 
         // Act: グリッドの外を押す
-        pet.on_pointer(PointerInput::Pressed { x: 1000.0, y: 1000.0 });
+        pet.on_pointer(PointerInput::Pressed {
+            x: 1000.0,
+            y: 1000.0,
+        });
 
         // Assert
         assert_eq!(pet.core.mass(), before);
@@ -413,8 +429,8 @@ mod tests {
         store.save(vmc_pet_body::PetMemory::with_energy(0.25));
 
         // Act: その保存ファイルを読むペットを起動する
-        let pet = Pet::with_memory_store(DEFAULT_ANIMAL_CODE, MemoryStore::at(path.clone()))
-            .unwrap();
+        let pet =
+            Pet::with_memory_store(DEFAULT_ANIMAL_CODE, MemoryStore::at(path.clone())).unwrap();
 
         // Assert: 満タン(1.0)ではなく、保存されていた値で目を覚ます。
         // 保存直後なので離れていた時間はごくわずかで、減衰も無視できる。

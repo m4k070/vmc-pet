@@ -107,17 +107,12 @@ impl LayerWindow {
             .map_err(|e| LayerWindowError::MissingGlobal("wl_compositor", e))?;
         let layer_shell = LayerShell::bind(&globals, &qh)
             .map_err(|e| LayerWindowError::MissingGlobal("zwlr_layer_shell_v1", e))?;
-        let shm = Shm::bind(&globals, &qh)
-            .map_err(|e| LayerWindowError::MissingGlobal("wl_shm", e))?;
+        let shm =
+            Shm::bind(&globals, &qh).map_err(|e| LayerWindowError::MissingGlobal("wl_shm", e))?;
 
         let surface = compositor.create_surface(&qh);
-        let layer = layer_shell.create_layer_surface(
-            &qh,
-            surface,
-            Layer::Top,
-            Some(LAYER_NAMESPACE),
-            None,
-        );
+        let layer =
+            layer_shell.create_layer_surface(&qh, surface, Layer::Top, Some(LAYER_NAMESPACE), None);
         layer.set_anchor(Anchor::BOTTOM | Anchor::RIGHT);
         layer.set_margin(0, config.margin_right, config.margin_bottom, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -202,9 +197,7 @@ impl LayerWindow {
 
         let wl_region = self.compositor.wl_compositor().create_region(qh, ());
         wl_region.add(region.x, region.y, region.width, region.height);
-        self.layer
-            .wl_surface()
-            .set_input_region(Some(&wl_region));
+        self.layer.wl_surface().set_input_region(Some(&wl_region));
         wl_region.destroy();
         self.applied_input_region = Some(region);
     }
@@ -396,7 +389,8 @@ impl SeatHandler for LayerWindow {
         }
     }
 
-    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
+    }
 }
 
 impl PointerHandler for LayerWindow {
@@ -481,7 +475,10 @@ mod tests {
 
         // Act / Assert
         assert!(!should_draw(VBLANK_60HZ, interval), "1 vblank is too early");
-        assert!(should_draw(VBLANK_60HZ * 2, interval), "2 vblanks must draw");
+        assert!(
+            should_draw(VBLANK_60HZ * 2, interval),
+            "2 vblanks must draw"
+        );
     }
 
     #[test]

@@ -143,6 +143,9 @@ mod tests {
     #[test]
     fn rem_euclidf_matches_the_standard_library() {
         assert!((rem_euclidf(5.5, 2.0) - 1.5).abs() < 1e-6);
-        assert!((rem_euclidf(-0.5, 2.0) - 1.5).abs() < 1e-6, "negative input must wrap positive");
+        assert!(
+            (rem_euclidf(-0.5, 2.0) - 1.5).abs() < 1e-6,
+            "negative input must wrap positive"
+        );
     }
 }

@@ -7,8 +7,8 @@
 //! 体の場(body)と入力の echo(touch_echo)は別データとして受け取り、ここで初めて
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
-use vmc_pet_body::{CellPos, FieldView, PigmentView};
 use crate::render::TouchEchoView;
+use vmc_pet_body::{CellPos, FieldView, PigmentView};
 
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
 const DOT_GAP_RATIO: f32 = 0.18;
@@ -107,8 +107,8 @@ impl DotGrid {
         let row = ((y - bounds.y as f32) / cell_size + shift.1).floor() as i32;
 
         let (field_width, field_height) = (field_size.0 as i32, field_size.1 as i32);
-        let field_x = (column * field_width / self.columns as i32 + cell_origin.0)
-            .rem_euclid(field_width);
+        let field_x =
+            (column * field_width / self.columns as i32 + cell_origin.0).rem_euclid(field_width);
         let field_y =
             (row * field_height / self.rows as i32 + cell_origin.1).rem_euclid(field_height);
 
@@ -294,12 +294,8 @@ fn draw_dot(canvas: &mut [u8], width: u32, height: u32, bounds: GridBounds, dot:
                 continue;
             }
             let offset = (y * width as usize + x) * BYTES_PER_PIXEL;
-            let pixel = premultiplied_argb8888(
-                dot.color.0,
-                dot.color.1,
-                dot.color.2,
-                dot.value * coverage,
-            );
+            let pixel =
+                premultiplied_argb8888(dot.color.0, dot.color.1, dot.color.2, dot.value * coverage);
             canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
         }
     }
@@ -471,7 +467,11 @@ mod tests {
         let cell_size = surface_size / 32;
         let row_offset = (cell_size / 2) * surface_size;
         let outside = (row_offset + cell_size) * BYTES_PER_PIXEL;
-        assert_eq!(canvas[outside + 3], 0, "dot must not bleed into the next cell");
+        assert_eq!(
+            canvas[outside + 3],
+            0,
+            "dot must not bleed into the next cell"
+        );
         let inside = (row_offset + cell_size / 2) * BYTES_PER_PIXEL;
         assert_ne!(canvas[inside + 3], 0, "dot must cover its own cell center");
     }
@@ -596,7 +596,10 @@ mod tests {
 
         // Assert: 体は空でも、触れた場所にドットが現れる
         // ホバーで光らせられなかった元の問題(体を殺さないと見えない)を、echo が解決する
-        assert!(!canvas.iter().all(|&byte| byte == 0), "the touched empty cell must be visible");
+        assert!(
+            !canvas.iter().all(|&byte| byte == 0),
+            "the touched empty cell must be visible"
+        );
     }
 
     #[test]
@@ -630,7 +633,10 @@ mod tests {
         let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
         assert!(a > 0.0, "the centre must be drawn");
         // premultiplied なので比率で比較する。ECHO_COLOR は赤が緑よりわずかに強い暖色
-        assert!(r / a >= g / a, "an echo-only dot must lean toward the echo color");
+        assert!(
+            r / a >= g / a,
+            "an echo-only dot must lean toward the echo color"
+        );
     }
 
     #[test]
@@ -664,7 +670,10 @@ mod tests {
         let pixel = &canvas[centre * BYTES_PER_PIXEL..centre * BYTES_PER_PIXEL + 4];
         let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
         assert!(a > 0.0, "the centre must be drawn");
-        assert!(r > g, "a flushed body must lean toward the pigment color; r={r} g={g}");
+        assert!(
+            r > g,
+            "a flushed body must lean toward the pigment color; r={r} g={g}"
+        );
     }
 
     #[test]
@@ -693,6 +702,9 @@ mod tests {
         let pixel = &canvas[centre * BYTES_PER_PIXEL..centre * BYTES_PER_PIXEL + 4];
         let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
         assert!(a > 0.0, "the centre must be drawn");
-        assert!(g > r, "a body-only dot must keep the body color, not lean toward echo");
+        assert!(
+            g > r,
+            "a body-only dot must keep the body color, not lean toward echo"
+        );
     }
 }

@@ -160,14 +160,19 @@ impl SavedMemory {
     /// 形式バージョン1(エネルギーだけ)のレコードを復号する。学んだことは
     /// 何も無い記憶として読む。
     fn decode_legacy(record: &[u8; LEGACY_RECORD_LEN]) -> Option<Self> {
-        if read_u32(record, 0) != LEGACY_RECORD_MAGIC || read_u32(record, 12) != fnv1a(&record[0..12]) {
+        if read_u32(record, 0) != LEGACY_RECORD_MAGIC
+            || read_u32(record, 12) != fnv1a(&record[0..12])
+        {
             return None;
         }
         let energy = read_f32(record, 8);
         if !(0.0..=1.0).contains(&energy) {
             return None;
         }
-        Some(Self::new(PetMemory::with_energy(energy), read_u32(record, 4) as u64))
+        Some(Self::new(
+            PetMemory::with_energy(energy),
+            read_u32(record, 4) as u64,
+        ))
     }
 }
 
@@ -321,7 +326,8 @@ mod tests {
         let mut area = [0xFFu8; 4096];
         for (slot, energy) in [0.9f32, 0.6, 0.3].into_iter().enumerate() {
             let at = slot * LEGACY_RECORD_LEN;
-            area[at..at + LEGACY_RECORD_LEN].copy_from_slice(&legacy_record(energy, 1_700_000_000 + slot as u32));
+            area[at..at + LEGACY_RECORD_LEN]
+                .copy_from_slice(&legacy_record(energy, 1_700_000_000 + slot as u32));
         }
 
         // Act
@@ -391,7 +397,8 @@ mod tests {
         // Arrange: 3つ書かれた状態
         let mut area = [0xFFu8; RECORD_LEN * 4];
         for (slot, energy) in [0.9, 0.6, 0.3].into_iter().enumerate() {
-            let saved = SavedMemory::new(PetMemory::with_energy(energy), 1_700_000_000 + slot as u64);
+            let saved =
+                SavedMemory::new(PetMemory::with_energy(energy), 1_700_000_000 + slot as u64);
             area[slot * RECORD_LEN..][..RECORD_LEN].copy_from_slice(&saved.encode());
         }
 
@@ -399,7 +406,10 @@ mod tests {
         let (latest, next_slot) = scan_records(&area);
 
         // Assert: 一番新しいもの(最後に書いたもの)を返し、次は4番目の区画
-        assert_eq!(latest.expect("three records were written").memory.energy, 0.3);
+        assert_eq!(
+            latest.expect("three records were written").memory.energy,
+            0.3
+        );
         assert_eq!(next_slot, 3);
     }
 

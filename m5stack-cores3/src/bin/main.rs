@@ -45,12 +45,12 @@ use esp_hal::{
 };
 
 use core_s3::{
+    CoreS3,
     bsp::CoreS3DisplayResources,
     touch::{Ft6336u, TouchPhase},
-    CoreS3,
 };
 use embedded_hal_bus::i2c::RefCellDevice;
-use vmc_pet_body::{load_animal, Camera, CellPos, FieldView, Pet, PigmentView, TouchEchoView};
+use vmc_pet_body::{Camera, CellPos, FieldView, Pet, PigmentView, TouchEchoView, load_animal};
 use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
 
 esp_bootloader_esp_idf::esp_app_desc!();

@@ -174,9 +174,15 @@ mod tests {
 
         // Assert: 瞬時には色づかず(慣性)、しばらくすると体の値に近い濃さになる。
         // 体が無いところには溜まらない
-        assert!(after_a_second < 0.1, "must not flush instantly; got {after_a_second}");
+        assert!(
+            after_a_second < 0.1,
+            "must not flush instantly; got {after_a_second}"
+        );
         let core = body.view().get(8, 8);
-        assert!(after_forty_seconds > core * 0.8, "got {after_forty_seconds}, body {core}");
+        assert!(
+            after_forty_seconds > core * 0.8,
+            "got {after_forty_seconds}, body {core}"
+        );
         assert_eq!(pigment.view().get(0, 0), 0.0);
     }
 
@@ -202,7 +208,10 @@ mod tests {
 
         // Assert
         assert!(a_second_later > flushed * 0.9, "must not vanish instantly");
-        assert!(a_minute_later < flushed * 0.1, "must fade within about a minute");
+        assert!(
+            a_minute_later < flushed * 0.1,
+            "must fade within about a minute"
+        );
     }
 
     #[test]

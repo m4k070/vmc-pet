@@ -247,7 +247,11 @@ mod tests {
 
         // Assert: 光は体と一緒に9セル先へ移り、世界の元の座標には残らない
         let view = echo.view();
-        assert!((view.get(17, 8) - 0.5).abs() < 1e-5, "got {}", view.get(17, 8));
+        assert!(
+            (view.get(17, 8) - 0.5).abs() < 1e-5,
+            "got {}",
+            view.get(17, 8)
+        );
         assert_eq!(view.get(8, 8), 0.0);
     }
 

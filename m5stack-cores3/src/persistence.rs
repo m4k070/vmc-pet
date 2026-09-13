@@ -39,10 +39,10 @@ use alloc::vec;
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_bootloader_esp_idf::partitions::{
-    read_partition_table, PartitionTable, PARTITION_TABLE_MAX_LEN,
+    PARTITION_TABLE_MAX_LEN, PartitionTable, read_partition_table,
 };
 use esp_storage::FlashStorage;
-use vmc_pet_body::{scan_records, PetMemory, SavedMemory, RECORD_LEN};
+use vmc_pet_body::{PetMemory, RECORD_LEN, SavedMemory, scan_records};
 
 /// `partitions.csv` で記憶用に切ったパーティションのラベル。
 ///

@@ -81,7 +81,11 @@ impl Pet {
     }
 
     /// `code`(assets/animals.json のコード)から生物を読み込んで作る便利関数。
-    pub fn load(code: &str, width: usize, height: usize) -> Result<Self, crate::animal::AnimalError> {
+    pub fn load(
+        code: &str,
+        width: usize,
+        height: usize,
+    ) -> Result<Self, crate::animal::AnimalError> {
         Ok(Self::new(crate::load_animal(code)?, width, height))
     }
 
@@ -330,7 +334,10 @@ impl Pet {
     /// たびに読まれるので、丸めずに渡して補間で読む(touch_echo.rs 参照)。
     /// 場が空のときは原点を返す。
     fn body_centroid(&self) -> (f32, f32) {
-        self.body.observe().toroidal_centroid().unwrap_or((0.0, 0.0))
+        self.body
+            .observe()
+            .toroidal_centroid()
+            .unwrap_or((0.0, 0.0))
     }
 
     pub fn observe(&self) -> FieldView<'_> {
@@ -389,7 +396,11 @@ mod tests {
 
         // Assert: 健常な体は1ステップで崩壊しない
         assert!(!collapsed);
-        assert!(pet.mass() > 0.0, "mass should still be present after one step, got {}", pet.mass());
+        assert!(
+            pet.mass() > 0.0,
+            "mass should still be present after one step, got {}",
+            pet.mass()
+        );
     }
 
     #[test]
@@ -448,7 +459,11 @@ mod tests {
 
         // Assert: echo は光り続けるが、体の総量はクリックの瞬間から変わらない
         assert!(pet.echo_view().get(2, 2) > 0.0);
-        assert_eq!(pet.mass(), mass_after_click, "hovering must not touch the body");
+        assert_eq!(
+            pet.mass(),
+            mass_after_click,
+            "hovering must not touch the body"
+        );
     }
 
     #[test]
@@ -463,7 +478,11 @@ mod tests {
 
         // Assert
         assert_eq!(pet.touching_at(), None);
-        assert_eq!(pet.mass(), mass_after_click, "leaving must not touch the body");
+        assert_eq!(
+            pet.mass(),
+            mass_after_click,
+            "leaving must not touch the body"
+        );
     }
 
     #[test]
@@ -557,7 +576,11 @@ mod tests {
     fn the_pets_own_action_lights_the_echo_without_being_touched() {
         // Arrange: 一切触れない
         let mut pet = orbium();
-        assert_eq!(brightest_echo(&pet), 0.0, "nothing should glow before anything happens");
+        assert_eq!(
+            brightest_echo(&pet),
+            0.0,
+            "nothing should glow before anything happens"
+        );
 
         // Act: コントローラが判断する間隔(既定17ステップ)を超えて進める
         let mut lit = false;
@@ -570,7 +593,10 @@ mod tests {
         }
 
         // Assert: 触られていないのに光る(自分から動いたことが見える)
-        assert!(lit, "the controller's own action must be visible through the echo");
+        assert!(
+            lit,
+            "the controller's own action must be visible through the echo"
+        );
     }
 
     #[test]
@@ -753,7 +779,10 @@ mod tests {
 
         // Assert: 待っている個体ははっきり色づき、元気な個体は色づかない
         let waiting_tint = mean_tint(&waiting);
-        assert!(waiting_tint > 0.3, "a waiting pet must flush; got {waiting_tint}");
+        assert!(
+            waiting_tint > 0.3,
+            "a waiting pet must flush; got {waiting_tint}"
+        );
         assert_eq!(mean_tint(&lively), 0.0);
     }
 
@@ -767,7 +796,8 @@ mod tests {
             nudge_amount_when_depleted: 1.0,
             ..ControllerParams::default()
         };
-        let mut plain = Pet::with_controller_params(crate::load_animal("O2u").unwrap(), 32, 32, same_stirring);
+        let mut plain =
+            Pet::with_controller_params(crate::load_animal("O2u").unwrap(), 32, 32, same_stirring);
 
         // Act
         for _ in 0..3_000 {
@@ -776,9 +806,15 @@ mod tests {
         }
 
         // Assert: 体の場は1ビットも違わない(色素は体 → 色素の一方向だけ)
-        assert!(mean_tint(&flushed) > 0.3, "the pigment must actually be there");
+        assert!(
+            mean_tint(&flushed) > 0.3,
+            "the pigment must actually be there"
+        );
         assert_eq!(flushed.mass(), plain.mass());
-        assert_eq!(flushed.observe().toroidal_centroid(), plain.observe().toroidal_centroid());
+        assert_eq!(
+            flushed.observe().toroidal_centroid(),
+            plain.observe().toroidal_centroid()
+        );
     }
 
     /// がっかりしきった体のテンポ(×0.6)で、世話が一切来ないまま長く過ごしても、
@@ -807,8 +843,15 @@ mod tests {
             }
 
             // Assert
-            assert_eq!(collapses, 0, "a long disappointment collapsed {code} ({name})");
-            assert!(pet.mass() > 40.0, "{code} ({name}) must stay alive, got mass {}", pet.mass());
+            assert_eq!(
+                collapses, 0,
+                "a long disappointment collapsed {code} ({name})"
+            );
+            assert!(
+                pet.mass() > 40.0,
+                "{code} ({name}) must stay alive, got mass {}",
+                pet.mass()
+            );
         }
     }
 
@@ -861,7 +904,11 @@ mod tests {
             "the controller must not substitute for real touch; \
              healthy={healthy_mass} neglected={neglected_mass}"
         );
-        assert_eq!(pet.energy(), 0.0, "energy must still bottom out despite the controller");
+        assert_eq!(
+            pet.energy(),
+            0.0,
+            "energy must still bottom out despite the controller"
+        );
     }
 
     #[test]
@@ -895,7 +942,10 @@ mod tests {
         // Assert: はっきり弱っているが、尽き切ってはいない
         // (ユーザーと相談して選んだ「進むが、減衰はゆるやかに」の狙い)
         let resumed_energy = pet.energy();
-        assert!(resumed_energy > 0.0, "a night away must not fully drain it, got {resumed_energy}");
+        assert!(
+            resumed_energy > 0.0,
+            "a night away must not fully drain it, got {resumed_energy}"
+        );
         assert!(
             resumed_energy < 0.5,
             "a night away must clearly weaken it, got {resumed_energy}"
@@ -929,7 +979,10 @@ mod tests {
         let mut pet = orbium();
         let at = CellPos { x: 3, y: 3 };
         let first_gain = mass_gain_from_clicking(&mut pet, at);
-        assert!(first_gain > 0.0, "the first click must register, got {first_gain}");
+        assert!(
+            first_gain > 0.0,
+            "the first click must register, got {first_gain}"
+        );
 
         // Act: 同じ場所を続けて叩く
         for _ in 0..4 {
@@ -1056,11 +1109,17 @@ mod tests {
         // 世界の元の座標には残らない
         let same_part = on_body(&pet, dx, dy);
         let moved = (same_part.x as i32 - clicked.x as i32).abs();
-        assert!(moved >= 3, "the body must have glided for this test to mean anything; moved {moved}");
+        assert!(
+            moved >= 3,
+            "the body must have glided for this test to mean anything; moved {moved}"
+        );
         let echo = pet.echo_view();
         let on_the_body = echo.get(same_part.x, same_part.y);
         let left_behind = echo.get(clicked.x, clicked.y);
-        assert!(on_the_body > 0.8, "the glow must stay on the body; got {on_the_body}");
+        assert!(
+            on_the_body > 0.8,
+            "the glow must stay on the body; got {on_the_body}"
+        );
         assert!(
             on_the_body > left_behind,
             "the glow must not be left behind; on_body={on_the_body} left_behind={left_behind}"
@@ -1079,7 +1138,10 @@ mod tests {
             pet.click(at);
             pet.leave();
         }
-        assert!(pet.attention_at(at) < 0.05, "must be fully habituated by now");
+        assert!(
+            pet.attention_at(at) < 0.05,
+            "must be fully habituated by now"
+        );
 
         // Act: 慣れきった場所をさらに叩く
         let energy_before = pet.energy();
@@ -1109,7 +1171,11 @@ mod tests {
 
         // Act: 離れた真新しい場所を触る
         let fresh = CellPos { x: 20, y: 20 };
-        assert_eq!(pet.attention_at(fresh), 1.0, "the fresh place must be untouched");
+        assert_eq!(
+            pet.attention_at(fresh),
+            1.0,
+            "the fresh place must be untouched"
+        );
         let energy_before = pet.energy();
         pet.click(fresh);
         pet.leave();

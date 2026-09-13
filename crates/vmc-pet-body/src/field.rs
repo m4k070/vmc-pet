@@ -275,7 +275,6 @@ mod tests {
         assert_eq!(view.get(2, 0), 0.0);
         assert_eq!(view.get(0, 2), 0.0);
     }
-
 }
 
 #[cfg(test)]
@@ -299,7 +298,11 @@ mod injection_tests {
         let view = field.view();
         assert!((view.get(8, 8) - 0.5).abs() < 1e-5);
         assert!(view.get(9, 8) < view.get(8, 8));
-        assert_eq!(view.get(12, 8), 0.0, "outside the radius must stay untouched");
+        assert_eq!(
+            view.get(12, 8),
+            0.0,
+            "outside the radius must stay untouched"
+        );
     }
 
     #[test]

@@ -75,7 +75,10 @@ impl core::fmt::Display for AnimalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "failed to parse animals.json: {e}"),
-            Self::KernelPeaks(raw) => write!(f, "invalid kernel peaks {raw:?} (expected e.g. \"1\" or \"1/2,1\")"),
+            Self::KernelPeaks(raw) => write!(
+                f,
+                "invalid kernel peaks {raw:?} (expected e.g. \"1\" or \"1/2,1\")"
+            ),
             Self::UnknownFunction(name, index) => write!(f, "unknown {name} index: {index}"),
             Self::Rle(ch) => write!(f, "unexpected character in the rle payload: {ch:?}"),
             Self::NotFound(code) => write!(f, "no animal with code {code:?}"),
@@ -332,7 +335,11 @@ mod tests {
         let animals = list_animals().unwrap();
 
         // Assert
-        assert_eq!(animals.len(), 4, "expected all 4 vendored animals to be listed");
+        assert_eq!(
+            animals.len(),
+            4,
+            "expected all 4 vendored animals to be listed"
+        );
         assert!(animals.iter().any(|(code, _)| code == "O2u"));
         for code in ["O2u", "OG2g", "S1s", "2S1v"] {
             assert!(

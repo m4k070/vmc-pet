@@ -97,7 +97,9 @@ mod tests {
         let perturbation = sample();
 
         // Act
-        let samples: Vec<f32> = (0..=8).map(|i| perturbation.weight_at(i as f32 * 0.5)).collect();
+        let samples: Vec<f32> = (0..=8)
+            .map(|i| perturbation.weight_at(i as f32 * 0.5))
+            .collect();
 
         // Assert
         for pair in samples.windows(2) {
@@ -140,7 +142,11 @@ mod tests {
         // Assert
         assert!((cells[8 * 16 + 8] - 0.5).abs() < 1e-5);
         assert!(cells[8 * 16 + 9] < cells[8 * 16 + 8]);
-        assert_eq!(cells[8 * 16 + 12], 0.0, "outside the radius must stay untouched");
+        assert_eq!(
+            cells[8 * 16 + 12],
+            0.0,
+            "outside the radius must stay untouched"
+        );
     }
 
     #[test]

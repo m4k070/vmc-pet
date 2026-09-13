@@ -99,8 +99,14 @@ mod tests {
     #[test]
     fn usage_fraction_is_zero_when_everything_was_idle() {
         // Arrange
-        let previous = CpuTimes { idle: 100, total: 200 };
-        let current = CpuTimes { idle: 150, total: 250 };
+        let previous = CpuTimes {
+            idle: 100,
+            total: 200,
+        };
+        let current = CpuTimes {
+            idle: 150,
+            total: 250,
+        };
 
         // Act
         let usage = usage_fraction(previous, current);
@@ -112,8 +118,14 @@ mod tests {
     #[test]
     fn usage_fraction_is_one_when_nothing_was_idle() {
         // Arrange
-        let previous = CpuTimes { idle: 100, total: 200 };
-        let current = CpuTimes { idle: 100, total: 250 };
+        let previous = CpuTimes {
+            idle: 100,
+            total: 200,
+        };
+        let current = CpuTimes {
+            idle: 100,
+            total: 250,
+        };
 
         // Act
         let usage = usage_fraction(previous, current);
@@ -126,7 +138,10 @@ mod tests {
     fn usage_fraction_is_half_when_half_the_new_time_was_busy() {
         // Arrange
         let previous = CpuTimes { idle: 0, total: 0 };
-        let current = CpuTimes { idle: 50, total: 100 };
+        let current = CpuTimes {
+            idle: 50,
+            total: 100,
+        };
 
         // Act
         let usage = usage_fraction(previous, current);
@@ -138,7 +153,10 @@ mod tests {
     #[test]
     fn usage_fraction_handles_no_elapsed_time() {
         // Arrange: 2回のサンプルの間にジフィーが進んでいない
-        let previous = CpuTimes { idle: 100, total: 200 };
+        let previous = CpuTimes {
+            idle: 100,
+            total: 200,
+        };
         let current = previous;
 
         // Act

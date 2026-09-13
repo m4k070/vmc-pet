@@ -223,8 +223,7 @@ impl CarePredictor {
             return;
         }
         // 時計の巻き戻り、または長い空白(止まっていた)。見ていなかった時間は学ばない。
-        let observed_continuously =
-            bucket > start && bucket - start <= MAX_OBSERVATION_GAP_SECONDS;
+        let observed_continuously = bucket > start && bucket - start <= MAX_OBSERVATION_GAP_SECONDS;
         if !observed_continuously {
             self.start_bucket(bucket);
             return;
@@ -304,7 +303,11 @@ impl CarePredictor {
         if anticipation <= 0.0 {
             self.expectation_fulfilled = false;
         }
-        let unmet = if self.expectation_fulfilled { 0.0 } else { anticipation };
+        let unmet = if self.expectation_fulfilled {
+            0.0
+        } else {
+            anticipation
+        };
         let accumulated = self.disappointment * DISAPPOINTMENT_FADE_PER_MINUTE
             + unmet / MINUTES_OF_UNMET_WAITING_FOR_FULL_DISAPPOINTMENT;
         self.disappointment = accumulated.min(1.0);
@@ -509,7 +512,11 @@ mod tests {
         for day in 0..days {
             for minute in 0..1_440 {
                 let now = MIDNIGHT + day * SECONDS_PER_DAY + minute * 60;
-                let probability = if minute / 60 == habit_hour(day) { 0.5 } else { 0.005 };
+                let probability = if minute / 60 == habit_hour(day) {
+                    0.5
+                } else {
+                    0.005
+                };
                 predictor.observe(now);
                 if rng.unit() < probability {
                     predictor.record_touch(now + 5);
@@ -549,8 +556,14 @@ mod tests {
 
         // Assert: 例外の1日を経ても夜を予測し続け(計測では約5.7倍)、
         // 2日で確信を取り戻す(約24倍)。学習率を上げすぎるとここが崩れる
-        assert!(right_after > 2.0, "one odd day must not flip the habit; got {right_after}");
-        assert!(two_days_later > 10.0, "the habit must come back; got {two_days_later}");
+        assert!(
+            right_after > 2.0,
+            "one odd day must not flip the habit; got {right_after}"
+        );
+        assert!(
+            two_days_later > 10.0,
+            "the habit must come back; got {two_days_later}"
+        );
     }
 
     #[test]
@@ -563,7 +576,10 @@ mod tests {
 
         // Assert: 朝を夜より強く予測するようになっている
         let ratio = evening_over_morning(&predictor);
-        assert!(ratio < 1.0, "a lasting change must be followed; got evening/morning = {ratio}");
+        assert!(
+            ratio < 1.0,
+            "a lasting change must be followed; got evening/morning = {ratio}"
+        );
     }
 
     #[test]
@@ -616,12 +632,18 @@ mod tests {
         live(&mut predictor, 7, |_| 20);
 
         // Act: 1分ごとに平均を取り直す
-        let fine: f32 = (0..1_440).map(|minute| predictor.expectation_at(minute * 60)).sum::<f32>()
+        let fine: f32 = (0..1_440)
+            .map(|minute| predictor.expectation_at(minute * 60))
+            .sum::<f32>()
             / 1_440.0;
 
         // Assert: 15分おきの標本で求めたキャッシュと、ほぼ一致する
         let relative_error = (predictor.daily_mean - fine).abs() / fine;
-        assert!(relative_error < 0.01, "cached={} fine={fine}", predictor.daily_mean);
+        assert!(
+            relative_error < 0.01,
+            "cached={} fine={fine}",
+            predictor.daily_mean
+        );
     }
 
     #[test]
@@ -637,7 +659,10 @@ mod tests {
 
         // Assert: 同じ予測・同じ期待を持つ
         assert_eq!(reborn.weights(), learned.weights());
-        assert_eq!(reborn.anticipation_at(at(20, 30)), learned.anticipation_at(at(20, 30)));
+        assert_eq!(
+            reborn.anticipation_at(at(20, 30)),
+            learned.anticipation_at(at(20, 30))
+        );
     }
 
     #[test]
@@ -683,7 +708,11 @@ mod tests {
             // Assert: その間どの時刻にも、来ない相手を待ったりがっかりしたりしない。
             // 平均との比だけで期待を決めていた頃は、学習でできた小さな凹凸が
             // 山に見えて、ここで期待とがっかりが生じていた
-            assert_eq!(predictor.anticipation_at(MIDNIGHT + minute * 60), 0.0, "minute {minute}");
+            assert_eq!(
+                predictor.anticipation_at(MIDNIGHT + minute * 60),
+                0.0,
+                "minute {minute}"
+            );
             assert_eq!(predictor.disappointment(), 0.0, "minute {minute}");
         }
     }
@@ -753,9 +782,7 @@ mod tests {
     #[test]
     fn the_expectation_is_always_a_probability() {
         // Arrange: 極端に偏った経験を大量に積む
-        let mut predictor = CarePredictor::with_params(CarePredictorParams {
-            learning_rate: 1.0,
-        });
+        let mut predictor = CarePredictor::with_params(CarePredictorParams { learning_rate: 1.0 });
 
         // Act
         for minute in 0..(10 * 1_440) {

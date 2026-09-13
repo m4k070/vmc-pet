@@ -201,7 +201,10 @@ mod tests {
         }
 
         // Assert: 離れた場所は真新しいまま(刺激ごとに固有な慣れ)
-        assert_eq!(habituation.attention_at(CellPos { x: 24, y: 24 }, STILL), 1.0);
+        assert_eq!(
+            habituation.attention_at(CellPos { x: 24, y: 24 }, STILL),
+            1.0
+        );
     }
 
     #[test]
@@ -226,8 +229,14 @@ mod tests {
         // 9セル進む間に叩き続ける(O2u が1秒に進む距離)
         let mut habituation = Habituation::new(43, 32);
         for tap in 0..5 {
-            let centre = CellPos { x: (tap * 9) % 43, y: 16 };
-            let at = CellPos { x: (centre.x + 5) % 43, y: 16 };
+            let centre = CellPos {
+                x: (tap * 9) % 43,
+                y: 16,
+            };
+            let at = CellPos {
+                x: (centre.x + 5) % 43,
+                y: 16,
+            };
             habituation.record(
                 &Perturbation {
                     at,
@@ -240,7 +249,13 @@ mod tests {
 
         // Act: さらに9セル進んだ体の、同じ部位
         let centre = CellPos { x: 45 % 43, y: 16 };
-        let attention = habituation.attention_at(CellPos { x: (centre.x + 5) % 43, y: 16 }, centre);
+        let attention = habituation.attention_at(
+            CellPos {
+                x: (centre.x + 5) % 43,
+                y: 16,
+            },
+            centre,
+        );
 
         // Assert: 世界の座標では毎回違う場所だが、体の同じ部位なので慣れている
         assert!(attention < 0.05, "got {attention}");

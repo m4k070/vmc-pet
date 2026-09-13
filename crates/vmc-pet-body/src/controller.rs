@@ -296,15 +296,27 @@ mod tests {
         let (imbalance_x, imbalance_y) = imbalance(field.view(), centroid.0, centroid.1);
 
         // Assert: x方向にはっきり歪んでいるはず。同じ行にしかないので y は歪まない
-        assert!(imbalance_x.abs() > 0.3, "expected a strong x skew, got {imbalance_x}");
-        assert!(imbalance_y.abs() < 0.01, "y must stay symmetric, got {imbalance_y}");
+        assert!(
+            imbalance_x.abs() > 0.3,
+            "expected a strong x skew, got {imbalance_x}"
+        );
+        assert!(
+            imbalance_y.abs() < 0.01,
+            "y must stay symmetric, got {imbalance_y}"
+        );
     }
 
     #[test]
     fn a_symmetric_field_has_no_imbalance() {
         // Arrange: 中央に対称な塊
         let mut field = Field::new(32, 32);
-        field.map(|x, y, _value| if (12..20).contains(&x) && (12..20).contains(&y) { 1.0 } else { 0.0 });
+        field.map(|x, y, _value| {
+            if (12..20).contains(&x) && (12..20).contains(&y) {
+                1.0
+            } else {
+                0.0
+            }
+        });
 
         // Act
         let centroid = field.view().toroidal_centroid().unwrap();
@@ -320,7 +332,13 @@ mod tests {
         // Arrange: 対称な場は、何ステップ判定を進めても偏りが閾値を超えない
         let field = {
             let mut f = Field::new(32, 32);
-            f.map(|x, y, _value| if (12..20).contains(&x) && (12..20).contains(&y) { 1.0 } else { 0.0 });
+            f.map(|x, y, _value| {
+                if (12..20).contains(&x) && (12..20).contains(&y) {
+                    1.0
+                } else {
+                    0.0
+                }
+            });
             f
         };
         let mut controller = AutonomousController::new();

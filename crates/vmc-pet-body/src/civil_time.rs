@@ -27,8 +27,7 @@ pub fn unix_seconds_from_civil(
     second: u8,
 ) -> u64 {
     let days = days_from_civil(year as i64, month as i64, day as i64);
-    let seconds =
-        days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64;
+    let seconds = days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64;
     seconds.max(0) as u64
 }
 
@@ -93,7 +92,10 @@ mod tests {
         // Arrange / Act / Assert: `date -u -d ... +%s` で確かめた既知の値
         // (M5Stack 側が RTC に書き込む基準時刻が 2020-01-01)
         assert_eq!(unix_seconds_from_civil(2020, 1, 1, 0, 0, 0), 1_577_836_800);
-        assert_eq!(unix_seconds_from_civil(2026, 9, 13, 12, 34, 56), 1_789_302_896);
+        assert_eq!(
+            unix_seconds_from_civil(2026, 9, 13, 12, 34, 56),
+            1_789_302_896
+        );
     }
 
     #[test]

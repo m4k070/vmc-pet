@@ -87,7 +87,10 @@ impl MemoryStore {
         match serde_json::from_str(&raw) {
             Ok(saved) => Some(saved),
             Err(error) => {
-                eprintln!("vmc-pet: ignoring a broken memory file {}: {error}", path.display());
+                eprintln!(
+                    "vmc-pet: ignoring a broken memory file {}: {error}",
+                    path.display()
+                );
                 None
             }
         }
@@ -100,7 +103,10 @@ impl MemoryStore {
         };
         if let Err(error) = self.write(&path, memory) {
             if !self.warned {
-                eprintln!("vmc-pet: could not save memory to {}: {error}", path.display());
+                eprintln!(
+                    "vmc-pet: could not save memory to {}: {error}",
+                    path.display()
+                );
                 self.warned = true;
             }
         }
@@ -133,7 +139,11 @@ mod tests {
         // Arrange / Act / Assert: 環境変数を触るテストは他のテストと干渉しうるため、
         // ここでは経路の形だけを確かめる(実際の値は実行環境に依存する)
         let path = state_path().expect("HOME or XDG_STATE_HOME must exist in the test environment");
-        assert!(path.ends_with("vmc-pet/state.json"), "got {}", path.display());
+        assert!(
+            path.ends_with("vmc-pet/state.json"),
+            "got {}",
+            path.display()
+        );
     }
 
     #[test]
@@ -165,7 +175,10 @@ mod tests {
 
         // Assert
         assert_eq!(loaded.memory, memory);
-        assert!(loaded.seconds_away(now_unix_seconds()) < 5.0, "saved just now");
+        assert!(
+            loaded.seconds_away(now_unix_seconds()) < 5.0,
+            "saved just now"
+        );
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -183,7 +196,9 @@ mod tests {
         let store = MemoryStore::at(path.clone());
 
         // Act
-        let loaded = store.load().expect("a file from before learning must still load");
+        let loaded = store
+            .load()
+            .expect("a file from before learning must still load");
 
         // Assert: エネルギーは引き継ぎ、学んだことは何も無い状態から始まる
         assert_eq!(loaded.memory.energy, 0.5);

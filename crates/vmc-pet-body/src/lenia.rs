@@ -233,7 +233,11 @@ impl Lenia {
 
         field.map(|x, y, value| {
             let growth = mapping.value_at(potential[y * width + x], center, growth_width);
-            let scaled_growth = if growth > 0.0 { growth * growth_scale } else { growth };
+            let scaled_growth = if growth > 0.0 {
+                growth * growth_scale
+            } else {
+                growth
+            };
             value + time_step * scaled_growth
         });
     }
@@ -270,7 +274,6 @@ impl Lenia {
             }
         }
     }
-
 }
 
 /// カーネルをタップの一覧に展開し、総和が 1 になるよう正規化する。
@@ -282,8 +285,7 @@ fn build_kernel_taps(params: &LeniaParams) -> Vec<KernelTap> {
 
     for dy in -radius..=radius {
         for dx in -radius..=radius {
-            let distance =
-                crate::math::sqrtf((dx * dx + dy * dy) as f32) / params.radius as f32;
+            let distance = crate::math::sqrtf((dx * dx + dy * dy) as f32) / params.radius as f32;
             if distance >= 1.0 {
                 continue;
             }
@@ -328,7 +330,10 @@ mod tests {
 
         // Assert
         let total: f32 = taps.iter().map(|tap| tap.weight).sum();
-        assert!((total - 1.0).abs() < 1e-4, "kernel must be normalized, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-4,
+            "kernel must be normalized, got {total}"
+        );
     }
 
     #[test]
@@ -441,7 +446,8 @@ mod tests {
 
         // Assert: 重心が動いている(その場で固まっていない)
         let final_centroid = centroid(&field);
-        let moved = (final_centroid.0 - initial_centroid.0).hypot(final_centroid.1 - initial_centroid.1);
+        let moved =
+            (final_centroid.0 - initial_centroid.0).hypot(final_centroid.1 - initial_centroid.1);
         assert!(moved > 5.0, "the creature barely moved: {moved}");
     }
 

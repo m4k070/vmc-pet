@@ -96,7 +96,12 @@ mod tests {
         let action = parse(&args(&[]), "O2u").unwrap();
 
         // Assert
-        assert_eq!(action, Action::Run { animal_code: "O2u".to_string() });
+        assert_eq!(
+            action,
+            Action::Run {
+                animal_code: "O2u".to_string()
+            }
+        );
     }
 
     #[test]
@@ -105,7 +110,12 @@ mod tests {
         let action = parse(&args(&["--animal", "OG2g"]), "O2u").unwrap();
 
         // Assert
-        assert_eq!(action, Action::Run { animal_code: "OG2g".to_string() });
+        assert_eq!(
+            action,
+            Action::Run {
+                animal_code: "OG2g".to_string()
+            }
+        );
     }
 
     #[test]
@@ -114,7 +124,12 @@ mod tests {
         let action = parse(&args(&["--animal=OG2g"]), "O2u").unwrap();
 
         // Assert
-        assert_eq!(action, Action::Run { animal_code: "OG2g".to_string() });
+        assert_eq!(
+            action,
+            Action::Run {
+                animal_code: "OG2g".to_string()
+            }
+        );
     }
 
     #[test]
