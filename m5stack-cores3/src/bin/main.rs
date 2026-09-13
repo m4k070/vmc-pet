@@ -266,13 +266,15 @@ impl DotRenderer {
 
 #[main]
 fn main() -> ! {
-    // CPU クロックはビルド時の環境変数 `VMC_PET_CPU_CLOCK`(80 / 160 / 240)で選べる。
-    // 既定は esp-hal の既定値の 80MHz。240MHz で書き込んだ後に USB から消えたことが
-    // あり、原因を調べるための切り替え(docs/M5STACK.md「240MHz で USB から消えた件の調査」)。
+    // CPU クロックは 240MHz を既定にする。Lenia の畳み込みが CPU バウンドで、80MHz の
+    // 約1.9倍速い(15ステップあたり 1.33秒 対 2.50秒)。以前 240MHz で一度だけ書き込み後に
+    // USB から消えたが、同じ条件で4回試しても再現せず、10分の連続動作でもリセットや
+    // USB の切断は無かった(docs/M5STACK.md「240MHz で USB から消えた件の調査」)。
+    // ビルド時の環境変数 `VMC_PET_CPU_CLOCK`(80 / 160)で下げられる。
     let cpu_clock = match option_env!("VMC_PET_CPU_CLOCK") {
-        Some("240") => esp_hal::clock::CpuClock::_240MHz,
+        Some("80") => esp_hal::clock::CpuClock::_80MHz,
         Some("160") => esp_hal::clock::CpuClock::_160MHz,
-        _ => esp_hal::clock::CpuClock::_80MHz,
+        _ => esp_hal::clock::CpuClock::_240MHz,
     };
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(cpu_clock));
     let board = CoreS3::board();
