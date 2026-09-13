@@ -680,28 +680,37 @@ mod tests {
         assert_eq!(pet.anticipation(), 0.0);
     }
 
-    #[test]
-    fn visits_at_the_same_hour_teach_the_pet_to_expect_care_then() {
-        // Arrange: 1週間、毎晩20時台に2分おきにクリックしに来る。学ぶのは時刻と
-        // クリックの関係だけで体の状態には依らないので、体を進めるのは省く
-        const DAY: u64 = 86_400;
-        let midnight = 20_000 * DAY;
+    const DAY: u64 = 86_400;
+    /// ある日の0時(UTC)。
+    const MIDNIGHT: u64 = 20_000 * DAY;
+
+    /// 1週間、毎晩20時台に2分おきにクリックしに来てもらった個体。
+    ///
+    /// 学ぶのは時刻とクリックの関係だけで体の状態には依らないので、体を進めるのは省く。
+    fn pet_with_an_evening_habit() -> Pet {
         let mut pet = orbium();
         let at = CellPos { x: 3, y: 3 };
-
-        // Act
         for day in 0..7 {
             for minute in 0..1_440 {
-                pet.tick_clock(midnight + day * DAY + minute * 60);
+                pet.tick_clock(MIDNIGHT + day * DAY + minute * 60);
                 if minute / 60 == 20 && minute % 2 == 0 {
                     pet.click(at);
                     pet.leave();
                 }
             }
         }
-        pet.tick_clock(midnight + 7 * DAY + 8 * 3_600 + 30 * 60);
+        pet
+    }
+
+    #[test]
+    fn visits_at_the_same_hour_teach_the_pet_to_expect_care_then() {
+        // Arrange: 1週間、毎晩20時台に来てもらう
+        let mut pet = pet_with_an_evening_habit();
+
+        // Act
+        pet.tick_clock(MIDNIGHT + 7 * DAY + 8 * 3_600 + 30 * 60);
         let morning = pet.anticipation();
-        pet.tick_clock(midnight + 7 * DAY + 20 * 3_600 + 30 * 60);
+        pet.tick_clock(MIDNIGHT + 7 * DAY + 20 * 3_600 + 30 * 60);
         let evening = pet.anticipation();
 
         // Assert: いつもの時間には世話を期待し、そうでない時間は期待しない
@@ -712,7 +721,7 @@ mod tests {
         let memory = pet.memory();
         let mut reborn = orbium();
         reborn.restore(memory, 8.0 * 3_600.0);
-        reborn.tick_clock(midnight + 8 * DAY + 20 * 3_600 + 30 * 60);
+        reborn.tick_clock(MIDNIGHT + 8 * DAY + 20 * 3_600 + 30 * 60);
 
         // Assert: 再起動しても、いつもの時間を覚えている
         let remembered = reborn.anticipation();
@@ -834,25 +843,13 @@ mod tests {
 
     #[test]
     fn missing_the_usual_visit_leaves_the_pet_disappointed() {
-        // Arrange: 1週間、毎晩20時台に2分おきにクリックしに来る
-        const DAY: u64 = 86_400;
-        let midnight = 20_000 * DAY;
-        let mut pet = orbium();
-        let at = CellPos { x: 3, y: 3 };
-        for day in 0..7 {
-            for minute in 0..1_440 {
-                pet.tick_clock(midnight + day * DAY + minute * 60);
-                if minute / 60 == 20 && minute % 2 == 0 {
-                    pet.click(at);
-                    pet.leave();
-                }
-            }
-        }
+        // Arrange: 1週間、毎晩20時台に来てもらう
+        let mut pet = pet_with_an_evening_habit();
         assert_eq!(pet.disappointment(), 0.0, "every evening was visited");
 
         // Act: 8日目は夜を過ぎても来ない
         for minute in 0..(21 * 60 + 30) {
-            pet.tick_clock(midnight + 7 * DAY + minute * 60);
+            pet.tick_clock(MIDNIGHT + 7 * DAY + minute * 60);
         }
 
         // Assert
