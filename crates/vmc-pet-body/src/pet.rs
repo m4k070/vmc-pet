@@ -133,7 +133,6 @@ impl Pet {
         let observation = Observation {
             field: self.body.observe(),
             energy: self.body.energy(),
-            anticipation: self.mood.anticipation(),
         };
         if let Some(perturbation) = self.controller.maybe_act(observation) {
             self.body.disturb(perturbation);
@@ -624,45 +623,6 @@ mod tests {
         }
     }
 
-    /// 世話が来そうな時間は、弱っていても満タン時の強さで揺らす(先回り)。その
-    /// 最悪のケース —— 一日じゅう期待し続け、世話は一切来ない —— でも全生物が
-    /// 生き延びることを確かめる。
-    ///
-    /// 期待が常に 1.0 のときの揺らす強さは、`nudge_amount_when_depleted` を 1.0 に
-    /// したときと式の上で完全に一致する(controller.rs の vigour)ので、何日ぶんも
-    /// 学習させる代わりにそれで再現している。
-    #[test]
-    fn every_shipped_animal_survives_always_expecting_care_that_never_comes() {
-        let always_expecting = ControllerParams {
-            nudge_amount_when_depleted: 1.0,
-            ..ControllerParams::default()
-        };
-        for (code, name) in crate::list_animals().unwrap() {
-            // Arrange
-            let animal = crate::load_animal(&code).unwrap();
-            let mut pet = Pet::with_controller_params(animal, 32, 32, always_expecting);
-
-            // Act: 一切触らずに20000ステップ(≈22分)。エネルギーは早々に尽きる
-            let mut collapses = 0u32;
-            for _ in 0..20_000 {
-                if pet.step() {
-                    collapses += 1;
-                }
-            }
-
-            // Assert
-            assert_eq!(
-                collapses, 0,
-                "stirring a depleted {code} ({name}) at full strength collapsed it"
-            );
-            assert!(
-                pet.mass() > 40.0,
-                "{code} ({name}) must stay alive, got mass {}",
-                pet.mass()
-            );
-        }
-    }
-
     #[test]
     fn a_pet_without_a_clock_never_expects_care() {
         // Arrange
@@ -774,16 +734,12 @@ mod tests {
 
     #[test]
     fn the_pigment_never_changes_how_the_body_moves() {
-        // Arrange: 期待で揺らす強さが上がるぶんは、同じ強さを直接設定した個体と揃える。
-        // 違いは色素が溜まっているかどうかだけになる
+        // Arrange: 世話を待っている個体と、待っていない既定の個体。期待では揺らす強さも
+        // テンポも変わらない(先回りはやめ、待っていることは色素が伝える)ので、違いは
+        // 色素が溜まっているかどうかだけになる
         let mut flushed = orbium();
         flushed.pin_mood(1.0, 0.0);
-        let same_stirring = ControllerParams {
-            nudge_amount_when_depleted: 1.0,
-            ..ControllerParams::default()
-        };
-        let mut plain =
-            Pet::with_controller_params(crate::load_animal("O2u").unwrap(), 32, 32, same_stirring);
+        let mut plain = orbium();
 
         // Act
         for _ in 0..3_000 {

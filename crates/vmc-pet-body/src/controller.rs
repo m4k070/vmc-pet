@@ -30,10 +30,10 @@ pub struct Observation<'a> {
     pub field: FieldView<'a>,
     /// 気分状態(0.0..=1.0)。世話され続けていれば高く、放置されると尽きる。
     pub energy: f32,
-    /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。
-    /// 経験から学んだ生活リズムによる(`CarePredictor::anticipation_at`)。
-    /// 時計を持たない場面(評価・テスト)では 0.0。
-    pub anticipation: f32,
+    // 世話を期待しているか(`Mood::anticipation`)も以前はここから渡し、期待している
+    // 時間は弱っていても満タン時の強さで揺らしていた(先回り)。「待っている」を色素が
+    // 伝えるようになり、先回りは代償(いつもの時間に放置が見えにくくなる)だけが
+    // 残ったためやめた(docs/DESIGN.md「先回りをやめ、待っていることは色に任せた」)。
 }
 
 /// コントローラの挙動を決める定数一式。
@@ -86,14 +86,12 @@ pub struct ControllerParams {
     ///
     /// 当初はこれを安全のための制約とも考えていた(弱った体を強く揺らすと
     /// 自己修復できずに崖へ落ちるのでは、という懸念)。世話の予測を振る舞いに
-    /// 繋ぐ際、弱った体を常に全力で揺らす設定(この値を 1.0)で全生物を
-    /// 20000ステップ動かし、揺らす強さを±5%ずらした近傍も含めて測ったところ、
-    /// 崩壊は1件も起きなかった。したがって、この値は安全の根拠ではなく、
-    /// **見た目の読み取りやすさのためのもの**である。安全は `nudge_amount`
-    /// 自体を控えめにしていることで保たれている。
-    ///
-    /// 世話を期待している時間は、エネルギーが尽きていてもこの倍率を超えて
-    /// 満タン時の強さまで引き上げられる(`Observation::anticipation`)。
+    /// 繋いでいた頃(先回り。いまはやめている)に、弱った体を常に全力で揺らす
+    /// 設定(この値を 1.0)で全生物を20000ステップ動かし、揺らす強さを±5%ずらした
+    /// 近傍も含めて測ったところ、崩壊は1件も起きなかった。したがって、この値は
+    /// 安全の根拠ではなく、**見た目の読み取りやすさのためのもの**である。安全は
+    /// `nudge_amount` 自体を控えめにしていることで保たれている
+    /// (docs/DESIGN.md「弱った体を全力で揺らしても崩壊しないことを先に測った」)。
     pub nudge_amount_when_depleted: f32,
 }
 
@@ -133,11 +131,7 @@ impl AutonomousController {
     /// 体が1ステップ進むたびに呼ぶ。判断のタイミングでないか、偏りが閾値未満
     /// なら `None`(何もしない)。
     pub fn maybe_act(&mut self, observation: Observation<'_>) -> Option<Perturbation> {
-        let Observation {
-            field,
-            energy,
-            anticipation,
-        } = observation;
+        let Observation { field, energy } = observation;
         self.steps_since_last_evaluation += 1;
         if self.steps_since_last_evaluation < self.params.evaluate_every_steps {
             return None;
@@ -165,12 +159,9 @@ impl AutonomousController {
             height,
         );
 
-        // 元気なほど強く、弱るほど控えめに揺らす。ただし世話が来そうな時間は、
-        // 弱っていても元気なときと同じ強さまで活発になる(先回り)。
-        // 期待が引き上げられるのは満タン時の強さまでで、それを超えることはない。
-        // 弱った体を常に全力で揺らしても全生物が崩壊しないことは計測済み
-        // (docs/DESIGN.md「世話の予測を振る舞いに繋ぐ」)。
-        let liveliness = energy.clamp(0.0, 1.0).max(anticipation.clamp(0.0, 1.0));
+        // 元気なほど強く、弱るほど控えめに揺らす。世話を待っているかどうかでは
+        // 変えない(待っていることは色素が伝える)。
+        let liveliness = energy.clamp(0.0, 1.0);
         let vigour = self.params.nudge_amount_when_depleted
             + (1.0 - self.params.nudge_amount_when_depleted) * liveliness;
 
@@ -255,7 +246,6 @@ mod tests {
         Observation {
             field: field.view(),
             energy: 1.0,
-            anticipation: 0.0,
         }
     }
 
@@ -367,22 +357,16 @@ mod tests {
     }
 
     /// 指定したエネルギーと期待で、1回ぶんの自己摂動を取り出す。
-    fn nudge_when(field: &Field, energy: f32, anticipation: f32) -> Perturbation {
+    fn nudge_at_energy(field: &Field, energy: f32) -> Perturbation {
         let mut controller = AutonomousController::new();
         let mut perturbation = None;
         for _ in 0..ControllerParams::default().evaluate_every_steps {
             perturbation = controller.maybe_act(Observation {
                 field: field.view(),
                 energy,
-                anticipation,
             });
         }
         perturbation.expect("a strongly lopsided field must trigger a nudge")
-    }
-
-    /// 指定したエネルギーで(世話を期待していないときの)1回ぶんの自己摂動を取り出す。
-    fn nudge_at_energy(field: &Field, energy: f32) -> Perturbation {
-        nudge_when(field, energy, 0.0)
     }
 
     #[test]
@@ -407,37 +391,6 @@ mod tests {
         // 位置と広がりは状態に依らない
         assert_eq!(weary.at, lively.at);
         assert_eq!(weary.radius, lively.radius);
-    }
-
-    #[test]
-    fn a_weakened_pet_that_expects_care_stirs_as_if_it_were_lively() {
-        // Arrange
-        let field = lopsided_field(32, 32);
-
-        // Act
-        let lively = nudge_when(&field, 1.0, 0.0);
-        let weary_but_expecting = nudge_when(&field, 0.0, 1.0);
-        let weary_half_expecting = nudge_when(&field, 0.0, 0.5);
-        let weary = nudge_when(&field, 0.0, 0.0);
-
-        // Assert: 世話が来そうな時間は弱っていても元気なときと同じ強さになり、
-        // 期待の度合いに応じてその間を動く
-        assert_eq!(weary_but_expecting.amount, lively.amount);
-        assert!(weary.amount < weary_half_expecting.amount);
-        assert!(weary_half_expecting.amount < weary_but_expecting.amount);
-    }
-
-    #[test]
-    fn expecting_care_never_stirs_harder_than_a_lively_pet() {
-        // Arrange
-        let field = lopsided_field(32, 32);
-
-        // Act: 元気なうえに期待もしている
-        let lively = nudge_when(&field, 1.0, 0.0);
-        let lively_and_expecting = nudge_when(&field, 1.0, 1.0);
-
-        // Assert: 期待は満タン時の強さを超えさせない(検証済みの範囲に留める)
-        assert_eq!(lively_and_expecting.amount, lively.amount);
     }
 
     #[test]
