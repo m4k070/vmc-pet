@@ -18,6 +18,11 @@
 //!   それで評価用のエピソードに誤警報が出ないか、崩壊の何秒前に警告できるかを見る。
 //!   「総量が少ない」「総量が減っている」だけの素朴なしきい値と比べ、モデルが上回らなければ
 //!   モデルは要らない。見ていない負荷・見ていない生物にも効くかを確かめる
+//!
+//! `-- --field` を付けると、要約8つの代わりに場そのものを読むモデルと比べる。場の値の
+//! 分布と1ステップ・1秒の変化(位置や向きに依らない)と、重心を中心に切り出した場
+//! そのもの(16×16 とその1秒の変化)の2つ。エピソードは同じものを作る
+//! (docs/DESIGN.md「崩壊を場から先読みできるか」)。
 
 use std::collections::VecDeque;
 use std::thread;
@@ -53,6 +58,32 @@ const FEATURE_NAMES: [&str; FEATURES] = [
     "速さ",
     "形の偏り",
 ];
+
+/// 場を読むモデルが見る、重心を中心に切り出して 2×2 で縮めた場の一辺。
+const PIXEL_SIDE: usize = 16;
+const PIXELS: usize = PIXEL_SIDE * PIXEL_SIDE;
+/// 1秒の変化を i8 に詰めるときの倍率(±0.5 を ±127 に)。
+const CHANGE_SCALE: f32 = 254.0;
+/// 場の分布の特徴(値の分布8段と、1ステップ・1秒の変化)。
+const FIELD_STATS: usize = 12;
+const FIELD_STAT_NAMES: [&str; FIELD_STATS] = [
+    "値 0〜1/8 のセル",
+    "値 1/8〜2/8 のセル",
+    "値 2/8〜3/8 のセル",
+    "値 3/8〜4/8 のセル",
+    "値 4/8〜5/8 のセル",
+    "値 5/8〜6/8 のセル",
+    "値 6/8〜7/8 のセル",
+    "値 7/8〜1 のセル",
+    "1ステップで減った量",
+    "1ステップの変化の大きさ",
+    "1ステップの総量の変化",
+    "1秒で減った量",
+];
+/// 場を読む実験で、学習に使うサンプルの間引き(5ステップごとのサンプルの3つに1つ)。
+/// 隣り合うサンプルはほとんど同じなので、場そのもののモデルの学習を軽くするため間引く。
+/// 評価には全サンプルを使う。
+const TRAIN_EVERY_NTH_SAMPLE: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stressor {
@@ -301,6 +332,104 @@ fn features_at(history: &VecDeque<Measure>, reference: &Reference) -> [f32; FEAT
 struct Sample {
     step: u32,
     features: [f32; FEATURES],
+    /// 場を読む実験(`--field`)のときだけ持つ。
+    field: Option<FieldFeatures>,
+}
+
+/// 場そのものから取り出した特徴。
+struct FieldFeatures {
+    stats: [f32; FIELD_STATS],
+    /// 重心を中心に切り出して縮めた場(0〜255)。
+    pixels: Vec<u8>,
+    /// 同じ切り出し方での、1秒前からの変化(`CHANGE_SCALE` 倍して i8 に詰めた)。
+    change: Vec<i8>,
+}
+
+/// 場の値を行ごとに並べて写し取る。
+fn snapshot(field: &Field) -> Vec<f32> {
+    let view = field.view();
+    let mut values = Vec::with_capacity(view.width() * view.height());
+    for y in 0..view.height() {
+        for x in 0..view.width() {
+            values.push(view.get(x, y));
+        }
+    }
+    values
+}
+
+/// 直近1秒ぶんの場を覚えておく(1秒の変化を見るため)。
+fn remember_field(recent: &mut VecDeque<Vec<f32>>, field: &Field) {
+    recent.push_back(snapshot(field));
+    while recent.len() > ONE_SECOND_STEPS + 1 {
+        recent.pop_front();
+    }
+}
+
+fn field_features(
+    recent: &VecDeque<Vec<f32>>,
+    centroid: Option<(f32, f32)>,
+    reference: &Reference,
+) -> FieldFeatures {
+    let latest = recent.len() - 1;
+    let now = &recent[latest];
+    let previous = &recent[latest - 1];
+    let second_ago = &recent[latest - ONE_SECOND_STEPS];
+
+    let mut stats = [0.0f32; FIELD_STATS];
+    let (mut mass_now, mut mass_before) = (0.0f32, 0.0f32);
+    for ((&value, &before), &long_before) in now.iter().zip(previous).zip(second_ago) {
+        mass_now += value;
+        mass_before += before;
+        if value > MIN_VISIBLE_VALUE {
+            let bin = ((value * 8.0) as usize).min(7);
+            stats[bin] += 1.0 / reference.cells;
+        }
+        if value < before {
+            stats[8] += value;
+        }
+        stats[9] += (value - before).abs();
+        if value < long_before {
+            stats[11] += value;
+        }
+    }
+    let mass = mass_now.max(1e-6);
+    stats[8] /= mass;
+    stats[9] /= mass;
+    stats[10] = (mass_now - mass_before) / mass;
+    stats[11] /= mass;
+
+    let centre = FIELD_SIZE as f32 / 2.0;
+    let (cx, cy) = centroid.unwrap_or((centre, centre));
+    let (cx, cy) = (cx.round() as i32, cy.round() as i32);
+    let size = FIELD_SIZE as i32;
+    let half = size / 2;
+    let mut pixels = Vec::with_capacity(PIXELS);
+    let mut change = Vec::with_capacity(PIXELS);
+    for oy in 0..PIXEL_SIDE as i32 {
+        for ox in 0..PIXEL_SIDE as i32 {
+            let (mut value_sum, mut change_sum) = (0.0f32, 0.0f32);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let x = (cx - half + ox * 2 + dx).rem_euclid(size) as usize;
+                    let y = (cy - half + oy * 2 + dy).rem_euclid(size) as usize;
+                    let index = y * FIELD_SIZE + x;
+                    value_sum += now[index];
+                    change_sum += now[index] - second_ago[index];
+                }
+            }
+            pixels.push((value_sum / 4.0 * 255.0).round().clamp(0.0, 255.0) as u8);
+            change.push(
+                (change_sum / 4.0 * CHANGE_SCALE)
+                    .round()
+                    .clamp(-127.0, 127.0) as i8,
+            );
+        }
+    }
+    FieldFeatures {
+        stats,
+        pixels,
+        change,
+    }
 }
 
 struct Episode {
@@ -325,17 +454,23 @@ fn seed_for(code: &str, stressor: Stressor, index: u32) -> u64 {
     hash | 1
 }
 
-fn run_episode(code: &str, stressor: Stressor, index: u32) -> Episode {
+/// `record_field` なら、サンプルごとに場そのものの特徴も取り出す。乱数の使い方は
+/// 変えないので、どちらでも同じエピソードになる。
+fn run_episode(code: &str, stressor: Stressor, index: u32, record_field: bool) -> Episode {
     let animal = load_animal(code).unwrap();
     let mut lenia = Lenia::new(animal.params.clone());
     let mut field = Field::new(FIELD_SIZE, FIELD_SIZE);
     field.place_centered(&animal.pattern);
     let mut rng = Rng(seed_for(code, stressor, index));
 
+    let mut recent_fields = VecDeque::new();
     let mut warmup = Vec::with_capacity(WARMUP_STEPS);
     for _ in 0..WARMUP_STEPS {
         lenia.step(&mut field, 1.0);
         warmup.push(measure(&field));
+        if record_field {
+            remember_field(&mut recent_fields, &field);
+        }
     }
     let reference = Reference::from(&warmup[WARMUP_STEPS / 2..]);
     let plan = Plan::draw(stressor, &mut rng);
@@ -359,10 +494,15 @@ fn run_episode(code: &str, stressor: Stressor, index: u32) -> Episode {
         while history.len() > TEN_SECONDS_STEPS + 1 {
             history.pop_front();
         }
+        if record_field {
+            remember_field(&mut recent_fields, &field);
+        }
         if step.is_multiple_of(SAMPLE_EVERY) && history.len() > TEN_SECONDS_STEPS {
             samples.push(Sample {
                 step,
                 features: features_at(&history, &reference),
+                field: record_field
+                    .then(|| field_features(&recent_fields, now.centroid, &reference)),
             });
         }
     }
@@ -375,14 +515,14 @@ fn run_episode(code: &str, stressor: Stressor, index: u32) -> Episode {
     }
 }
 
-fn episodes_for(code: &str) -> Vec<Episode> {
+fn episodes_for(code: &str, record_field: bool) -> Vec<Episode> {
     let mut episodes = Vec::new();
     for index in 0..CONTROL_EPISODES {
-        episodes.push(run_episode(code, Stressor::None, index));
+        episodes.push(run_episode(code, Stressor::None, index, record_field));
     }
     for stressor in Stressor::STRESSES {
         for index in 0..EPISODES_PER_STRESSOR {
-            episodes.push(run_episode(code, stressor, index));
+            episodes.push(run_episode(code, stressor, index, record_field));
         }
     }
     episodes
@@ -680,8 +820,482 @@ fn print_reports_at(
     println!();
 }
 
+/// 場を読む実験で比べる、特徴の組。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureSet {
+    /// 見える量の要約8つ(小さなモデルと同じ)。
+    Summary,
+    /// 要約8つに、場の値の分布と変化を足した20。位置や向きに依らない。
+    FieldStats,
+    /// 重心を中心に切り出した場と、その1秒の変化(512)。
+    Pixels,
+}
+
+impl FeatureSet {
+    const ALL: [FeatureSet; 3] = [
+        FeatureSet::Summary,
+        FeatureSet::FieldStats,
+        FeatureSet::Pixels,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            FeatureSet::Summary => "要約8つ",
+            FeatureSet::FieldStats => "場の分布20",
+            FeatureSet::Pixels => "場そのもの512",
+        }
+    }
+
+    fn len(self) -> usize {
+        match self {
+            FeatureSet::Summary => FEATURES,
+            FeatureSet::FieldStats => FEATURES + FIELD_STATS,
+            FeatureSet::Pixels => PIXELS * 2,
+        }
+    }
+
+    fn write(self, sample: &Sample, out: &mut [f32]) {
+        let field = || {
+            sample
+                .field
+                .as_ref()
+                .expect("場の特徴は --field のときだけ取り出す")
+        };
+        match self {
+            FeatureSet::Summary => out.copy_from_slice(&sample.features),
+            FeatureSet::FieldStats => {
+                out[..FEATURES].copy_from_slice(&sample.features);
+                out[FEATURES..].copy_from_slice(&field().stats);
+            }
+            FeatureSet::Pixels => {
+                let field = field();
+                for (o, p) in out[..PIXELS].iter_mut().zip(&field.pixels) {
+                    *o = *p as f32 / 255.0;
+                }
+                for (o, c) in out[PIXELS..].iter_mut().zip(&field.change) {
+                    *o = *c as f32 / CHANGE_SCALE;
+                }
+            }
+        }
+    }
+
+    /// 学習率。場そのものは互いによく似た特徴が多く、同じ歩幅では振動するので小さくする。
+    fn learning_rate(self) -> f64 {
+        match self {
+            FeatureSet::Pixels => 0.02,
+            _ => 0.5,
+        }
+    }
+
+    fn epochs(self) -> usize {
+        match self {
+            FeatureSet::Pixels => 300,
+            _ => 400,
+        }
+    }
+}
+
+/// 特徴の組を選べるロジスティック回帰(`Model` と同じ学習の仕方)。
+struct LinearModel {
+    set: FeatureSet,
+    mean: Vec<f32>,
+    std: Vec<f32>,
+    weights: Vec<f32>,
+    bias: f32,
+    /// 最後の周回での、重みつきの学習損失。学習が収束したかの目安。
+    final_loss: f64,
+}
+
+impl LinearModel {
+    fn train(set: FeatureSet, data: &[(&Sample, bool)]) -> Option<Self> {
+        const L2: f64 = 1e-4;
+        let positives = data.iter().filter(|(_, y)| *y).count();
+        if positives == 0 || positives == data.len() {
+            return None;
+        }
+        let n = set.len();
+        let count = data.len() as f32;
+        let mut buffer = vec![0.0f32; n];
+        let mut mean = vec![0.0f32; n];
+        for (sample, _) in data {
+            set.write(sample, &mut buffer);
+            for (m, x) in mean.iter_mut().zip(&buffer) {
+                *m += x / count;
+            }
+        }
+        let mut std = vec![0.0f32; n];
+        for (sample, _) in data {
+            set.write(sample, &mut buffer);
+            for ((s, x), m) in std.iter_mut().zip(&buffer).zip(&mean) {
+                *s += (x - m).powi(2) / count;
+            }
+        }
+        for s in &mut std {
+            *s = s.sqrt().max(1e-6);
+        }
+        let mut model = LinearModel {
+            set,
+            mean,
+            std,
+            weights: vec![0.0; n],
+            bias: 0.0,
+            final_loss: f64::NAN,
+        };
+        let positive_weight = (data.len() - positives) as f64 / positives as f64;
+        let mut z = vec![0.0f32; n];
+        for _ in 0..set.epochs() {
+            let mut gradient = vec![0.0f64; n];
+            let (mut bias_gradient, mut total_weight, mut loss) = (0.0f64, 0.0f64, 0.0f64);
+            for (sample, y) in data {
+                model.standardize(sample, &mut buffer, &mut z);
+                let logit = model.bias as f64
+                    + z.iter()
+                        .zip(&model.weights)
+                        .map(|(a, w)| (*a as f64) * (*w as f64))
+                        .sum::<f64>();
+                let predicted = 1.0 / (1.0 + (-logit).exp());
+                let (target, weight) = if *y {
+                    (1.0, positive_weight)
+                } else {
+                    (0.0, 1.0)
+                };
+                let error = (predicted - target) * weight;
+                for (g, a) in gradient.iter_mut().zip(&z) {
+                    *g += error * *a as f64;
+                }
+                bias_gradient += error;
+                total_weight += weight;
+                let p = predicted.clamp(1e-12, 1.0 - 1e-12);
+                loss -= weight * if *y { p.ln() } else { (1.0 - p).ln() };
+            }
+            for (w, g) in model.weights.iter_mut().zip(&gradient) {
+                let step = g / total_weight + L2 * *w as f64;
+                *w -= (set.learning_rate() * step) as f32;
+            }
+            model.bias -= (set.learning_rate() * bias_gradient / total_weight) as f32;
+            model.final_loss = loss / total_weight;
+        }
+        Some(model)
+    }
+
+    fn standardize(&self, sample: &Sample, buffer: &mut [f32], z: &mut [f32]) {
+        self.set.write(sample, buffer);
+        for (((z, x), m), s) in z
+            .iter_mut()
+            .zip(buffer.iter())
+            .zip(&self.mean)
+            .zip(&self.std)
+        {
+            *z = (x - m) / s;
+        }
+    }
+
+    /// 崩壊が近いほど大きい(ロジット)。
+    fn score(&self, sample: &Sample, buffer: &mut [f32], z: &mut [f32]) -> f32 {
+        self.standardize(sample, buffer, z);
+        self.bias + z.iter().zip(&self.weights).map(|(a, w)| a * w).sum::<f32>()
+    }
+}
+
+/// 点数をあらかじめ付けたエピソード。場そのもののモデルは点数付けが重いので一度だけ計算する。
+struct ScoredEpisode<'a> {
+    episode: &'a Episode,
+    scores: Vec<f32>,
+}
+
+fn score_with_model<'a>(model: &LinearModel, episodes: &[&'a Episode]) -> Vec<ScoredEpisode<'a>> {
+    let n = model.set.len();
+    let (mut buffer, mut z) = (vec![0.0f32; n], vec![0.0f32; n]);
+    episodes
+        .iter()
+        .map(|episode| ScoredEpisode {
+            episode,
+            scores: episode
+                .samples
+                .iter()
+                .map(|s| model.score(s, &mut buffer, &mut z))
+                .collect(),
+        })
+        .collect()
+}
+
+fn score_with_low_mass<'a>(episodes: &[&'a Episode]) -> Vec<ScoredEpisode<'a>> {
+    episodes
+        .iter()
+        .map(|episode| ScoredEpisode {
+            episode,
+            scores: episode.samples.iter().map(|s| -s.features[0]).collect(),
+        })
+        .collect()
+}
+
+/// `evaluate` と同じ評価を、付けておいた点数で行う。
+fn evaluate_scored(
+    train: &[ScoredEpisode],
+    test: &[ScoredEpisode],
+    horizon: u32,
+    healthy_quantile: f32,
+) -> Report {
+    let mut peaks: Vec<f32> = train
+        .iter()
+        .filter(|s| s.episode.collapse_step.is_none())
+        .map(|s| s.scores.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+        .collect();
+    peaks.sort_by(|a, b| a.total_cmp(b));
+    let rank = ((healthy_quantile * peaks.len() as f32).ceil() as usize).max(1);
+    let threshold = peaks[rank.min(peaks.len()) - 1];
+
+    let mut scored: Vec<(f32, bool)> = test
+        .iter()
+        .flat_map(|s| {
+            s.episode
+                .samples
+                .iter()
+                .zip(&s.scores)
+                .map(move |(sample, score)| (*score, collapses_within(s.episode, sample, horizon)))
+        })
+        .collect();
+    let mut report = Report {
+        auc: auc(&mut scored),
+        false_alarms: 0,
+        healthy_episodes: 0,
+        detected: 0,
+        collapses: 0,
+        leads: Vec::new(),
+    };
+    for s in test {
+        let first_warning = s
+            .episode
+            .samples
+            .iter()
+            .zip(&s.scores)
+            .find(|(_, score)| **score > threshold)
+            .map(|(sample, _)| sample);
+        match s.episode.collapse_step {
+            None => {
+                report.healthy_episodes += 1;
+                if first_warning.is_some() {
+                    report.false_alarms += 1;
+                }
+            }
+            Some(collapse) => {
+                report.collapses += 1;
+                if let Some(warning) = first_warning {
+                    report.detected += 1;
+                    report.leads.push(collapse - warning.step);
+                }
+            }
+        }
+    }
+    report
+}
+
+fn print_report_line(label: &str, report: &Report) {
+    let mut leads = report.leads.clone();
+    leads.sort_unstable();
+    let median = leads.get(leads.len() / 2).map_or("  -".to_string(), |l| {
+        format!("{:5.1}", *l as f32 / STEPS_PER_SECOND)
+    });
+    let at_least = |seconds: f32| {
+        leads
+            .iter()
+            .filter(|l| **l as f32 >= seconds * STEPS_PER_SECOND)
+            .count()
+    };
+    println!(
+        "    {label:26} AUC {:.3} | 誤警報 {:3}/{:3} | 先読み {:3}/{:3}(1秒以上前 {:3}、10秒以上前 {:3})| 何秒前(中央値) {median}",
+        report.auc,
+        report.false_alarms,
+        report.healthy_episodes,
+        report.detected,
+        report.collapses,
+        at_least(1.0),
+        at_least(10.0),
+    );
+}
+
+/// 3つの特徴の組でモデルを学習し、総量のしきい値と並べて評価する。
+fn compare_models(
+    title: &str,
+    train: &[&Episode],
+    test: &[&Episode],
+    horizon: u32,
+    quantiles: &[f32],
+) {
+    let data: Vec<(&Sample, bool)> = train
+        .iter()
+        .flat_map(|e| {
+            e.samples
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % TRAIN_EVERY_NTH_SAMPLE == 0)
+                .map(move |(_, s)| (s, collapses_within(e, s, horizon)))
+        })
+        .collect();
+    println!(
+        "{title}(学習 {} / 評価 {} エピソード、学習サンプル {})",
+        train.len(),
+        test.len(),
+        data.len()
+    );
+    let mut rows: Vec<(String, Vec<ScoredEpisode>, Vec<ScoredEpisode>)> = Vec::new();
+    for set in FeatureSet::ALL {
+        let started = Instant::now();
+        let Some(model) = LinearModel::train(set, &data) else {
+            println!("  {}: 崩壊が近い例が無く学習できない", set.label());
+            continue;
+        };
+        rows.push((
+            format!(
+                "{}(損失 {:.3}、{:.0}秒)",
+                set.label(),
+                model.final_loss,
+                started.elapsed().as_secs_f32()
+            ),
+            score_with_model(&model, train),
+            score_with_model(&model, test),
+        ));
+    }
+    rows.push((
+        "総量が少ない".to_string(),
+        score_with_low_mass(train),
+        score_with_low_mass(test),
+    ));
+    for quantile in quantiles {
+        println!(
+            "  -- 崩壊しなかった学習用エピソードの {:.0}% で警告が出ない高さ",
+            quantile * 100.0
+        );
+        for (label, train_scored, test_scored) in &rows {
+            let report = evaluate_scored(train_scored, test_scored, horizon, *quantile);
+            print_report_line(label, &report);
+        }
+    }
+    println!();
+}
+
+fn percentile_of(values: &mut [f32], q: f32) -> f32 {
+    if values.is_empty() {
+        return f32::NAN;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    values[((q * (values.len() - 1) as f32).round() as usize).min(values.len() - 1)]
+}
+
+/// 場の分布の特徴が崩壊の前にどう変わるかと、崩壊しなかった体がとる範囲を並べる。
+/// 崩壊の手前の値が、生き延びた体の範囲の外に出ていれば、前触れとして使える見込みがある。
+fn print_field_precursors(episodes: &[Episode]) {
+    const BEFORE_STEPS: [u32; 6] = [150, 75, 30, 15, 10, 5];
+    const STAT_INDICES: [usize; 4] = [8, 9, 11, 7];
+    println!("==== 場の分布の前触れ(崩壊した体の中央値 / 崩壊しなかった体の範囲) ====");
+    for stat in STAT_INDICES {
+        println!("  [{}]", FIELD_STAT_NAMES[stat]);
+        for stressor in Stressor::STRESSES {
+            let mut line = format!("    {:6}", stressor.label());
+            for before in BEFORE_STEPS {
+                let mut values = Vec::new();
+                for episode in episodes
+                    .iter()
+                    .filter(|e| e.stressor == stressor && e.collapse_step.is_some())
+                {
+                    let Some(target) = episode.collapse_step.unwrap().checked_sub(before) else {
+                        continue;
+                    };
+                    if let Some(sample) = episode
+                        .samples
+                        .iter()
+                        .rev()
+                        .find(|s| s.step <= target && target - s.step < SAMPLE_EVERY)
+                    {
+                        values.push(sample.field.as_ref().unwrap().stats[stat]);
+                    }
+                }
+                line += &format!(
+                    " {:.1}秒前 {:.3}",
+                    before as f32 / STEPS_PER_SECOND,
+                    percentile_of(&mut values, 0.5)
+                );
+            }
+            let (mut lows, mut highs) = (Vec::new(), Vec::new());
+            for episode in episodes
+                .iter()
+                .filter(|e| e.stressor == stressor && e.collapse_step.is_none())
+            {
+                let values = episode
+                    .samples
+                    .iter()
+                    .map(|s| s.field.as_ref().unwrap().stats[stat]);
+                lows.push(values.clone().fold(f32::INFINITY, f32::min));
+                highs.push(values.fold(f32::NEG_INFINITY, f32::max));
+            }
+            line += &format!(
+                " | 生き延びた体: 底の下位5% {:.3}、天井の上位5% {:.3}",
+                percentile_of(&mut lows, 0.05),
+                percentile_of(&mut highs, 0.95)
+            );
+            println!("{line}");
+        }
+    }
+    println!();
+}
+
+fn run_field_experiment(episodes: &[Episode], animals: &[String]) {
+    print_field_precursors(episodes);
+    let horizon = 150;
+    let quantiles = [1.0f32, 0.90];
+    let all: Vec<&Episode> = episodes.iter().collect();
+
+    println!("==== 10秒以内に崩壊するか: 同じ負荷・同じ生物の別エピソード ====");
+    let train: Vec<&Episode> = all.iter().copied().filter(|e| e.index % 2 == 0).collect();
+    let test: Vec<&Episode> = all.iter().copied().filter(|e| e.index % 2 == 1).collect();
+    compare_models("同じ条件", &train, &test, horizon, &quantiles);
+
+    println!("==== 見ていない負荷 ====");
+    for held_out in Stressor::STRESSES {
+        let train: Vec<&Episode> = all
+            .iter()
+            .copied()
+            .filter(|e| e.stressor != held_out)
+            .collect();
+        let test: Vec<&Episode> = all
+            .iter()
+            .copied()
+            .filter(|e| e.stressor == held_out)
+            .collect();
+        compare_models(
+            &format!("{}を見ずに学習", held_out.label()),
+            &train,
+            &test,
+            horizon,
+            &quantiles,
+        );
+    }
+
+    println!("==== 見ていない生物 ====");
+    for held_out in animals {
+        let train: Vec<&Episode> = all
+            .iter()
+            .copied()
+            .filter(|e| &e.animal != held_out)
+            .collect();
+        let test: Vec<&Episode> = all
+            .iter()
+            .copied()
+            .filter(|e| &e.animal == held_out)
+            .collect();
+        compare_models(
+            &format!("{held_out}を見ずに学習"),
+            &train,
+            &test,
+            horizon,
+            &quantiles,
+        );
+    }
+}
+
 fn main() {
     let started = Instant::now();
+    let field_mode = std::env::args().any(|arg| arg == "--field");
     let animals: Vec<String> = vmc_pet_body::list_animals()
         .unwrap()
         .into_iter()
@@ -690,7 +1304,7 @@ fn main() {
     let episodes: Vec<Episode> = thread::scope(|scope| {
         let handles: Vec<_> = animals
             .iter()
-            .map(|code| scope.spawn(move || episodes_for(code)))
+            .map(|code| scope.spawn(move || episodes_for(code, field_mode)))
             .collect();
         handles
             .into_iter()
@@ -736,6 +1350,12 @@ fn main() {
         println!("{line}");
     }
     println!();
+
+    if field_mode {
+        run_field_experiment(&episodes, &animals);
+        println!("合計 {:.0} 秒", started.elapsed().as_secs_f32());
+        return;
+    }
 
     let all: Vec<&Episode> = episodes.iter().collect();
     let train: Vec<&Episode> = all.iter().copied().filter(|e| e.index % 2 == 0).collect();
