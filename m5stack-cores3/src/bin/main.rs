@@ -42,6 +42,7 @@ use esp_hal::{
     delay::Delay,
     main,
     time::{Duration, Instant},
+    usb_serial_jtag::UsbSerialJtag,
 };
 
 use core_s3::{
@@ -50,7 +51,10 @@ use core_s3::{
     touch::{Ft6336u, TouchPhase},
 };
 use embedded_hal_bus::i2c::RefCellDevice;
-use vmc_pet_body::{Camera, CellPos, FieldView, Pet, PigmentView, TouchEchoView, load_animal};
+use vmc_pet_body::{
+    Camera, CellPos, FieldView, LineReader, Pet, PigmentView, SerialCommand, TouchEchoView,
+    load_animal,
+};
 use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
 
 use vmc_pet_body::appearance::{Color, DOT_GAP_RATIO, appearance_of};
@@ -264,6 +268,49 @@ impl DotRenderer {
     }
 }
 
+/// USB シリアルで受け取った1行を実行する。
+///
+/// 時計を合わせたら、その場で記憶を保存し直す。保存済みの記録は合わせる前の時計での
+/// 時刻を持っているので、時計を大きく進めた後、次の定期保存(最長30秒後)より前に
+/// 電源が切れると、次の起動で「その差だけ止まっていた」と読まれてエネルギーが尽きる。
+/// 世話の予測は、時計が飛んだ区間を観測の空白として学ばずにやり直すので
+/// (`CarePredictor::observe`)、ここで何もしなくてよい。
+fn apply_serial_command<I2C, E>(
+    command: SerialCommand,
+    clock: Option<&mut Clock<I2C>>,
+    memory_store: Option<&mut MemoryStore>,
+    pet: &Pet,
+) where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: core::fmt::Debug,
+{
+    let SerialCommand::SetTime { unix_seconds } = command else {
+        esp_println::println!(
+            "vmc-pet-cores3: unrecognized serial line (expected `time <unix seconds>`)"
+        );
+        return;
+    };
+    let Some(clock) = clock else {
+        esp_println::println!("vmc-pet-cores3: no RTC; cannot set the clock");
+        return;
+    };
+    let before = clock.now_unix_seconds();
+    if let Err(error) = clock.set_unix_seconds(unix_seconds) {
+        esp_println::println!("vmc-pet-cores3: could not set the clock: {error:?}");
+        return;
+    }
+    if let Some(store) = memory_store {
+        store.save(pet.memory(), unix_seconds);
+    }
+    match before {
+        Ok(before) => esp_println::println!(
+            "vmc-pet-cores3: clock set to {unix_seconds} (was {before}, off by {:+}s)",
+            before as i64 - unix_seconds as i64
+        ),
+        Err(_) => esp_println::println!("vmc-pet-cores3: clock set to {unix_seconds}"),
+    }
+}
+
 #[main]
 fn main() -> ! {
     // CPU クロックは 240MHz を既定にする。Lenia の畳み込みが CPU バウンドで、80MHz の
@@ -415,6 +462,13 @@ fn main() -> ! {
     // (PC版 app.rs の Camera と同じもの。docs/DESIGN.md参照)。
     let mut camera = Camera::new();
 
+    // PC から時計を合わせる行(`time <Unix 秒>`)を USB シリアルで受け取る
+    // (`vmc_pet_body::time_sync`)。送信は esp_println がレジスタへ直接書くので、受信側だけ使う。
+    // USB デバイスは esp-hal が常に有効にしておく周辺機器なので、ここで作ってもリセットは
+    // 起きず、ログの出力も USB の接続も切れない。
+    let (mut serial_rx, _) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+    let mut serial_lines = LineReader::new();
+
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
     let mut last_saved = Instant::now();
@@ -503,6 +557,13 @@ fn main() -> ! {
             last_clock_read = Instant::now();
             if let Some(Ok(now)) = clock.as_mut().map(|clock| clock.now_unix_seconds()) {
                 pet.tick_clock(now);
+            }
+        }
+
+        // PC から届いた行を読む。受信 FIFO にあるぶんだけ読み、続きは次のポーリングで読む
+        while let Ok(byte) = serial_rx.read_byte() {
+            if let Some(command) = serial_lines.push(byte) {
+                apply_serial_command(command, clock.as_mut(), memory_store.as_mut(), &pet);
             }
         }
 

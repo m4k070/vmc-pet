@@ -6,13 +6,14 @@
 //! 「停止していた秒数」を要求する。`esp_hal` の内蔵 RTC カウンタは電源が
 //! 切れると 0 に戻るため、ここでは外付けの BM8563 を使う。
 //!
-//! **これをカレンダーとしては使わない。** 正しい現在時刻を知る手段
-//! (NTP・ユーザー入力)が無いので、初回は 2020-01-01 という固定の基準時刻を
-//! 書き込むだけにしてある。記憶が必要とするのは差分(保存してから何秒
-//! 経ったか)だけなので、絶対時刻が現実と合っているかは問題にならない。
-//! つまり BM8563 は「電源断をまたいで生き残る単調増加カウンタ」として
-//! 使っている。将来 WiFi を足して時刻を合わせるなら、この基準時刻を
-//! 本物の時刻に置き換えるだけで、上の層は何も変わらない。
+//! **正しい現在時刻は、自分では知らない。** NTP が無いので、時刻を失っていたら
+//! 2020-01-01 という固定の基準時刻を書き込む。記憶が必要とする差分(保存してから
+//! 何秒経ったか)は、それでも測れる。
+//!
+//! ただし世話の予測(`vmc_pet_body::care_prediction`)は **1日のうちの何時か** を
+//! 学ぶので、時計が実際の時刻とずれていると、PC と同じ時刻が別の「何時」になる。
+//! そこで PC から USB シリアルで時刻を送って合わせられるようにした
+//! (`set_unix_seconds`、受け取る行の形式は `vmc_pet_body::time_sync`)。
 //!
 //! バックアップ電源が尽きて時刻が失われた場合、BM8563 は秒レジスタの最上位
 //! ビットでそれを申告する(`clock_integrity_lost`)。そのときは基準時刻を
@@ -25,7 +26,25 @@
 
 use core_s3::rtc::{Bm8563, Date, DateTime, Time};
 use embedded_hal::i2c::I2c;
-use vmc_pet_body::unix_seconds_from_civil;
+use vmc_pet_body::{civil_from_unix_seconds, unix_seconds_from_civil};
+
+/// RTC に書き込める最も早い時刻(2000-01-01T00:00:00Z)。
+///
+/// BM8563 は年を下2桁で持ち、`core_s3::rtc` は 2000年を起点に読み出すので、
+/// 表せるのは 2000〜2099年だけ。
+const EARLIEST_SETTABLE_UNIX_SECONDS: u64 = 946_684_800;
+
+/// RTC に書き込める最も遅い時刻(2099-12-31T23:59:59Z)。
+const LATEST_SETTABLE_UNIX_SECONDS: u64 = 4_102_444_799;
+
+/// 時計を合わせられなかった理由。
+#[derive(Debug)]
+pub enum SetTimeError<E> {
+    /// RTC が表せない時刻(2000〜2099年の外)。書き込むと別の年として読まれてしまう。
+    OutOfRange { unix_seconds: u64 },
+    /// RTC との通信に失敗した。
+    Rtc(E),
+}
 
 /// 時刻を失っていた RTC に書き込む基準時刻。値そのものに意味はなく、
 /// 「ここが起点」という目印。
@@ -84,5 +103,32 @@ where
             datetime.time.minute,
             datetime.time.second,
         ))
+    }
+
+    /// 時計をこの Unix 時刻(秒、UTC)に合わせる。PC から受け取った時刻を書き込むためにある。
+    pub fn set_unix_seconds(&mut self, unix_seconds: u64) -> Result<(), SetTimeError<E>> {
+        let settable =
+            (EARLIEST_SETTABLE_UNIX_SECONDS..=LATEST_SETTABLE_UNIX_SECONDS).contains(&unix_seconds);
+        if !settable {
+            return Err(SetTimeError::OutOfRange { unix_seconds });
+        }
+        let civil = civil_from_unix_seconds(unix_seconds);
+        let datetime = DateTime {
+            date: Date {
+                year: civil.year,
+                month: civil.month,
+                day: civil.day,
+                weekday: civil.weekday,
+            },
+            time: Time {
+                hour: civil.hour,
+                minute: civil.minute,
+                second: civil.second,
+            },
+        };
+        self.rtc.set_datetime(datetime).map_err(SetTimeError::Rtc)?;
+        // 秒レジスタを書き直したので、時刻を失った印(最上位ビット)も消えている
+        self.lost_its_place = false;
+        Ok(())
     }
 }
