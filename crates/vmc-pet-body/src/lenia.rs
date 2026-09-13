@@ -506,7 +506,13 @@ mod tests {
     /// 43x32(M5Stack CoreS3 の場のサイズ)で O2u を40ステップ動かし、
     /// 5ステップごとの総量・チェックサム・特定セルの値を記録したもの
     /// (docs/M5STACK.md「Lenia の畳み込みを高速化した」参照)。
+    ///
+    /// 値は記録したときに出力した桁のまま残してある。f32 の列には f32 で表せない
+    /// 桁まで書かれているが、丸めて書き直すと記録との突き合わせができなくなるため、
+    /// このテストに限り clippy の excessive_precision を許可する(比較される値は
+    /// 最も近い f32 に丸められるので、結果は変わらない)。
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn accumulate_potential_matches_the_naive_wraparound() {
         // Arrange
         let animal = crate::load_animal("O2u").unwrap();

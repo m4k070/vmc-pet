@@ -139,11 +139,11 @@ impl MemoryStore {
 
     /// 記憶を書き出す。失敗しても動作は続け、警告は一度だけ出す。
     pub fn save(&mut self, memory: PetMemory, now_unix_seconds: u64) {
-        if let Err(error) = self.write(memory, now_unix_seconds) {
-            if !self.warned {
-                esp_println::println!("vmc-pet-cores3: could not save memory: {error:?}");
-                self.warned = true;
-            }
+        if let Err(error) = self.write(memory, now_unix_seconds)
+            && !self.warned
+        {
+            esp_println::println!("vmc-pet-cores3: could not save memory: {error:?}");
+            self.warned = true;
         }
     }
 

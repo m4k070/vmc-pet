@@ -206,10 +206,8 @@ impl DotRenderer {
                 // (dot_grid.rs と同じ考え方)。
                 let visibility = body_value.max(echo_value);
                 let index = row * FIELD_WIDTH + column;
-                if visibility <= MIN_VISIBLE_VALUE {
-                    if self.previous_radius[index] == 0 {
-                        continue;
-                    }
+                if visibility <= MIN_VISIBLE_VALUE && self.previous_radius[index] == 0 {
+                    continue;
                 }
                 let radius = (self.max_radius * libm::sqrtf(visibility)) as u32;
                 // echo が占める割合。体だけなら 0、echo だけなら 1 になる。
@@ -369,21 +367,21 @@ fn main() -> ! {
 
     // 前回の続きから始める。時計が無い・記憶が無い・時計が巻き戻っている
     // のいずれでも、単に「新品として始まる」だけで先へ進む。
-    if let (Some(store), Some(clock)) = (memory_store.as_ref(), clock.as_mut()) {
-        if let (Some(saved), Ok(now)) = (store.load(), clock.now_unix_seconds()) {
-            let before = saved.memory.energy;
-            let seconds_away = saved.seconds_away(now);
-            pet.restore(saved.memory, seconds_away);
-            // 秒も出すのは、RTC がちゃんと進んでいるかを実機で確かめる手立てが
-            // これしかないため。時間単位だけだと、短い再起動が全部 0.0h に
-            // 見えてしまい、時計が止まっているのと区別がつかない。
-            esp_println::println!(
-                "vmc-pet-cores3: resumed after {:.1}h ({seconds_away:.0}s) away; \
-                 energy {before:.2} -> {:.2}",
-                seconds_away / 3600.0,
-                pet.energy()
-            );
-        }
+    if let (Some(store), Some(clock)) = (memory_store.as_ref(), clock.as_mut())
+        && let (Some(saved), Ok(now)) = (store.load(), clock.now_unix_seconds())
+    {
+        let before = saved.memory.energy;
+        let seconds_away = saved.seconds_away(now);
+        pet.restore(saved.memory, seconds_away);
+        // 秒も出すのは、RTC がちゃんと進んでいるかを実機で確かめる手立てが
+        // これしかないため。時間単位だけだと、短い再起動が全部 0.0h に
+        // 見えてしまい、時計が止まっているのと区別がつかない。
+        esp_println::println!(
+            "vmc-pet-cores3: resumed after {:.1}h ({seconds_away:.0}s) away; \
+             energy {before:.2} -> {:.2}",
+            seconds_away / 3600.0,
+            pet.energy()
+        );
     }
 
     // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
@@ -449,7 +447,7 @@ fn main() -> ! {
             if collapsed {
                 esp_println::println!("vmc-pet-cores3: the body collapsed; reviving");
             }
-            if step % 15 == 0 {
+            if step.is_multiple_of(15) {
                 esp_println::println!(
                     "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2}",
                     pet.mass(),
@@ -465,10 +463,10 @@ fn main() -> ! {
         // 描画と同じループの中で、体のステップとは独立に間隔を測る。
         if last_saved.elapsed() >= SAVE_INTERVAL {
             last_saved = Instant::now();
-            if let (Some(store), Some(clock)) = (memory_store.as_mut(), clock.as_mut()) {
-                if let Ok(now) = clock.now_unix_seconds() {
-                    store.save(pet.memory(), now);
-                }
+            if let (Some(store), Some(clock)) = (memory_store.as_mut(), clock.as_mut())
+                && let Ok(now) = clock.now_unix_seconds()
+            {
+                store.save(pet.memory(), now);
             }
         }
 

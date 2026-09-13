@@ -66,8 +66,9 @@ mod tests {
     #[test]
     fn an_integer_body_centre_reads_the_stored_value_exactly() {
         // Arrange
+        let (width, row, column) = (4, 1, 2);
         let mut values = [0.0f32; 16];
-        values[1 * 4 + 2] = 0.75;
+        values[row * width + column] = 0.75;
 
         // Act: 重心 (1, 0) の体を、場の (3, 1) から見る = 体基準の (2, 1)
         let read = sample_on_body(&values, 4, 4, (1.0, 0.0), 3, 1);
