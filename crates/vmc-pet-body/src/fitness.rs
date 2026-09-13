@@ -33,6 +33,8 @@ pub struct Trajectory {
     centroids: Vec<Option<(f32, f32)>>,
     /// 各ステップの総量。脈動の大きさ(見た目の落ち着き)を測るのに使う。
     masses: Vec<f32>,
+    /// 各ステップの体全体の平均の色づき具合(体の値で重みづけ、0.0..=1.0)。
+    tints: Vec<f32>,
     /// 記録中に一度でも崩壊(`Pet::step` が `true` を返す)が起きたか。
     collapsed: bool,
 }
@@ -63,6 +65,7 @@ impl Trajectory {
     pub fn record_with(pet: &mut Pet, steps: u32, mut before_step: impl FnMut(&mut Pet)) -> Self {
         let mut centroids = Vec::with_capacity(steps as usize);
         let mut masses = Vec::with_capacity(steps as usize);
+        let mut tints = Vec::with_capacity(steps as usize);
         let mut collapsed = false;
         for _ in 0..steps {
             before_step(pet);
@@ -71,12 +74,22 @@ impl Trajectory {
             }
             centroids.push(pet.observe().toroidal_centroid());
             masses.push(pet.mass());
+            tints.push(body_tint(pet));
         }
         Self {
             centroids,
             masses,
+            tints,
             collapsed,
         }
+    }
+
+    /// 記録した区間を通した、体の平均の色づき具合(0.0..=1.0)。
+    pub fn mean_tint(&self) -> f32 {
+        if self.tints.is_empty() {
+            return 0.0;
+        }
+        self.tints.iter().sum::<f32>() / self.tints.len() as f32
     }
 
     /// 崩壊が一度でも起きたか。
@@ -145,6 +158,26 @@ impl Trajectory {
             return COLLAPSE_PENALTY;
         }
         self.mean_step_displacement(field_width, field_height)
+    }
+}
+
+/// 体全体の平均の色づき具合。体の値で重みづけるのは、体の無いところの色素は
+/// 描かれず見えないため(描画はドットの大きさを体の値で決める)。
+fn body_tint(pet: &Pet) -> f32 {
+    let field = pet.observe();
+    let pigment = pet.pigment_view();
+    let (mut tinted, mut total) = (0.0f32, 0.0f32);
+    for y in 0..field.height() {
+        for x in 0..field.width() {
+            let body_value = field.get(x, y);
+            tinted += body_value * pigment.get(x, y);
+            total += body_value;
+        }
+    }
+    if total > 0.0 {
+        tinted / total
+    } else {
+        0.0
     }
 }
 
@@ -226,11 +259,40 @@ pub fn mood_trajectory(code: &str, field_size: usize, eval_steps: u32, mood: Moo
     };
     let animal = crate::load_animal(code).unwrap();
     let mut pet = Pet::new(animal, field_size, field_size);
-    pet.set_mood_for_evaluation(anticipation, disappointment);
-    for _ in 0..NEGLECTED_WARMUP_STEPS {
+    // 実際の生活に合わせ、エネルギーが自然に尽きてから気分を徐々に変える。
+    // 生まれた直後から体の状態を変えると S1s が定着できない、という既知の性質を
+    // 避けるため(体側の表情の軸を振り分けた計測と同じ条件の作り方)。
+    for step in 0..NEGLECTED_WARMUP_STEPS {
+        let onset = (step.saturating_sub(MOOD_ONSET_STEP) as f32 / MOOD_RAMP_STEPS as f32).min(1.0);
+        pet.set_mood_for_evaluation(anticipation * onset, disappointment * onset);
         pet.step();
     }
     Trajectory::record(&mut pet, eval_steps)
+}
+
+/// 気分を変え始めるステップ(エネルギーが自然に尽きる頃)と、変えきるまでのステップ数。
+const MOOD_ONSET_STEP: u32 = 2_250;
+const MOOD_RAMP_STEPS: u32 = NEGLECTED_WARMUP_STEPS - MOOD_ONSET_STEP;
+
+/// 2つの状態を、動きか色のどちらかで見分けられるか。
+///
+/// 動き(`legibility`: 速さと脈動)と色(体の平均の色づき具合の差)は、人の目にとって
+/// 別々の手がかりなので、どちらか一方ではっきり違えば見分けられる、として大きい方を
+/// 取る。`legibility` の定義そのものは変えていないので、これまでの数値や閾値とは
+/// そのまま比べられる。色の差は色の混ぜ具合(0.0..=1.0)の絶対差にしてある。相対差に
+/// すると、ほとんど色づいていない同士でも差が最大になってしまうため。
+pub fn distinguishability(
+    first: &Trajectory,
+    second: &Trajectory,
+    field_width: usize,
+    field_height: usize,
+) -> f32 {
+    let motion = legibility(first, second, field_width, field_height);
+    if motion == COLLAPSE_PENALTY {
+        return COLLAPSE_PENALTY;
+    }
+    let colour = (first.mean_tint() - second.mean_tint()).abs();
+    motion.max(colour)
 }
 
 /// 「世話のされ方が、外から見える振る舞いに現れているか」を測る。

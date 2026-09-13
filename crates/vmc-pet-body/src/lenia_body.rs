@@ -46,6 +46,13 @@ const OFFLINE_DEPLETION_SECONDS: f32 = 12.0 * 60.0 * 60.0;
 /// で安定するようにしてある。
 const MIN_GROWTH_SCALE: f32 = 0.85;
 
+/// 表情としてのテンポが取りうる範囲。全生物で、エネルギーが尽きた体に徐々にかけて
+/// 20000ステップ崩壊しないことを計測した範囲(×0.5〜×1.6)に留める
+/// (docs/DESIGN.md「体側の表情の軸を振り分けた」)。成長の強さと違い、この範囲の
+/// 中に崩壊の崖は見つからなかった。
+const MIN_TEMPO: f32 = 0.5;
+const MAX_TEMPO: f32 = 1.6;
+
 /// Lenia の場を体として持つ個体。
 pub struct LeniaBody {
     /// 崩壊したときに置き直すため、元の生物を持ち続ける。
@@ -55,6 +62,8 @@ pub struct LeniaBody {
     /// 場の外側に持つ少数の状態変数(docs/DESIGN.md「コンセプト」参照)。
     /// 場のパラメータ(成長の強さ)に効かせることで、「元気/放置されて弱る」を作る。
     energy: f32,
+    /// 体の時間の進み方(1.0 がいつもどおり)。気分を見せる表情の軸。
+    tempo: f32,
 }
 
 impl LeniaBody {
@@ -66,6 +75,7 @@ impl LeniaBody {
             field: Field::new(width, height),
             lenia,
             energy: MAX_ENERGY,
+            tempo: 1.0,
         };
         body.revive();
         body
@@ -79,8 +89,17 @@ impl LeniaBody {
     /// ただし `MIN_GROWTH_SCALE` を下限とし、実測で見つかった崩壊の崖には触れさせない。
     pub fn step(&mut self) {
         let growth_scale = MIN_GROWTH_SCALE + (1.0 - MIN_GROWTH_SCALE) * self.energy;
-        self.lenia.step(&mut self.field, growth_scale);
+        self.lenia.step_at_tempo(&mut self.field, growth_scale, self.tempo);
         self.energy = (self.energy - ENERGY_DECAY_PER_STEP).max(MIN_ENERGY);
+    }
+
+    /// 体の時間の進み方を変える(1.0 がいつもどおり)。計測で崩壊しないと確かめた
+    /// 範囲(`MIN_TEMPO`〜`MAX_TEMPO`)に丸める。
+    ///
+    /// エネルギーの減り方や体のステップの回数は変えない。変わるのは Lenia の場が
+    /// 1ステップで進む時間だけで、見た目には動きがゆっくり/せわしなくなる。
+    pub fn set_tempo(&mut self, tempo: f32) {
+        self.tempo = tempo.clamp(MIN_TEMPO, MAX_TEMPO);
     }
 
     /// 場の総量。体が生きているかの目安になる。

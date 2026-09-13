@@ -213,9 +213,18 @@ impl Lenia {
     /// 0.0 に近づくほど修復が弱まり、減衰だけが進むぶん体全体がゆっくり弱っていく。
     /// 気分状態(エネルギー量)はこの倍率を通して場に効く。
     pub fn step(&mut self, field: &mut Field, growth_scale: f32) {
+        self.step_at_tempo(field, growth_scale, 1.0);
+    }
+
+    /// テンポ(1ステップで進む体の時間の倍率)を指定して1ステップ進める。
+    ///
+    /// テンポは気分を見せる表情の軸として使う(がっかりすると遅くなる)。1ステップ
+    /// あたりの計算量は変わらないので、M5Stack のフレームレートにも影響しない。
+    /// 崩壊しない範囲は呼び出し側(`LeniaBody::set_tempo`)が守る。
+    pub fn step_at_tempo(&mut self, field: &mut Field, growth_scale: f32, tempo: f32) {
         self.accumulate_potential(field.view());
 
-        let time_step = 1.0 / self.params.time_divisor;
+        let time_step = tempo / self.params.time_divisor;
         let width = field.view().width();
         let center = self.params.growth_center;
         let growth_width = self.params.growth_width;

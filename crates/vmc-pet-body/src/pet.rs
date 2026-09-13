@@ -17,7 +17,8 @@
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
     Animal, AutonomousController, BodyPort, CarePredictor, CellPos, ControllerParams, FieldView,
-    Habituation, LeniaBody, Observation, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
+    Habituation, LeniaBody, Observation, Perturbation, PetMemory, Pigment, PigmentView, Touch,
+    TouchEcho, TouchEchoView,
 };
 
 /// 自律コントローラが働きかけたことを echo として光らせる強さ。
@@ -38,12 +39,22 @@ const SELF_ACTION_ECHO_AMOUNT: f32 = 0.5;
 /// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
 const COLLAPSE_MASS: f32 = 5.0;
 
+/// がっかりしきったときの体のテンポ(1.0 がいつもどおり)。
+///
+/// 3状態をテンポに割り当てた計測(docs/DESIGN.md「3状態をテンポに割り当てて直接測った」)
+/// で、×0.6 は全生物で崩壊せず、コントローラでは見分けられなかった OG2g・2S1v でも
+/// 「待っている⇔がっかり」が 0.36 前後になった。がっかりの溜まり具合に比例して
+/// 遅くなり、がっかりが薄れればいつものテンポに戻る。
+const DISAPPOINTED_TEMPO: f32 = 0.6;
+
 /// 体(世界モデル)・入力の翻訳・崩壊検知・echo を束ねたもの。
 /// PC版・M5Stack版で共通して使う。
 pub struct Pet {
     body: LeniaBody,
     /// 入力を可視化するためだけのデータ。体の場とは別に持ち、体には一切影響しない。
     echo: TouchEcho,
+    /// 体に付く色素。世話を待っているときに色づく(体の動きには影響しない)。
+    pigment: Pigment,
     /// 触れている(またはホバーしている)位置。撫でている扱いで、
     /// `tick_input` のたびに echo を光らせ続ける。
     touching_at: Option<CellPos>,
@@ -86,6 +97,7 @@ impl Pet {
         let mut pet = Self {
             body: LeniaBody::new(animal, width, height),
             echo: TouchEcho::new(width, height),
+            pigment: Pigment::new(width, height),
             touching_at: None,
             controller: AutonomousController::with_params(controller_params),
             habituation: Habituation::new(width, height),
@@ -97,7 +109,9 @@ impl Pet {
         // 最初の1ステップより前に触られても、光が体に貼りつくようにしておく。
         // これを忘れると、最初のステップで原点が(0, 0)から重心へ跳び、
         // それまでに触った跡が一緒に跳んで見える。
-        pet.echo.follow_body(pet.body_centroid());
+        let centroid = pet.body_centroid();
+        pet.echo.follow_body(centroid);
+        pet.pigment.follow_body(centroid);
         pet
     }
 
@@ -113,10 +127,18 @@ impl Pet {
     ///
     /// 戻り値は、このステップで崩壊を検知して置き直したかどうか。
     pub fn step(&mut self) -> bool {
+        // がっかりしているほど体の時間がゆっくり進む(表情としてのテンポ)
+        let disappointment = self.disappointment.clamp(0.0, 1.0);
+        self.body
+            .set_tempo(1.0 - (1.0 - DISAPPOINTED_TEMPO) * disappointment);
         self.body.step();
-        // 光(echo)は体に貼りつけて覚えるので、体が進んだらすぐ重心を渡す。
+        // 光(echo)と色素は体に貼りつけて覚えるので、体が進んだらすぐ重心を渡す。
         // 下の自律行動の光も、進んだ後の体を基準に記録される。
-        self.echo.follow_body(self.body_centroid());
+        let centroid = self.body_centroid();
+        self.echo.follow_body(centroid);
+        self.pigment.follow_body(centroid);
+        // 世話を待っているほど、体があるところに色素が溜まる(ゆっくり色づく)
+        self.pigment.step(self.body.observe(), self.anticipation);
         // 慣れは体の時間に乗せて薄れていく。描画フレームではなくここで進めるのは、
         // フレームレートが PC と M5Stack で違うのに対し、体のステップはどちらも
         // 15/s で揃っているため(habituation.rs 参照)。
@@ -140,8 +162,10 @@ impl Pet {
         }
         if self.body.mass() < COLLAPSE_MASS {
             self.body.revive();
-            // 置き直すと重心が跳ぶので、光の基準も合わせる
-            self.echo.follow_body(self.body_centroid());
+            // 置き直すと重心が跳ぶので、光と色素の基準も合わせる
+            let centroid = self.body_centroid();
+            self.echo.follow_body(centroid);
+            self.pigment.follow_body(centroid);
             true
         } else {
             false
@@ -315,6 +339,11 @@ impl Pet {
 
     pub fn echo_view(&self) -> TouchEchoView<'_> {
         self.echo.view()
+    }
+
+    /// 体に付く色素(世話を待っているときの色づき)。描画側が体の色に混ぜる。
+    pub fn pigment_view(&self) -> PigmentView<'_> {
+        self.pigment.view()
     }
 
     pub fn mass(&self) -> f32 {
@@ -688,6 +717,99 @@ mod tests {
             remembered > 0.5,
             "the learned rhythm must survive a restart; got {remembered}"
         );
+    }
+
+    /// 体全体の平均の色づき具合(体の値で重みづけ)。
+    fn mean_tint(pet: &Pet) -> f32 {
+        let field = pet.observe();
+        let pigment = pet.pigment_view();
+        let (mut tinted, mut total) = (0.0f32, 0.0f32);
+        for y in 0..field.height() {
+            for x in 0..field.width() {
+                let body_value = field.get(x, y);
+                tinted += body_value * pigment.get(x, y);
+                total += body_value;
+            }
+        }
+        if total > 0.0 {
+            tinted / total
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn a_pet_waiting_for_care_flushes_and_a_lively_one_does_not() {
+        // Arrange
+        let mut waiting = orbium();
+        waiting.set_mood_for_evaluation(1.0, 0.0);
+        let mut lively = orbium();
+
+        // Act: 1分ぶん進める
+        for _ in 0..900 {
+            waiting.step();
+            lively.step();
+        }
+
+        // Assert: 待っている個体ははっきり色づき、元気な個体は色づかない
+        let waiting_tint = mean_tint(&waiting);
+        assert!(waiting_tint > 0.3, "a waiting pet must flush; got {waiting_tint}");
+        assert_eq!(mean_tint(&lively), 0.0);
+    }
+
+    #[test]
+    fn the_pigment_never_changes_how_the_body_moves() {
+        // Arrange: 期待で揺らす強さが上がるぶんは、同じ強さを直接設定した個体と揃える。
+        // 違いは色素が溜まっているかどうかだけになる
+        let mut flushed = orbium();
+        flushed.set_mood_for_evaluation(1.0, 0.0);
+        let same_stirring = ControllerParams {
+            nudge_amount_when_depleted: 1.0,
+            ..ControllerParams::default()
+        };
+        let mut plain = Pet::with_controller_params(crate::load_animal("O2u").unwrap(), 32, 32, same_stirring);
+
+        // Act
+        for _ in 0..3_000 {
+            flushed.step();
+            plain.step();
+        }
+
+        // Assert: 体の場は1ビットも違わない(色素は体 → 色素の一方向だけ)
+        assert!(mean_tint(&flushed) > 0.3, "the pigment must actually be there");
+        assert_eq!(flushed.mass(), plain.mass());
+        assert_eq!(flushed.observe().toroidal_centroid(), plain.observe().toroidal_centroid());
+    }
+
+    /// がっかりしきった体のテンポ(×0.6)で、世話が一切来ないまま長く過ごしても、
+    /// 全生物が生き延びることを確かめる。がっかりは実際には数十分かけて溜まるので、
+    /// エネルギーが自然に尽きてから750ステップかけて徐々にがっかりさせる
+    /// (体側の軸を振り分けた計測と同じ条件の作り方)。
+    #[test]
+    fn every_shipped_animal_survives_a_long_disappointment() {
+        for (code, name) in crate::list_animals().unwrap() {
+            // Arrange
+            let mut pet = Pet::load(&code, 32, 32).unwrap();
+            let mut collapses = 0u32;
+            for step in 0..3_000u32 {
+                let disappointment = (step.saturating_sub(2_250) as f32 / 750.0).min(1.0);
+                pet.set_mood_for_evaluation(0.0, disappointment);
+                if pet.step() {
+                    collapses += 1;
+                }
+            }
+
+            // Act: がっかりしきったまま20000ステップ(≈22分)
+            for _ in 0..20_000 {
+                if pet.step() {
+                    collapses += 1;
+                }
+            }
+
+            // Assert
+            assert_eq!(collapses, 0, "a long disappointment collapsed {code} ({name})");
+            assert!(pet.mass() > 40.0, "{code} ({name}) must stay alive, got mass {}", pet.mass());
+        }
     }
 
     #[test]

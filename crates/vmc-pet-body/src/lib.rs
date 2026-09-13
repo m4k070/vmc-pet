@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+mod body_frame;
 mod math;
 
 pub mod animal;
@@ -32,6 +33,7 @@ pub mod lenia_body;
 pub mod memory;
 pub mod perturbation;
 pub mod pet;
+pub mod pigment;
 pub mod port;
 pub mod touch;
 pub mod touch_echo;
@@ -48,6 +50,7 @@ pub use lenia_body::LeniaBody;
 pub use memory::{scan_records, PetMemory, SavedMemory, RECORD_LEN};
 pub use perturbation::{accumulate_into, CellPos, Perturbation};
 pub use pet::Pet;
+pub use pigment::{Pigment, PigmentView};
 pub use port::BodyPort;
 pub use touch::{body_perturbation_for, echo_perturbation_for, Touch};
 pub use touch_echo::{TouchEcho, TouchEchoView};

@@ -183,9 +183,10 @@ impl Surface for Pet {
         self.camera
             .follow(self.core.observe(), GRID_COLUMNS, GRID_ROWS);
         canvas.fill(0);
-        self.grid.draw(
+        self.grid.draw_with_pigment(
             self.core.observe(),
             self.core.echo_view(),
+            Some(self.core.pigment_view()),
             self.camera.origin(),
             canvas,
             width,

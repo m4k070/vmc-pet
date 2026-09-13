@@ -41,7 +41,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::math::{floorf, rem_euclidf};
+use crate::body_frame::{nearest_cell, sample_on_body};
 use crate::{accumulate_into, CellPos, Perturbation};
 
 /// heat の値域。Field の値域(0.0..=1.0)と揃えてある。
@@ -114,11 +114,6 @@ impl TouchEcho {
     }
 }
 
-/// トーラス上の小数の位置に最も近いセル。
-fn nearest_cell(position: f32, size: usize) -> usize {
-    floorf(rem_euclidf(position + 0.5, size as f32)) as usize % size
-}
-
 /// echo の読み取り専用ビュー。
 #[derive(Debug, Clone, Copy)]
 pub struct TouchEchoView<'a> {
@@ -142,27 +137,8 @@ impl TouchEchoView<'_> {
     /// 体の重心からの相対位置(小数)を双線形補間して読む。重心が整数のときは
     /// 補間の重みが片側に寄り切るので、記録した値がそのまま返る。
     pub fn get(&self, x: usize, y: usize) -> f32 {
-        if x >= self.width || y >= self.height {
-            return MIN_HEAT;
-        }
-        let on_body_x = rem_euclidf(x as f32 - self.body_centre.0, self.width as f32);
-        let on_body_y = rem_euclidf(y as f32 - self.body_centre.1, self.height as f32);
-        let (left, right, toward_right) = neighbours(on_body_x, self.width);
-        let (top, bottom, toward_bottom) = neighbours(on_body_y, self.height);
-
-        let cell = |column: usize, row: usize| self.heat[row * self.width + column];
-        let upper = cell(left, top) * (1.0 - toward_right) + cell(right, top) * toward_right;
-        let lower = cell(left, bottom) * (1.0 - toward_right) + cell(right, bottom) * toward_right;
-        upper * (1.0 - toward_bottom) + lower * toward_bottom
+        sample_on_body(self.heat, self.width, self.height, self.body_centre, x, y)
     }
-}
-
-/// `0.0..size` の小数の位置を挟む2つのセル(トーラスで折り返す)と、
-/// 後ろのセルへの寄り具合(0.0..1.0)。
-fn neighbours(position: f32, size: usize) -> (usize, usize, f32) {
-    let before = floorf(position);
-    let first = before as usize % size;
-    ((first), (first + 1) % size, position - before)
 }
 
 #[cfg(test)]

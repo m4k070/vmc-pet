@@ -7,7 +7,7 @@
 //! 体の場(body)と入力の echo(touch_echo)は別データとして受け取り、ここで初めて
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
-use vmc_pet_body::{CellPos, FieldView};
+use vmc_pet_body::{CellPos, FieldView, PigmentView};
 use crate::render::TouchEchoView;
 
 /// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
@@ -25,6 +25,10 @@ const BODY_COLOR: (f32, f32, f32) = (0.35, 0.85, 0.80);
 /// 入力の echo の色(暖色の白)。体の色とはっきり区別がつくよう、あえて系統を変える。
 /// 「これは体の状態ではなく、触れた跡だ」と読み取れることを狙う。
 const ECHO_COLOR: (f32, f32, f32) = (1.0, 0.92, 0.70);
+
+/// 体に付く色素の色(珊瑚色)。世話を待っているときに体がこの色へ寄る。
+/// 体のティールとも echo の暖色の白とも区別がつく系統にしてある。
+const PIGMENT_COLOR: (f32, f32, f32) = (1.0, 0.55, 0.45);
 
 const BYTES_PER_PIXEL: usize = 4;
 
@@ -136,6 +140,24 @@ impl DotGrid {
         width: u32,
         height: u32,
     ) {
+        self.draw_with_pigment(field, echo, None, origin, canvas, width, height);
+    }
+
+    /// 体に付く色素(世話を待っているときの色づき)も合わせて描く。
+    ///
+    /// 色素は体の色を珊瑚色へ寄せるだけで、ドットの大きさ(見えるかどうか)は変えない。
+    /// 体が無いところの色素は描かれない。echo はその上に混ぜる。
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_pigment(
+        &self,
+        field: FieldView<'_>,
+        echo: TouchEchoView<'_>,
+        pigment: Option<PigmentView<'_>>,
+        origin: (f32, f32),
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+    ) {
         let bounds = self.bounds(width, height);
         if bounds.width == 0 {
             return;
@@ -167,6 +189,17 @@ impl DotGrid {
                     column,
                     row,
                 );
+                let tint = pigment.map_or(0.0, |pigment| {
+                    pool_cell(
+                        |x, y| pigment.get(x, y),
+                        (pigment.width(), pigment.height()),
+                        cell_origin,
+                        self.columns,
+                        self.rows,
+                        column,
+                        row,
+                    )
+                });
                 let visibility = body_value.max(echo_value);
                 if visibility <= MIN_VISIBLE_VALUE {
                     continue;
@@ -179,7 +212,11 @@ impl DotGrid {
                     center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
                     radius: max_radius * visibility.sqrt(),
                     value: visibility,
-                    color: lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix),
+                    color: lerp_color(
+                        lerp_color(BODY_COLOR, PIGMENT_COLOR, tint.clamp(0.0, 1.0)),
+                        ECHO_COLOR,
+                        echo_mix,
+                    ),
                 };
                 draw_dot(canvas, width, height, bounds, dot);
             }
@@ -594,6 +631,40 @@ mod tests {
         assert!(a > 0.0, "the centre must be drawn");
         // premultiplied なので比率で比較する。ECHO_COLOR は赤が緑よりわずかに強い暖色
         assert!(r / a >= g / a, "an echo-only dot must lean toward the echo color");
+    }
+
+    #[test]
+    fn a_flushed_body_dot_leans_toward_the_pigment_color() {
+        // Arrange: 体だけがあるセルに、世話を待っているときの色素を十分に溜める
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if x == 16 && y == 16 { 1.0 } else { 0.0 });
+        let echo = TouchEcho::new(32, 32);
+        let mut pigment = vmc_pet_body::Pigment::new(32, 32);
+        for _ in 0..900 {
+            pigment.step(field.view(), 1.0);
+        }
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw_with_pigment(
+            field.view(),
+            echo.view(),
+            Some(pigment.view()),
+            (0.0, 0.0),
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 体のティールは緑が赤より強いが、色づいた体は珊瑚色へ寄って赤が強くなる
+        let cell_size = surface / 32;
+        let centre = (16 * cell_size + cell_size / 2) * surface + (16 * cell_size + cell_size / 2);
+        let pixel = &canvas[centre * BYTES_PER_PIXEL..centre * BYTES_PER_PIXEL + 4];
+        let (g, r, a) = (pixel[1] as f32, pixel[2] as f32, pixel[3] as f32);
+        assert!(a > 0.0, "the centre must be drawn");
+        assert!(r > g, "a flushed body must lean toward the pigment color; r={r} g={g}");
     }
 
     #[test]

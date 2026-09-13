@@ -50,7 +50,7 @@ use core_s3::{
     CoreS3,
 };
 use embedded_hal_bus::i2c::RefCellDevice;
-use vmc_pet_body::{load_animal, Camera, CellPos, FieldView, Pet, TouchEchoView};
+use vmc_pet_body::{load_animal, Camera, CellPos, FieldView, Pet, PigmentView, TouchEchoView};
 use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -98,6 +98,11 @@ const BODY_COLOR: Rgb565 = Rgb565::new(9, 43, 20);
 /// 入力 echo の色(暖色の白)。PC版の ECHO_COLOR と同じ狙いで、体の色とはっきり
 /// 区別がつくようにしてある。
 const ECHO_COLOR: Rgb565 = Rgb565::new(31, 58, 22);
+
+/// 体に付く色素の色(珊瑚色)。世話を待っているときに体がこの色へ寄る。
+/// PC版の PIGMENT_COLOR と同じ狙いで、体のティールとも echo の暖色の白とも
+/// 区別がつく系統にしてある。
+const PIGMENT_COLOR: Rgb565 = Rgb565::new(31, 31, 12);
 
 fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t) as u8
@@ -176,6 +181,7 @@ impl DotRenderer {
         display: &mut D,
         field: FieldView<'_>,
         echo: TouchEchoView<'_>,
+        pigment: PigmentView<'_>,
         origin: (f32, f32),
     ) where
         D: DrawTarget<Color = Rgb565>,
@@ -212,7 +218,11 @@ impl DotRenderer {
                 } else {
                     0.0
                 };
-                let color = lerp_color(BODY_COLOR, ECHO_COLOR, echo_mix);
+                // 体の色は色素の濃さに応じて珊瑚色へ寄り、その上に echo を混ぜる。
+                // 色素はドットの大きさ(見えるかどうか)を変えない。
+                let tint = pigment.get(field_x, field_y).clamp(0.0, 1.0);
+                let body_color = lerp_color(BODY_COLOR, PIGMENT_COLOR, tint);
+                let color = lerp_color(body_color, ECHO_COLOR, echo_mix);
 
                 // 場のセルから画面座標への変換は、選ぶセル(cell_origin)と
                 // 画面上の位置(shift)を別々にずらす。これにより、生物の実際の
@@ -428,17 +438,24 @@ fn main() -> ! {
             step += 1;
 
             camera.follow(pet.observe(), FIELD_WIDTH, FIELD_HEIGHT);
-            renderer.update(&mut parts.display, pet.observe(), pet.echo_view(), camera.origin());
+            renderer.update(
+                &mut parts.display,
+                pet.observe(),
+                pet.echo_view(),
+                pet.pigment_view(),
+                camera.origin(),
+            );
 
             if collapsed {
                 esp_println::println!("vmc-pet-cores3: the body collapsed; reviving");
             }
             if step % 15 == 0 {
                 esp_println::println!(
-                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} anticipation={:.2}",
+                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2}",
                     pet.mass(),
                     pet.energy(),
-                    pet.anticipation()
+                    pet.anticipation(),
+                    pet.disappointment()
                 );
             }
         }
