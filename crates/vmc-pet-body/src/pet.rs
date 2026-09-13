@@ -189,16 +189,17 @@ impl Pet {
             // を使う(habituation.rs 参照)。
             let attention = self.habituation.attention_at(perturbation.at);
             self.habituation.record(&perturbation);
-            // いまは場への効き目だけを弱め、エネルギー(気分)の回復は
-            // 弱めていない。慣れきった場所を叩いても機嫌は直る、という状態。
-            // 「慣れた刺激は世話としても数えない」方がペットらしいかもしれないが、
-            // 弱った体を叩いても回復しないのは壊れて見える恐れがあるため、
-            // まず見た目に現れる側だけを変えて様子を見る
+            // 場への効き目と、世話として数える度合い(エネルギーの回復)の
+            // 両方を同じ `attention` で弱める。同じ場所を機械的に叩き続けるのは
+            // 世話ではない、という扱い。当初は「弱った体を叩いても回復しないと
+            // 壊れて見える」のを恐れて場だけを弱めていたが、慣れは場所ごとで
+            // 数十秒で抜けるので、別の場所を触れば必ず満額で回復する
             // (docs/DESIGN.md「慣れ」参照)。
-            self.body.inject(Perturbation {
+            self.body.disturb(Perturbation {
                 amount: perturbation.amount * attention,
                 ..perturbation
             });
+            self.body.receive_care(attention);
         }
         if let Some(perturbation) = echo_perturbation_for(touch) {
             self.echo.touch(&perturbation);
@@ -644,13 +645,12 @@ mod tests {
     }
 
     #[test]
-    fn habituation_does_not_block_the_mood_from_recovering() {
+    fn a_habituated_touch_does_not_count_as_care() {
         // Arrange: エネルギーを使い切ってから、同じ場所に慣れさせる
         let mut pet = orbium();
         for _ in 0..10_000 {
             pet.step();
         }
-        assert_eq!(pet.energy(), 0.0);
         let at = CellPos { x: 3, y: 3 };
         for _ in 0..6 {
             pet.click(at);
@@ -663,11 +663,40 @@ mod tests {
         pet.click(at);
         pet.leave();
 
-        // Assert: 場への効き目は失っても、機嫌は直る(いまの設計判断。
-        // touch() のコメント参照)
+        // Assert: 場に効かないのと同じく、機嫌もほとんど直らない
+        let gain = pet.energy() - energy_before;
         assert!(
-            pet.energy() > energy_before,
-            "a habituated touch must still count as care for now"
+            gain < crate::lenia_body::ENERGY_PER_TOUCH * 0.05,
+            "a habituated touch must not count as care; gained {gain}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_place_still_counts_as_full_care_while_another_is_habituated() {
+        // Arrange: 使い切ってから、ある場所にだけ慣れさせる
+        let mut pet = orbium();
+        for _ in 0..10_000 {
+            pet.step();
+        }
+        let worn = CellPos { x: 3, y: 3 };
+        for _ in 0..6 {
+            pet.click(worn);
+            pet.leave();
+        }
+
+        // Act: 離れた真新しい場所を触る
+        let fresh = CellPos { x: 20, y: 20 };
+        assert_eq!(pet.attention_at(fresh), 1.0, "the fresh place must be untouched");
+        let energy_before = pet.energy();
+        pet.click(fresh);
+        pet.leave();
+
+        // Assert: 満額で回復する。慣れは場所ごとなので、弱った体が
+        // 「何をしても回復しない」状態にはならない
+        let gain = pet.energy() - energy_before;
+        assert!(
+            (gain - crate::lenia_body::ENERGY_PER_TOUCH).abs() < 1e-6,
+            "a fresh place must count as full care; gained {gain}"
         );
     }
 

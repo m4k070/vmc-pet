@@ -10,7 +10,7 @@ const MIN_ENERGY: f32 = 0.0;
 const MAX_ENERGY: f32 = 1.0;
 
 /// 体を触れる(`inject` が呼ばれる)たびに得られるエネルギー。
-const ENERGY_PER_TOUCH: f32 = 0.15;
+pub(crate) const ENERGY_PER_TOUCH: f32 = 0.15;
 
 /// 1ステップごとにエネルギーが減る量。15 step/s なので、
 /// 何にも触れられなければ約 150 秒(2分30秒)で 0 まで下がる。
@@ -141,12 +141,23 @@ impl LeniaBody {
     pub fn disturb(&mut self, perturbation: Perturbation) {
         self.field.inject(&perturbation);
     }
+
+    /// 世話をされたぶんだけエネルギー(気分)を回復させる。場には触れない。
+    ///
+    /// `weight` は世話としてどれだけ数えるか(0.0..=1.0)。慣れきった場所への
+    /// 刺激は、場に効かないのと同じく世話としても数えない(`Pet::touch` 参照)。
+    /// `disturb`(場だけ)と対になっていて、`inject` はこの2つを満額で
+    /// 合わせたものに等しい。
+    pub fn receive_care(&mut self, weight: f32) {
+        let gain = ENERGY_PER_TOUCH * weight.clamp(0.0, 1.0);
+        self.energy = (self.energy + gain).min(MAX_ENERGY);
+    }
 }
 
 impl BodyPort for LeniaBody {
     fn inject(&mut self, perturbation: Perturbation) {
-        self.field.inject(&perturbation);
-        self.energy = (self.energy + ENERGY_PER_TOUCH).min(MAX_ENERGY);
+        self.disturb(perturbation);
+        self.receive_care(1.0);
     }
 
     fn observe(&self) -> FieldView<'_> {
