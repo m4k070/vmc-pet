@@ -87,11 +87,32 @@ impl Default for CarePredictorParams {
     }
 }
 
+/// 1日の平均の予測を求めるときに、1日を何点で標本化するか(15分おき)。
+const SAMPLES_PER_DAY: u64 = 96;
+
+/// 予測がその日の平均の何倍になったら、期待(`anticipation_at`)を最大にするか。
+///
+/// 倍率で見るのは、触られる頻度そのものが人によって大きく違うため。まれにしか
+/// 触らない人でも「この時間は他より来やすい」ことは学べるので、絶対値ではなく
+/// その個体が覚えた1日の中での相対的な山を期待にする。
+const FULL_ANTICIPATION_RATIO: f32 = 3.0;
+
+/// 予測がその日の平均の何倍を超えたら、期待し始めるか。
+///
+/// ほぼ平均並みの時間帯は特別な時間ではないので期待しない。これが無いと、
+/// 何も学んでいない(1日じゅう平らな)個体でも、平均を求める足し算の丸め誤差で
+/// 比がわずかに 1 を超え、ごく小さな期待が生じていた(テストで見つかった)。
+const ANTICIPATION_STARTS_AT_RATIO: f32 = 1.1;
+
 /// 世話がいつ来るかの予測モデル。
 #[derive(Debug, Clone)]
 pub struct CarePredictor {
     params: CarePredictorParams,
     weights: [f32; FEATURES],
+    /// 1日を通した予測の平均。重みが変わる(1分に1回)ときだけ計算し直す。
+    /// `anticipation_at` は体のステップごとに呼ばれうるので、そのたびに
+    /// 1日ぶんの三角関数を計算しないようにするため(M5Stack で効く)。
+    daily_mean: f32,
     /// いま集計している単位の開始時刻。まだ何も観測していなければ `None`。
     bucket_start: Option<u64>,
     /// いまの集計単位の間に触られたか。
@@ -106,17 +127,35 @@ impl CarePredictor {
     pub fn with_params(params: CarePredictorParams) -> Self {
         let mut weights = [0.0; FEATURES];
         weights[0] = logit(PRIOR_EXPECTATION);
-        Self {
+        let mut predictor = Self {
             params,
             weights,
+            daily_mean: PRIOR_EXPECTATION,
             bucket_start: None,
             touched_in_bucket: false,
-        }
+        };
+        predictor.daily_mean = predictor.mean_expectation_over_day();
+        predictor
     }
 
     /// その時刻の1分の間に触られる確率の予測(0.0..1.0)。
     pub fn expectation_at(&self, unix_seconds: u64) -> f32 {
         sigmoid(dot(&self.weights, &features(unix_seconds)))
+    }
+
+    /// その時刻に、世話が来ることをどれだけ期待しているか(0.0..=1.0)。
+    ///
+    /// 予測がその日の平均の `ANTICIPATION_STARTS_AT_RATIO` 倍以下なら 0.0、
+    /// `FULL_ANTICIPATION_RATIO` 倍以上なら 1.0。何も学んでいない個体は予測が
+    /// 1日じゅう平らなので、どの時刻も 0.0 になる(根拠のない期待をしない)。
+    ///
+    /// 世話が来る少し前から期待が高まるのは、3倍音の予測が山を前後になだらかに
+    /// 広げるため。「何分前から」を別に持たなくても、自然に先回りになる。
+    pub fn anticipation_at(&self, unix_seconds: u64) -> f32 {
+        let ratio = self.expectation_at(unix_seconds) / self.daily_mean;
+        let above_ordinary = ratio - ANTICIPATION_STARTS_AT_RATIO;
+        let span = FULL_ANTICIPATION_RATIO - ANTICIPATION_STARTS_AT_RATIO;
+        (above_ordinary / span).clamp(0.0, 1.0)
     }
 
     /// いまの時刻を知らせる。描画や体のステップのたびに呼んでよい。
@@ -175,6 +214,16 @@ impl CarePredictor {
         for (weight, feature) in self.weights.iter_mut().zip(x.iter()) {
             *weight += self.params.learning_rate * error * feature;
         }
+        self.daily_mean = self.mean_expectation_over_day();
+    }
+
+    /// 1日を通した予測の平均。
+    fn mean_expectation_over_day(&self) -> f32 {
+        let step = SECONDS_PER_DAY / SAMPLES_PER_DAY;
+        let total: f32 = (0..SAMPLES_PER_DAY)
+            .map(|sample| self.expectation_at(sample * step))
+            .sum();
+        total / SAMPLES_PER_DAY as f32
     }
 }
 
@@ -401,6 +450,64 @@ mod tests {
         // Assert: 朝を夜より強く予測するようになっている
         let ratio = evening_over_morning(&predictor);
         assert!(ratio < 1.0, "a lasting change must be followed; got evening/morning = {ratio}");
+    }
+
+    #[test]
+    fn a_fresh_predictor_anticipates_nothing() {
+        // Arrange / Act
+        let predictor = CarePredictor::new();
+
+        // Assert: 学んでいないのに、特定の時間に期待したりしない
+        for hour in 0..24 {
+            assert_eq!(predictor.anticipation_at(at(hour, 0)), 0.0, "hour {hour}");
+        }
+    }
+
+    #[test]
+    fn a_learned_evening_habit_is_anticipated_in_the_evening_only() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+
+        // Act: 1週間、毎晩20時台に触る
+        live(&mut predictor, 7, |_| 20);
+
+        // Assert: 夜は期待し、朝は期待しない
+        let evening = predictor.anticipation_at(at(20, 30));
+        let morning = predictor.anticipation_at(at(8, 30));
+        assert!(evening > 0.9, "got {evening}");
+        assert_eq!(morning, 0.0);
+    }
+
+    #[test]
+    fn anticipation_builds_up_before_the_usual_time() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+        live(&mut predictor, 7, |_| 20);
+
+        // Act
+        let two_hours_before = predictor.anticipation_at(at(18, 0));
+        let one_hour_before = predictor.anticipation_at(at(19, 0));
+
+        // Assert: いつもの時間に向けて、前から期待が高まっていく
+        assert!(
+            one_hour_before > two_hours_before && one_hour_before > 0.0,
+            "18:00={two_hours_before} 19:00={one_hour_before}"
+        );
+    }
+
+    #[test]
+    fn the_cached_daily_mean_matches_a_minute_by_minute_average() {
+        // Arrange: 偏りのある山を学ばせる
+        let mut predictor = CarePredictor::new();
+        live(&mut predictor, 7, |_| 20);
+
+        // Act: 1分ごとに平均を取り直す
+        let fine: f32 = (0..1_440).map(|minute| predictor.expectation_at(minute * 60)).sum::<f32>()
+            / 1_440.0;
+
+        // Assert: 15分おきの標本で求めたキャッシュと、ほぼ一致する
+        let relative_error = (predictor.daily_mean - fine).abs() / fine;
+        assert!(relative_error < 0.01, "cached={} fine={fine}", predictor.daily_mean);
     }
 
     #[test]

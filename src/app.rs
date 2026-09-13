@@ -176,6 +176,8 @@ impl Surface for Pet {
         // echo(入力の可視化)は体の時間とは独立に、描画のたびに更新する。
         // 体の場は書き換えないので、ホバーし続けても体には何の影響も無い。
         self.core.tick_input(ECHO_DECAY_PER_FRAME);
+        // 世話がいつ来るかを学ぶため、時刻を知らせる(体は時計を読まない)。
+        self.core.tick_clock(crate::persistence::now_unix_seconds());
 
         // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
         self.camera

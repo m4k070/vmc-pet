@@ -16,8 +16,8 @@
 
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
-    Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, Habituation,
-    LeniaBody, Observation, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
+    Animal, AutonomousController, BodyPort, CarePredictor, CellPos, ControllerParams, FieldView,
+    Habituation, LeniaBody, Observation, Perturbation, PetMemory, Touch, TouchEcho, TouchEchoView,
 };
 
 /// 自律コントローラが働きかけたことを echo として光らせる強さ。
@@ -51,6 +51,13 @@ pub struct Pet {
     controller: AutonomousController,
     /// 同じ場所への刺激に慣れる度合い。触れられた場所ごとに覚え、次の刺激を弱める。
     habituation: Habituation,
+    /// 世話がいつ来るかを経験から学ぶ予測モデル。
+    care: CarePredictor,
+    /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。`tick_clock` で更新する。
+    /// 時計を渡されない限り 0.0 のままなので、評価やテストでは振る舞いが変わらない。
+    anticipation: f32,
+    /// 最後に知らされた時刻(Unix 秒)。クリックを予測モデルに記録するのに使う。
+    now_unix_seconds: Option<u64>,
 }
 
 impl Pet {
@@ -79,6 +86,9 @@ impl Pet {
             touching_at: None,
             controller: AutonomousController::with_params(controller_params),
             habituation: Habituation::new(width, height),
+            care: CarePredictor::new(),
+            anticipation: 0.0,
+            now_unix_seconds: None,
         };
         // 最初の1ステップより前に触られても、光が体に貼りつくようにしておく。
         // これを忘れると、最初のステップで原点が(0, 0)から重心へ跳び、
@@ -113,6 +123,7 @@ impl Pet {
         let observation = Observation {
             field: self.body.observe(),
             energy: self.body.energy(),
+            anticipation: self.anticipation,
         };
         if let Some(perturbation) = self.controller.maybe_act(observation) {
             self.body.disturb(perturbation);
@@ -169,6 +180,12 @@ impl Pet {
     /// 「これがクリックである」という判定は呼び出し側の責任。
     pub fn click(&mut self, at: CellPos) {
         self.touching_at = Some(at);
+        // 世話が来た時刻として覚える。慣れた場所へのクリックでも、ユーザーが
+        // 来たことには変わりないので数える(予測するのは「いつ来るか」であって、
+        // 世話の質ではない)。
+        if let Some(now) = self.now_unix_seconds {
+            self.care.record_touch(now);
+        }
         self.touch(Touch::Click { at });
     }
 
@@ -187,6 +204,22 @@ impl Pet {
             self.touch(Touch::Hover { at });
         }
         self.echo.decay(echo_decay);
+    }
+
+    /// いまの時刻(Unix 秒)を知らせる。描画や体のステップのたびに呼んでよい。
+    ///
+    /// `Pet` は時計を読まない(既存の方針)ので、時刻は呼び出し側が渡す。これを
+    /// 呼ぶと世話がいつ来るかの学習が進み、期待が振る舞いに現れる。呼ばなければ
+    /// 何も学ばず、期待も 0.0 のまま(docs/DESIGN.md「世話の予測」)。
+    pub fn tick_clock(&mut self, now_unix_seconds: u64) {
+        self.now_unix_seconds = Some(now_unix_seconds);
+        self.care.observe(now_unix_seconds);
+        self.anticipation = self.care.anticipation_at(now_unix_seconds);
+    }
+
+    /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。
+    pub fn anticipation(&self) -> f32 {
+        self.anticipation
     }
 
     /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
@@ -529,6 +562,91 @@ mod tests {
                 pet.mass()
             );
         }
+    }
+
+    /// 世話が来そうな時間は、弱っていても満タン時の強さで揺らす(先回り)。その
+    /// 最悪のケース —— 一日じゅう期待し続け、世話は一切来ない —— でも全生物が
+    /// 生き延びることを確かめる。
+    ///
+    /// 期待が常に 1.0 のときの揺らす強さは、`nudge_amount_when_depleted` を 1.0 に
+    /// したときと式の上で完全に一致する(controller.rs の vigour)ので、何日ぶんも
+    /// 学習させる代わりにそれで再現している。
+    #[test]
+    fn every_shipped_animal_survives_always_expecting_care_that_never_comes() {
+        let always_expecting = ControllerParams {
+            nudge_amount_when_depleted: 1.0,
+            ..ControllerParams::default()
+        };
+        for (code, name) in crate::list_animals().unwrap() {
+            // Arrange
+            let animal = crate::load_animal(&code).unwrap();
+            let mut pet = Pet::with_controller_params(animal, 32, 32, always_expecting);
+
+            // Act: 一切触らずに20000ステップ(≈22分)。エネルギーは早々に尽きる
+            let mut collapses = 0u32;
+            for _ in 0..20_000 {
+                if pet.step() {
+                    collapses += 1;
+                }
+            }
+
+            // Assert
+            assert_eq!(
+                collapses, 0,
+                "stirring a depleted {code} ({name}) at full strength collapsed it"
+            );
+            assert!(
+                pet.mass() > 40.0,
+                "{code} ({name}) must stay alive, got mass {}",
+                pet.mass()
+            );
+        }
+    }
+
+    #[test]
+    fn a_pet_without_a_clock_never_expects_care() {
+        // Arrange
+        let mut pet = orbium();
+        let at = CellPos { x: 3, y: 3 };
+
+        // Act: 時刻を知らせずに触り、体を進める
+        for _ in 0..50 {
+            pet.click(at);
+            pet.leave();
+            pet.step();
+        }
+
+        // Assert: 学びようがないので期待しない(評価・テストの振る舞いが変わらない)
+        assert_eq!(pet.anticipation(), 0.0);
+    }
+
+    #[test]
+    fn visits_at_the_same_hour_teach_the_pet_to_expect_care_then() {
+        // Arrange: 1週間、毎晩20時台に2分おきにクリックしに来る。学ぶのは時刻と
+        // クリックの関係だけで体の状態には依らないので、体を進めるのは省く
+        const DAY: u64 = 86_400;
+        let midnight = 20_000 * DAY;
+        let mut pet = orbium();
+        let at = CellPos { x: 3, y: 3 };
+
+        // Act
+        for day in 0..7 {
+            for minute in 0..1_440 {
+                pet.tick_clock(midnight + day * DAY + minute * 60);
+                if minute / 60 == 20 && minute % 2 == 0 {
+                    pet.click(at);
+                    pet.leave();
+                }
+            }
+        }
+        pet.tick_clock(midnight + 7 * DAY + 8 * 3_600 + 30 * 60);
+        let morning = pet.anticipation();
+        pet.tick_clock(midnight + 7 * DAY + 20 * 3_600 + 30 * 60);
+        let evening = pet.anticipation();
+
+        // Assert: いつもの時間には世話を期待し、そうでない時間は期待しない
+        assert!(evening > 0.5, "got evening anticipation {evening}");
+        assert_eq!(morning, 0.0);
     }
 
     /// 自律コントローラの自己摂動は `disturb` 経由でエネルギーを変えないため、

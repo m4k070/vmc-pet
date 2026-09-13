@@ -75,6 +75,9 @@ const TOUCH_POLL_INTERVAL: Duration = Duration::from_millis(40);
 /// 100000 × 256 × 30秒 ≒ 24年 もつ。詳しい理屈は persistence.rs 参照。
 const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// RTC から時刻を読んで `Pet::tick_clock` に渡す間隔。
+const CLOCK_READ_INTERVAL: Duration = Duration::from_secs(1);
+
 /// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
 /// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
 /// 減衰させる。
@@ -380,6 +383,7 @@ fn main() -> ! {
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
     let mut last_saved = Instant::now();
+    let mut last_clock_read = Instant::now();
     loop {
         if touch_ready {
             match touch.read_report() {
@@ -431,9 +435,10 @@ fn main() -> ! {
             }
             if step % 15 == 0 {
                 esp_println::println!(
-                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2}",
+                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} anticipation={:.2}",
                     pet.mass(),
-                    pet.energy()
+                    pet.energy(),
+                    pet.anticipation()
                 );
             }
         }
@@ -447,6 +452,15 @@ fn main() -> ! {
                 if let Ok(now) = clock.now_unix_seconds() {
                     store.save(pet.memory(), now);
                 }
+            }
+        }
+
+        // 世話がいつ来るかを学ぶため、時刻を知らせる。RTC は内部I²Cバスをタッチと
+        // 共有しているので、読むのは1秒に1回に抑える(学習の単位は1分なので足りる)。
+        if last_clock_read.elapsed() >= CLOCK_READ_INTERVAL {
+            last_clock_read = Instant::now();
+            if let Some(Ok(now)) = clock.as_mut().map(|clock| clock.now_unix_seconds()) {
+                pet.tick_clock(now);
             }
         }
 
