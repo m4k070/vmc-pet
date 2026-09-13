@@ -37,6 +37,8 @@
 //! 時計を読むのはプラットフォーム側で、ここは Unix 時刻を数値として受け取るだけ
 //! (`Pet` が時計を知らないという既存の方針と揃えてある)。
 
+use serde::{Deserialize, Serialize};
+
 use crate::math::{cosf, expf, sinf};
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -87,6 +89,26 @@ impl Default for CarePredictorParams {
     }
 }
 
+/// 再起動をまたいで持ち越す、学んだことの中身(`PetMemory` に含めて保存する)。
+///
+/// 生活リズムは何日もかけて覚えるものなので、これを保存しないと再起動のたびに
+/// 何も知らない個体に戻り、継続的な学習として意味をなさない。持ち越すのは重み
+/// だけで、集計途中の1分は持ち越さない(止まっていた間は見ていなかった)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CareMemory {
+    /// 予測モデルの重み(定数項と、倍音ごとの sin/cos)。
+    pub weights: [f32; FEATURES],
+}
+
+impl Default for CareMemory {
+    /// 何も学んでいない状態。定数項だけを事前確率に対応する値にしてある。
+    fn default() -> Self {
+        let mut weights = [0.0; FEATURES];
+        weights[0] = logit(PRIOR_EXPECTATION);
+        Self { weights }
+    }
+}
+
 /// 1日の平均の予測を求めるときに、1日を何点で標本化するか(15分おき)。
 const SAMPLES_PER_DAY: u64 = 96;
 
@@ -125,11 +147,9 @@ impl CarePredictor {
     }
 
     pub fn with_params(params: CarePredictorParams) -> Self {
-        let mut weights = [0.0; FEATURES];
-        weights[0] = logit(PRIOR_EXPECTATION);
         let mut predictor = Self {
             params,
-            weights,
+            weights: CareMemory::default().weights,
             daily_mean: PRIOR_EXPECTATION,
             bucket_start: None,
             touched_in_bucket: false,
@@ -197,6 +217,30 @@ impl CarePredictor {
     /// 学んだ重み。何を覚えたかを読むため、また保存するためにある。
     pub fn weights(&self) -> [f32; FEATURES] {
         self.weights
+    }
+
+    /// 持ち越すべき学んだことを取り出す(保存用)。
+    pub fn memory(&self) -> CareMemory {
+        CareMemory {
+            weights: self.weights,
+        }
+    }
+
+    /// 保存しておいた学んだことから再開する。
+    ///
+    /// 有限でない値が混ざっていたら(壊れた保存データ)、何も学んでいない状態から
+    /// 始める。NaN の重みは予測を NaN にし、期待を通じて振る舞いまで汚染するため。
+    /// 集計途中の1分は持ち越さない。
+    pub fn restore(&mut self, memory: CareMemory) {
+        let intact = memory.weights.iter().all(|weight| weight.is_finite());
+        self.weights = if intact {
+            memory.weights
+        } else {
+            CareMemory::default().weights
+        };
+        self.daily_mean = self.mean_expectation_over_day();
+        self.bucket_start = None;
+        self.touched_in_bucket = false;
     }
 
     fn start_bucket(&mut self, bucket: u64) {
@@ -508,6 +552,37 @@ mod tests {
         // Assert: 15分おきの標本で求めたキャッシュと、ほぼ一致する
         let relative_error = (predictor.daily_mean - fine).abs() / fine;
         assert!(relative_error < 0.01, "cached={} fine={fine}", predictor.daily_mean);
+    }
+
+    #[test]
+    fn a_restored_predictor_remembers_the_habit_it_learned() {
+        // Arrange: 1週間ぶんの夜の習慣を学ばせてから保存する
+        let mut learned = CarePredictor::new();
+        live(&mut learned, 7, |_| 20);
+        let memory = learned.memory();
+
+        // Act: 何も知らない個体に復元する
+        let mut reborn = CarePredictor::new();
+        reborn.restore(memory);
+
+        // Assert: 同じ予測・同じ期待を持つ
+        assert_eq!(reborn.weights(), learned.weights());
+        assert_eq!(reborn.anticipation_at(at(20, 30)), learned.anticipation_at(at(20, 30)));
+    }
+
+    #[test]
+    fn a_corrupted_memory_starts_over_instead_of_poisoning_the_predictions() {
+        // Arrange: NaN の混ざった保存データ
+        let mut weights = CareMemory::default().weights;
+        weights[3] = f32::NAN;
+
+        // Act
+        let mut predictor = CarePredictor::new();
+        predictor.restore(CareMemory { weights });
+
+        // Assert: 何も学んでいない状態から始まり、予測は確率のまま
+        assert_eq!(predictor.memory(), CareMemory::default());
+        assert!(predictor.expectation_at(at(20, 30)).is_finite());
     }
 
     #[test]

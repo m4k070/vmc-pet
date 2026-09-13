@@ -6,7 +6,7 @@
 # 中身と実際の中身が食い違う。そこで記憶用の領域を明示的に切ってある。
 #
 # `pet` は 0x1000(4KB)= フラッシュの消去単位(セクタ)ちょうど1つ。記憶は
-# 16バイトのレコードなので256区画ぶん入る(crates/vmc-pet-body/src/memory.rs
+# 44バイトのレコードなので93区画ぶん入る(crates/vmc-pet-body/src/memory.rs
 # の scan_records 参照)。
 #
 # この表は `.cargo/config.toml` の runner が `--partition-table` で渡す。

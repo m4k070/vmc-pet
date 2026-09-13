@@ -20,14 +20,30 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::care_prediction::{CareMemory, FEATURES};
+
 /// 再起動をまたいで持ち越す状態。
 ///
 /// 今後フィールドを足すときは `#[serde(default)]` を付ける。古い保存ファイルが
-/// そのまま読めるようにするため(次に足す予定のものは「慣れ」の状態)。
+/// そのまま読めるようにするため。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PetMemory {
     /// 気分状態(0.0..=1.0)。1.0 が最も元気。
     pub energy: f32,
+    /// 世話がいつ来るかについて学んだこと。これを保存するようになる前の
+    /// ファイルには無いので、無ければ何も学んでいない状態として読む。
+    #[serde(default)]
+    pub care: CareMemory,
+}
+
+impl PetMemory {
+    /// エネルギーだけを指定し、学んだことは何も無い記憶を作る。
+    pub fn with_energy(energy: f32) -> Self {
+        Self {
+            energy,
+            care: CareMemory::default(),
+        }
+    }
 }
 
 /// 保存ファイル(あるいはフラッシュ上のレコード)そのものの形。
@@ -43,13 +59,27 @@ pub struct SavedMemory {
 ///
 /// 4の倍数にしてあるのは、ESP32-S3 のフラッシュが4バイト単位でしか読み書き
 /// できないため(`esp_storage::FlashStorage::WORD_SIZE`)。
-pub const RECORD_LEN: usize = 16;
+///
+/// ```text
+/// [0..4]   目印 + 形式バージョン
+/// [4..8]   保存時刻(Unix 秒、u32)
+/// [8..12]  エネルギー(f32)
+/// [12..40] 世話の予測の重み(f32 × 7)
+/// [40..44] FNV-1a 検査値
+/// ```
+pub const RECORD_LEN: usize = 12 + 4 * FEATURES + 4;
 
 /// レコードの先頭に置く目印と形式のバージョン。
 ///
 /// 消去済みのフラッシュは全ビット1(0xFF)なので、それとは違う値でなければ
 /// 「書かれていない場所」と区別できない。
-const RECORD_MAGIC: u32 = 0x7065_7401; // "pet" + version 1
+const RECORD_MAGIC: u32 = 0x7065_7402; // "pet" + version 2
+
+/// 形式バージョン1(エネルギーだけを持つ16バイトのレコード)の目印と長さ。
+/// 学んだ重みを保存するようになる前に書かれたフラッシュから、エネルギーを
+/// 引き継ぐためだけに読む(`scan_records` 参照)。
+const LEGACY_RECORD_MAGIC: u32 = 0x7065_7401;
+const LEGACY_RECORD_LEN: usize = 16;
 
 impl SavedMemory {
     pub fn new(memory: PetMemory, saved_at_unix_seconds: u64) -> Self {
@@ -86,36 +116,71 @@ impl SavedMemory {
         // 表現できないので、u32(2106年まで)で足りる。
         record[4..8].copy_from_slice(&(self.saved_at_unix_seconds as u32).to_le_bytes());
         record[8..12].copy_from_slice(&self.memory.energy.to_le_bytes());
-        let checksum = fnv1a(&record[0..12]);
-        record[12..16].copy_from_slice(&checksum.to_le_bytes());
+        for (index, weight) in self.memory.care.weights.iter().enumerate() {
+            let at = 12 + 4 * index;
+            record[at..at + 4].copy_from_slice(&weight.to_le_bytes());
+        }
+        let body_end = RECORD_LEN - 4;
+        let checksum = fnv1a(&record[0..body_end]);
+        record[body_end..].copy_from_slice(&checksum.to_le_bytes());
         record
     }
 
     /// 固定長のバイト列から復号する。目印・検査値が合わないか、値が
     /// 範囲外なら `None`。
     pub fn decode(record: &[u8; RECORD_LEN]) -> Option<Self> {
-        if u32::from_le_bytes(record[0..4].try_into().ok()?) != RECORD_MAGIC {
+        if read_u32(record, 0) != RECORD_MAGIC {
             return None;
         }
-        if u32::from_le_bytes(record[12..16].try_into().ok()?) != fnv1a(&record[0..12]) {
+        let body_end = RECORD_LEN - 4;
+        if read_u32(record, body_end) != fnv1a(&record[0..body_end]) {
             return None;
         }
-        let saved_at_unix_seconds = u32::from_le_bytes(record[4..8].try_into().ok()?) as u64;
-        let energy = f32::from_le_bytes(record[8..12].try_into().ok()?);
+        let saved_at_unix_seconds = read_u32(record, 4) as u64;
+        let energy = read_f32(record, 8);
+        let mut weights = [0.0f32; FEATURES];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            *weight = read_f32(record, 12 + 4 * index);
+        }
         // 検査値が通っていても、意味として有り得ない値は受け取らない。
-        // NaN のエネルギーを体へ渡すと場ごと NaN に汚染される。
-        if !(0.0..=1.0).contains(&energy) {
+        // NaN のエネルギーを体へ渡すと場ごと NaN に汚染され、NaN の重みは
+        // 予測を通じて振る舞いを汚染する。
+        if !(0.0..=1.0).contains(&energy) || !weights.iter().all(|weight| weight.is_finite()) {
             return None;
         }
         Some(Self {
-            memory: PetMemory { energy },
+            memory: PetMemory {
+                energy,
+                care: CareMemory { weights },
+            },
             saved_at_unix_seconds,
         })
     }
+
+    /// 形式バージョン1(エネルギーだけ)のレコードを復号する。学んだことは
+    /// 何も無い記憶として読む。
+    fn decode_legacy(record: &[u8; LEGACY_RECORD_LEN]) -> Option<Self> {
+        if read_u32(record, 0) != LEGACY_RECORD_MAGIC || read_u32(record, 12) != fnv1a(&record[0..12]) {
+            return None;
+        }
+        let energy = read_f32(record, 8);
+        if !(0.0..=1.0).contains(&energy) {
+            return None;
+        }
+        Some(Self::new(PetMemory::with_energy(energy), read_u32(record, 4) as u64))
+    }
 }
 
-/// 消去済み(全ビット1)のレコードか。
-fn is_erased(record: &[u8; RECORD_LEN]) -> bool {
+fn read_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+fn read_f32(bytes: &[u8], at: usize) -> f32 {
+    f32::from_bits(read_u32(bytes, at))
+}
+
+/// 消去済み(全ビット1)の区画か。
+fn is_erased(record: &[u8]) -> bool {
     record.iter().all(|byte| *byte == 0xFF)
 }
 
@@ -124,15 +189,36 @@ fn is_erased(record: &[u8; RECORD_LEN]) -> bool {
 /// なぜ「1レコードを上書き」ではなく並べるのか: フラッシュは書き換えのたびに
 /// 4KBのセクタ全体を消去する必要があり、消去回数には上限(おおむね10万回)が
 /// ある。30秒ごとに保存すると1か月ほどで使い切ってしまう。一方、消去済みの
-/// 領域へは消去なしで書き込める(1→0 の一方向なので)。そこでセクタを16バイト
-/// ずつの区画に分けて順に埋め、満杯になったときだけ消去する。区画が256個
-/// あれば、消去回数は256分の1になる。
+/// 領域へは消去なしで書き込める(1→0 の一方向なので)。そこでセクタを
+/// `RECORD_LEN` バイトずつの区画に分けて順に埋め、満杯になったときだけ消去する。
+/// 4KBのセクタなら93区画で、消去回数は93分の1になる。
 ///
 /// フラッシュを触らない純粋な関数にしてあるのは、ここが一番間違えやすく、
 /// 実機でしか動かない層に埋めるとテストできなくなるため。
 ///
 /// 戻り値の2番目は次に書ける区画の番号で、区画数と等しいなら満杯(消去が要る)。
+///
+/// # 旧形式からの移行
+///
+/// 学んだ重みを保存するようになる前のフラッシュには、16バイトの旧形式の
+/// レコードが並んでいる。新しい長さで区切って読むと境界がずれて全部壊れて
+/// 見えるので、先頭が旧形式の目印なら旧形式として読み、最新のエネルギーを
+/// 引き継ぐ。そのうえで「満杯」を返し、最初の保存でセクタを消去して新形式で
+/// 書き直させる。
 pub fn scan_records(area: &[u8]) -> (Option<SavedMemory>, usize) {
+    let slots = area.len() / RECORD_LEN;
+    if area.len() >= 4 && read_u32(area, 0) == LEGACY_RECORD_MAGIC {
+        let latest = area
+            .chunks_exact(LEGACY_RECORD_LEN)
+            .take_while(|chunk| !is_erased(chunk))
+            .filter_map(|chunk| {
+                let record: &[u8; LEGACY_RECORD_LEN] = chunk.try_into().ok()?;
+                SavedMemory::decode_legacy(record)
+            })
+            .last();
+        return (latest, slots);
+    }
+
     let mut latest = None;
     let mut next_slot = 0;
     for (slot, chunk) in area.chunks_exact(RECORD_LEN).enumerate() {
@@ -168,7 +254,7 @@ mod tests {
     #[test]
     fn seconds_away_measures_the_gap_since_saving() {
         // Arrange: 1時間前に保存した記録
-        let saved = SavedMemory::new(PetMemory { energy: 1.0 }, 1_000_000);
+        let saved = SavedMemory::new(PetMemory::with_energy(1.0), 1_000_000);
 
         // Act / Assert
         assert_eq!(saved.seconds_away(1_003_600), 3600.0);
@@ -177,16 +263,82 @@ mod tests {
     #[test]
     fn a_clock_that_went_backwards_reports_no_time_away() {
         // Arrange: 保存時刻より前の「現在」を渡す(時計の巻き戻り)
-        let saved = SavedMemory::new(PetMemory { energy: 1.0 }, 1_000_000);
+        let saved = SavedMemory::new(PetMemory::with_energy(1.0), 1_000_000);
 
         // Act / Assert: 負にはせず 0 として扱う
         assert_eq!(saved.seconds_away(999_000), 0.0);
     }
 
+    /// 学んだことを持つ記憶。重みはどれも既定値と違う値にしてある。
+    fn memory_with_learning(energy: f32) -> PetMemory {
+        let mut weights = [0.0f32; FEATURES];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            *weight = -3.5 + index as f32 * 0.75;
+        }
+        PetMemory {
+            energy,
+            care: CareMemory { weights },
+        }
+    }
+
+    /// 形式バージョン1(エネルギーだけ)のレコードを、当時と同じ並びで作る。
+    fn legacy_record(energy: f32, saved_at: u32) -> [u8; LEGACY_RECORD_LEN] {
+        let mut record = [0u8; LEGACY_RECORD_LEN];
+        record[0..4].copy_from_slice(&LEGACY_RECORD_MAGIC.to_le_bytes());
+        record[4..8].copy_from_slice(&saved_at.to_le_bytes());
+        record[8..12].copy_from_slice(&energy.to_le_bytes());
+        let checksum = fnv1a(&record[0..12]);
+        record[12..16].copy_from_slice(&checksum.to_le_bytes());
+        record
+    }
+
+    #[test]
+    fn learned_weights_round_trip_through_bytes() {
+        // Arrange
+        let saved = SavedMemory::new(memory_with_learning(0.6), 1_700_000_000);
+
+        // Act
+        let decoded = SavedMemory::decode(&saved.encode()).expect("a fresh record must decode");
+
+        // Assert: 学んだ重みも1ビットも欠けずに戻る
+        assert_eq!(decoded, saved);
+    }
+
+    #[test]
+    fn a_record_with_a_non_finite_weight_is_rejected() {
+        // Arrange: 検査値まで正しい、しかし NaN の重みを持つレコード
+        let mut memory = memory_with_learning(0.6);
+        memory.care.weights[2] = f32::NAN;
+        let record = SavedMemory::new(memory, 1_700_000_000).encode();
+
+        // Act / Assert
+        assert!(SavedMemory::decode(&record).is_none());
+    }
+
+    #[test]
+    fn records_written_before_learning_existed_hand_over_their_energy() {
+        // Arrange: 旧形式のレコードが3つ並んだフラッシュ
+        let mut area = [0xFFu8; 4096];
+        for (slot, energy) in [0.9f32, 0.6, 0.3].into_iter().enumerate() {
+            let at = slot * LEGACY_RECORD_LEN;
+            area[at..at + LEGACY_RECORD_LEN].copy_from_slice(&legacy_record(energy, 1_700_000_000 + slot as u32));
+        }
+
+        // Act
+        let (latest, next_slot) = scan_records(&area);
+
+        // Assert: 最新のエネルギーを引き継ぎ、学んだことは何も無い。
+        // 次の区画は「満杯」を指し、最初の保存でセクタを消去させる
+        let latest = latest.expect("the legacy records must be read");
+        assert_eq!(latest.memory.energy, 0.3);
+        assert_eq!(latest.memory.care, CareMemory::default());
+        assert_eq!(next_slot, 4096 / RECORD_LEN);
+    }
+
     #[test]
     fn a_record_round_trips_through_bytes() {
         // Arrange
-        let saved = SavedMemory::new(PetMemory { energy: 0.42 }, 1_700_000_000);
+        let saved = SavedMemory::new(PetMemory::with_energy(0.42), 1_700_000_000);
 
         // Act
         let decoded = SavedMemory::decode(&saved.encode()).expect("a fresh record must decode");
@@ -207,7 +359,7 @@ mod tests {
     #[test]
     fn a_corrupted_record_is_rejected() {
         // Arrange: 1バイトだけ壊す(書き込み中の電源断に相当)
-        let mut record = SavedMemory::new(PetMemory { energy: 0.5 }, 1_700_000_000).encode();
+        let mut record = SavedMemory::new(PetMemory::with_energy(0.5), 1_700_000_000).encode();
         record[9] ^= 0x01;
 
         // Act / Assert: 検査値が合わないので読まない
@@ -219,7 +371,7 @@ mod tests {
         // Arrange: 検査値まで正しく作られた、しかし意味として有り得ないレコード。
         // NaN のエネルギーを体へ渡すと場ごと NaN に汚染されるため、
         // 形式の検査だけでは足りない
-        let record = SavedMemory::new(PetMemory { energy: f32::NAN }, 1_700_000_000).encode();
+        let record = SavedMemory::new(PetMemory::with_energy(f32::NAN), 1_700_000_000).encode();
 
         // Act / Assert
         assert!(SavedMemory::decode(&record).is_none());
@@ -239,7 +391,7 @@ mod tests {
         // Arrange: 3つ書かれた状態
         let mut area = [0xFFu8; RECORD_LEN * 4];
         for (slot, energy) in [0.9, 0.6, 0.3].into_iter().enumerate() {
-            let saved = SavedMemory::new(PetMemory { energy }, 1_700_000_000 + slot as u64);
+            let saved = SavedMemory::new(PetMemory::with_energy(energy), 1_700_000_000 + slot as u64);
             area[slot * RECORD_LEN..][..RECORD_LEN].copy_from_slice(&saved.encode());
         }
 
@@ -255,9 +407,9 @@ mod tests {
     fn a_broken_last_record_falls_back_to_the_one_before_it() {
         // Arrange: 最後のレコードが書き込み中に電源断で壊れた状態
         let mut area = [0xFFu8; RECORD_LEN * 4];
-        let good = SavedMemory::new(PetMemory { energy: 0.7 }, 1_700_000_000);
+        let good = SavedMemory::new(PetMemory::with_energy(0.7), 1_700_000_000);
         area[0..RECORD_LEN].copy_from_slice(&good.encode());
-        let mut broken = SavedMemory::new(PetMemory { energy: 0.2 }, 1_700_000_100).encode();
+        let mut broken = SavedMemory::new(PetMemory::with_energy(0.2), 1_700_000_100).encode();
         broken[4] ^= 0xAA;
         area[RECORD_LEN..][..RECORD_LEN].copy_from_slice(&broken);
 
@@ -274,7 +426,7 @@ mod tests {
         // Arrange: 全区画が埋まっている
         let mut area = [0xFFu8; RECORD_LEN * 3];
         for slot in 0..3 {
-            let saved = SavedMemory::new(PetMemory { energy: 0.5 }, 1_700_000_000);
+            let saved = SavedMemory::new(PetMemory::with_energy(0.5), 1_700_000_000);
             area[slot * RECORD_LEN..][..RECORD_LEN].copy_from_slice(&saved.encode());
         }
 

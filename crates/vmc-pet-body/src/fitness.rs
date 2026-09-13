@@ -166,11 +166,11 @@ pub fn cared_for_trajectory(code: &str, field_size: usize, eval_steps: u32) -> T
     let animal = crate::load_animal(code).unwrap();
     let mut pet = Pet::new(animal, field_size, field_size);
     for _ in 0..CARED_WARMUP_STEPS {
-        pet.restore(crate::PetMemory { energy: 1.0 }, 0.0);
+        pet.restore(crate::PetMemory::with_energy(1.0), 0.0);
         pet.step();
     }
     Trajectory::record_with(&mut pet, eval_steps, |pet| {
-        pet.restore(crate::PetMemory { energy: 1.0 }, 0.0);
+        pet.restore(crate::PetMemory::with_energy(1.0), 0.0);
     })
 }
 

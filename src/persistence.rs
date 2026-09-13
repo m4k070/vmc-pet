@@ -157,7 +157,7 @@ mod tests {
         // Arrange
         let path = temp_path("round-trip");
         let mut store = MemoryStore::at(path.clone());
-        let memory = PetMemory { energy: 0.42 };
+        let memory = PetMemory::with_energy(0.42);
 
         // Act
         store.save(memory);
@@ -166,6 +166,28 @@ mod tests {
         // Assert
         assert_eq!(loaded.memory, memory);
         assert!(loaded.seconds_away(now_unix_seconds()) < 5.0, "saved just now");
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_file_saved_before_learning_existed_still_loads() {
+        // Arrange: 学んだ重みを保存するようになる前の形式(エネルギーだけ)
+        let path = temp_path("before-learning");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"memory":{"energy":0.5},"saved_at_unix_seconds":1700000000}"#,
+        )
+        .unwrap();
+        let store = MemoryStore::at(path.clone());
+
+        // Act
+        let loaded = store.load().expect("a file from before learning must still load");
+
+        // Assert: エネルギーは引き継ぎ、学んだことは何も無い状態から始まる
+        assert_eq!(loaded.memory.energy, 0.5);
+        assert_eq!(loaded.memory.care, vmc_pet_body::CareMemory::default());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

@@ -70,9 +70,9 @@ const TOUCH_POLL_INTERVAL: Duration = Duration::from_millis(40);
 /// 記憶をフラッシュへ書き出す間隔。PC版(app.rs の SAVE_INTERVAL)と同じ30秒。
 ///
 /// フラッシュの消去回数の上限(おおむね10万回)に対して安全かどうかは
-/// 素朴には成り立たない。`persistence` が16バイトのレコードを256区画に
-/// 並べて消去を256回に1回へ減らしているので、30秒ごとでも
-/// 100000 × 256 × 30秒 ≒ 24年 もつ。詳しい理屈は persistence.rs 参照。
+/// 素朴には成り立たない。`persistence` が44バイトのレコードを93区画に
+/// 並べて消去を93回に1回へ減らしているので、30秒ごとでも
+/// 100000 × 93 × 30秒 ≒ 約8.8年 もつ。詳しい理屈は persistence.rs 参照。
 const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// RTC から時刻を読んで `Pet::tick_clock` に渡す間隔。

@@ -38,7 +38,7 @@ pub mod touch_echo;
 
 pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;
-pub use care_prediction::{CarePredictor, CarePredictorParams};
+pub use care_prediction::{CareMemory, CarePredictor, CarePredictorParams};
 pub use civil_time::unix_seconds_from_civil;
 pub use controller::{AutonomousController, ControllerParams, Observation};
 pub use field::{Field, FieldView};

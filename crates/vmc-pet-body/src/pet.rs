@@ -154,14 +154,19 @@ impl Pet {
     pub fn memory(&self) -> PetMemory {
         PetMemory {
             energy: self.body.energy(),
+            care: self.care.memory(),
         }
     }
 
     /// 保存されていた状態を復元し、起動していなかった時間ぶんの減衰を適用する。
     /// 起動時に一度だけ呼ぶ。`seconds_away` は呼び出し側(時計を持つ層)が求める。
+    ///
+    /// 学んだ生活リズムも復元する。止まっていた時間は忘れる理由にはしない
+    /// (見ていなかっただけで、リズムそのものが変わったわけではない)。
     pub fn restore(&mut self, memory: PetMemory, seconds_away: f32) {
         self.body.restore_energy(memory.energy);
         self.body.apply_offline_decay(seconds_away);
+        self.care.restore(memory.care);
     }
 
     /// 触れている(またはホバーしている)位置を更新するだけで、体には一切触れない。
@@ -647,6 +652,19 @@ mod tests {
         // Assert: いつもの時間には世話を期待し、そうでない時間は期待しない
         assert!(evening > 0.5, "got evening anticipation {evening}");
         assert_eq!(morning, 0.0);
+
+        // Act: 保存して、別の個体として再起動する(8時間止まっていたとする)
+        let memory = pet.memory();
+        let mut reborn = orbium();
+        reborn.restore(memory, 8.0 * 3_600.0);
+        reborn.tick_clock(midnight + 8 * DAY + 20 * 3_600 + 30 * 60);
+
+        // Assert: 再起動しても、いつもの時間を覚えている
+        let remembered = reborn.anticipation();
+        assert!(
+            remembered > 0.5,
+            "the learned rhythm must survive a restart; got {remembered}"
+        );
     }
 
     /// 自律コントローラの自己摂動は `disturb` 経由でエネルギーを変えないため、
@@ -938,7 +956,7 @@ mod tests {
         let mut pet = orbium();
 
         // Act
-        pet.restore(PetMemory { energy: 99.0 }, 0.0);
+        pet.restore(PetMemory::with_energy(99.0), 0.0);
 
         // Assert: 上限に丸められる(体の値域の不変条件は保存ファイルより強い)
         assert_eq!(pet.energy(), 1.0);
