@@ -6,7 +6,8 @@
 //! どれか1組でも 0 に近ければ、その2つは見た目では見分けられない。条件の作り方は
 //! `fitness::mood_trajectory` にある。
 
-use vmc_pet_body::fitness::{distinguishability, legibility, mood_trajectory, Mood};
+use vmc_pet_body::fitness::{distinguishability, legibility, mood_trajectory};
+use vmc_pet_body::MoodState;
 
 const FIELD_SIZE: usize = 32;
 const EVAL_STEPS: u32 = 900;
@@ -15,17 +16,22 @@ fn main() {
     println!("状態の組ごとの見分けやすさ(0に近い=見た目で見分けられない)");
     println!();
     for (code, name) in vmc_pet_body::list_animals().unwrap() {
-        let trajectories: Vec<_> = Mood::ALL
+        let trajectories: Vec<_> = MoodState::ALL
             .iter()
-            .map(|mood| (*mood, mood_trajectory(&code, FIELD_SIZE, EVAL_STEPS, *mood)))
+            .map(|state| {
+                (
+                    *state,
+                    mood_trajectory(&code, FIELD_SIZE, EVAL_STEPS, *state),
+                )
+            })
             .collect();
 
         println!("{code:6} {name}");
-        for (mood, trajectory) in &trajectories {
+        for (state, trajectory) in &trajectories {
             let signature = trajectory.signature(FIELD_SIZE, FIELD_SIZE);
             println!(
                 "  {:10} speed={:.4} mass_dev={:.4} tint={:.3}",
-                mood.label(),
+                state.label(),
                 signature.mean_speed,
                 signature.mass_deviation,
                 trajectory.mean_tint()

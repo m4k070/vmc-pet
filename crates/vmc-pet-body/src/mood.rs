@@ -19,6 +19,60 @@ use crate::{CareMemory, CarePredictor};
 /// 遅くなり、がっかりが薄れればいつものテンポに戻る。
 const DISAPPOINTED_TEMPO: f32 = 0.6;
 
+/// 見た目で見分けられるようにしたい気分の状態(docs/DESIGN.md「元気/待っている/がっかり」)。
+///
+/// 評価(`fitness::mood_trajectory`)と、見た目を確かめるためのプレビュー(PC の
+/// `--preview-mood`、M5Stack の `VMC_PET_PREVIEW_MOOD`)で共有する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoodState {
+    /// 世話され続けていて元気。世話を期待してもいない。
+    Lively,
+    /// いつもの時間なので世話を待っている。
+    Waiting,
+    /// いつもの時間に来てもらえずがっかりしている。
+    Disappointed,
+}
+
+impl MoodState {
+    pub const ALL: [MoodState; 3] = [
+        MoodState::Lively,
+        MoodState::Waiting,
+        MoodState::Disappointed,
+    ];
+
+    /// 人に見せる名前。
+    pub fn label(self) -> &'static str {
+        match self {
+            MoodState::Lively => "元気",
+            MoodState::Waiting => "待っている",
+            MoodState::Disappointed => "がっかり",
+        }
+    }
+
+    /// コマンドラインやビルド時の指定に使う名前。
+    pub fn name(self) -> &'static str {
+        match self {
+            MoodState::Lively => "lively",
+            MoodState::Waiting => "waiting",
+            MoodState::Disappointed => "disappointed",
+        }
+    }
+
+    /// `name` で指定された状態。知らない名前なら `None`。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|state| state.name() == name)
+    }
+
+    /// この状態に固定するときの期待とがっかり。
+    pub fn anticipation_and_disappointment(self) -> (f32, f32) {
+        match self {
+            MoodState::Lively => (0.0, 0.0),
+            MoodState::Waiting => (1.0, 0.0),
+            MoodState::Disappointed => (0.0, 1.0),
+        }
+    }
+}
+
 /// 気分。
 #[derive(Debug, Clone)]
 pub struct Mood {
@@ -30,6 +84,8 @@ pub struct Mood {
     /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
     /// `tick_clock` で更新する。時計を渡されない限り 0.0 のまま。
     disappointment: f32,
+    /// 期待とがっかりが固定されているか(`pin`)。固定中は `tick_clock` で変わらない。
+    pinned: bool,
     /// 最後に知らされた時刻(Unix 秒)。世話が来たことを予測モデルに記録するのに使う。
     now_unix_seconds: Option<u64>,
 }
@@ -40,14 +96,19 @@ impl Mood {
             care: CarePredictor::new(),
             anticipation: 0.0,
             disappointment: 0.0,
+            pinned: false,
             now_unix_seconds: None,
         }
     }
 
-    /// いまの時刻(Unix 秒)を知らせる。学習が進み、期待とがっかりが更新される。
+    /// いまの時刻(Unix 秒)を知らせる。学習が進み、期待とがっかりが更新される
+    /// (固定されていれば、学習だけが進み値は変わらない)。
     pub fn tick_clock(&mut self, now_unix_seconds: u64) {
         self.now_unix_seconds = Some(now_unix_seconds);
         self.care.observe(now_unix_seconds);
+        if self.pinned {
+            return;
+        }
         self.anticipation = self.care.anticipation_at(now_unix_seconds);
         self.disappointment = self.care.disappointment();
     }
@@ -92,11 +153,11 @@ impl Mood {
         self.care.restore(memory);
     }
 
-    /// 評価専用: 時計を渡さずに、期待とがっかりを固定する(`Pet::set_mood_for_evaluation`)。
-    #[cfg(feature = "std")]
-    pub(crate) fn set_for_evaluation(&mut self, anticipation: f32, disappointment: f32) {
-        self.anticipation = anticipation;
-        self.disappointment = disappointment;
+    /// 期待とがっかりを固定する(`Pet::pin_mood` 参照)。何度呼んでもよく、最後の値が残る。
+    pub fn pin(&mut self, anticipation: f32, disappointment: f32) {
+        self.pinned = true;
+        self.anticipation = anticipation.clamp(0.0, 1.0);
+        self.disappointment = disappointment.clamp(0.0, 1.0);
     }
 }
 
@@ -127,9 +188,9 @@ mod tests {
         let mut mood = Mood::new();
 
         // Act / Assert: がっかりしきると×0.6、半分なら×0.8
-        mood.set_for_evaluation(0.0, 1.0);
+        mood.pin(0.0, 1.0);
         assert!((mood.tempo() - 0.6).abs() < 1e-6, "got {}", mood.tempo());
-        mood.set_for_evaluation(0.0, 0.5);
+        mood.pin(0.0, 0.5);
         assert!((mood.tempo() - 0.8).abs() < 1e-6, "got {}", mood.tempo());
     }
 
@@ -139,10 +200,37 @@ mod tests {
         let mut mood = Mood::new();
 
         // Act
-        mood.set_for_evaluation(0.7, 0.0);
+        mood.pin(0.7, 0.0);
 
         // Assert
         assert_eq!(mood.pigment_stimulus(), 0.7);
+    }
+
+    #[test]
+    fn a_pinned_mood_is_not_overwritten_by_the_clock() {
+        // Arrange: 待っている状態に固定する
+        let mut mood = Mood::new();
+        let (anticipation, disappointment) = MoodState::Waiting.anticipation_and_disappointment();
+        mood.pin(anticipation, disappointment);
+
+        // Act: 何も学んでいない個体に時刻が来る(本来なら期待は 0 に戻る)
+        let noon = 20_000 * 86_400 + 12 * 3_600;
+        for minute in 0..10 {
+            mood.tick_clock(noon + minute * 60);
+        }
+
+        // Assert
+        assert_eq!(mood.anticipation(), 1.0);
+        assert_eq!(mood.disappointment(), 0.0);
+    }
+
+    #[test]
+    fn every_state_can_be_named_and_found_again() {
+        // Arrange / Act / Assert
+        for state in MoodState::ALL {
+            assert_eq!(MoodState::from_name(state.name()), Some(state));
+        }
+        assert_eq!(MoodState::from_name("sleepy"), None);
     }
 
     #[test]

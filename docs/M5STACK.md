@@ -758,6 +758,27 @@ until [ -e /dev/ttyACM0 ]; do sleep 0.2; done; sleep 1; espflash monitor --port 
 学習した生活リズムが実機で意味を持つ(期待が0より大きくなる)には、同じ時間帯に
 何日か触り続ける必要がある。シリアルの `anticipation=` で見られる。
 
+### 気分を固定したプレビュー用ファームウェア
+
+色づき(待っている)や遅いテンポ(がっかり)は、生活リズムを何日か覚えさせてからで
+ないと現れない。見た目を確かめたり調整したりするために、ビルド時の環境変数で気分を
+固定したファームウェアを作れる(設計の理由は docs/DESIGN.md「学習を待たずに見た目を
+確かめる」)。
+
+```
+cd m5stack-cores3
+source ~/export-esp.sh
+VMC_PET_PREVIEW_MOOD=waiting cargo run --release        # lively / waiting / disappointed
+```
+
+起動時のシリアルに `previewing the waiting mood; memory is neither loaded nor saved`
+と出る。知らない名前を指定すると、そう表示したうえで通常どおり動く。
+
+**プレビュー中は記憶(フラッシュ)を読みも書きもしない。** 本物のペットが覚えた
+生活リズムとエネルギーを上書きしないため。ただしプレビューで動いている間は、実機での
+学習も保存も止まる。**見終わったら、環境変数を付けずに書き込み直す**(`cargo run
+--release`)。書き込み直せば、プレビュー前に保存されていた記憶から続きが始まる。
+
 ## 未確定・要相談事項
 
 - 常時給電か、バッテリー動作を考慮するか(記憶の持ち越しは常時給電でも

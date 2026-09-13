@@ -223,40 +223,21 @@ pub fn neglected_trajectory(code: &str, field_size: usize, eval_steps: u32) -> T
     Trajectory::record(&mut pet, eval_steps)
 }
 
-/// 見た目で見分けられるようにしたい内部状態(docs/DESIGN.md「元気/待っている/がっかり」)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mood {
-    /// 世話され続けていて元気。世話を期待してもいない。
-    Lively,
-    /// 放置されて弱っているが、いつもの時間なので世話を待っている。
-    Waiting,
-    /// 放置されて弱っていて、いつもの時間に来てもらえずがっかりしている。
-    Disappointed,
-}
-
-impl Mood {
-    pub const ALL: [Mood; 3] = [Mood::Lively, Mood::Waiting, Mood::Disappointed];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Mood::Lively => "元気",
-            Mood::Waiting => "待っている",
-            Mood::Disappointed => "がっかり",
-        }
-    }
-}
-
 /// その状態にある個体の軌跡。
 ///
 /// 元気は `cared_for_trajectory` と同じ条件。待っている・がっかりは、放置して自然に
 /// エネルギーを尽きさせる(`neglected_trajectory` と同じ)うえで、期待とがっかりを
-/// 最初から固定する。何日も学習させて作らないのは、遅いうえにクリックが場を乱すため。
-pub fn mood_trajectory(code: &str, field_size: usize, eval_steps: u32, mood: Mood) -> Trajectory {
-    let (anticipation, disappointment) = match mood {
-        Mood::Lively => return cared_for_trajectory(code, field_size, eval_steps),
-        Mood::Waiting => (1.0, 0.0),
-        Mood::Disappointed => (0.0, 1.0),
-    };
+/// 固定する。何日も学習させて作らないのは、遅いうえにクリックが場を乱すため。
+pub fn mood_trajectory(
+    code: &str,
+    field_size: usize,
+    eval_steps: u32,
+    state: crate::MoodState,
+) -> Trajectory {
+    if state == crate::MoodState::Lively {
+        return cared_for_trajectory(code, field_size, eval_steps);
+    }
+    let (anticipation, disappointment) = state.anticipation_and_disappointment();
     let animal = crate::load_animal(code).unwrap();
     let mut pet = Pet::new(animal, field_size, field_size);
     // 実際の生活に合わせ、エネルギーが自然に尽きてから気分を徐々に変える。
@@ -264,7 +245,7 @@ pub fn mood_trajectory(code: &str, field_size: usize, eval_steps: u32, mood: Moo
     // 避けるため(体側の表情の軸を振り分けた計測と同じ条件の作り方)。
     for step in 0..NEGLECTED_WARMUP_STEPS {
         let onset = (step.saturating_sub(MOOD_ONSET_STEP) as f32 / MOOD_RAMP_STEPS as f32).min(1.0);
-        pet.set_mood_for_evaluation(anticipation * onset, disappointment * onset);
+        pet.pin_mood(anticipation * onset, disappointment * onset);
         pet.step();
     }
     Trajectory::record(&mut pet, eval_steps)

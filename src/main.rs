@@ -11,8 +11,11 @@ use shell::{LayerWindow, LayerWindowConfig};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let animal_code = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE) {
-        Ok(cli::Action::Run { animal_code }) => animal_code,
+    let (animal_code, preview) = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE) {
+        Ok(cli::Action::Run {
+            animal_code,
+            preview,
+        }) => (animal_code, preview),
         Ok(cli::Action::Help) => {
             print!("{}", cli::USAGE);
             return;
@@ -34,7 +37,11 @@ fn main() {
         }
     };
 
-    let pet = match Pet::new(&animal_code) {
+    let pet = match preview {
+        Some(state) => Pet::preview(&animal_code, state),
+        None => Pet::new(&animal_code),
+    };
+    let pet = match pet {
         Ok(pet) => pet,
         Err(error) => {
             eprintln!("vmc-pet: {error}");

@@ -50,7 +50,7 @@ pub use habituation::Habituation;
 pub use lenia::Lenia;
 pub use lenia_body::LeniaBody;
 pub use memory::{scan_records, PetMemory, SavedMemory, RECORD_LEN};
-pub use mood::Mood;
+pub use mood::{Mood, MoodState};
 pub use perturbation::{accumulate_into, CellPos, Perturbation};
 pub use pet::Pet;
 pub use pigment::{Pigment, PigmentView};

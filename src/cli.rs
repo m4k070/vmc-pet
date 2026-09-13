@@ -4,13 +4,16 @@
 //! (main.rs)を分けることで、引数解釈そのものを OS から独立してテストできる
 //! ようにする。
 
-use vmc_pet_body::list_animals;
+use vmc_pet_body::{list_animals, MoodState};
 
 /// 引数解釈の結果、main が実際に行うべきこと。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// ペットを起動する。
-    Run { animal_code: String },
+    /// ペットを起動する。`preview` があれば、その気分に固定したプレビューとして起動する。
+    Run {
+        animal_code: String,
+        preview: Option<MoodState>,
+    },
     /// 選べる生物の一覧を表示して終了する。
     ListAnimals,
     /// 使い方を表示して終了する。
@@ -22,6 +25,7 @@ pub enum Action {
 pub enum ArgsError {
     UnknownFlag(String),
     MissingValue(&'static str),
+    UnknownMood(String),
 }
 
 impl std::fmt::Display for ArgsError {
@@ -29,8 +33,21 @@ impl std::fmt::Display for ArgsError {
         match self {
             Self::UnknownFlag(flag) => write!(f, "unknown option: {flag}"),
             Self::MissingValue(flag) => write!(f, "{flag} requires a value"),
+            Self::UnknownMood(value) => {
+                let names: Vec<&str> = MoodState::ALL.iter().map(|state| state.name()).collect();
+                write!(
+                    f,
+                    "unknown mood for --preview-mood: {value} (expected one of: {})",
+                    names.join(", ")
+                )
+            }
         }
     }
+}
+
+/// `--preview-mood` の値を気分の状態として読む。
+fn parse_mood(value: &str) -> Result<MoodState, ArgsError> {
+    MoodState::from_name(value).ok_or_else(|| ArgsError::UnknownMood(value.to_string()))
 }
 
 impl std::error::Error for ArgsError {}
@@ -38,6 +55,7 @@ impl std::error::Error for ArgsError {}
 /// プログラム名を含まない引数列を解釈する。
 pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsError> {
     let mut animal_code = default_animal_code.to_string();
+    let mut preview = None;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -56,10 +74,24 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             animal_code = value.to_string();
             continue;
         }
+        if arg == "--preview-mood" {
+            let value = iter
+                .next()
+                .ok_or(ArgsError::MissingValue("--preview-mood"))?;
+            preview = Some(parse_mood(value)?);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--preview-mood=") {
+            preview = Some(parse_mood(value)?);
+            continue;
+        }
         return Err(ArgsError::UnknownFlag(arg.clone()));
     }
 
-    Ok(Action::Run { animal_code })
+    Ok(Action::Run {
+        animal_code,
+        preview,
+    })
 }
 
 /// `--help` で表示する使い方。
@@ -69,6 +101,8 @@ vmc-pet [オプション]
 オプション:
   --animal <code>    起動時に使う生物を指定する(デフォルト: O2u)
   --list-animals     選べる生物の一覧を表示して終了する
+  --preview-mood <lively|waiting|disappointed>
+                     気分を固定して、その見た目を確かめる(記憶は読みも書きもしない)
   -h, --help         このメッセージを表示して終了する
 ";
 
@@ -99,7 +133,8 @@ mod tests {
         assert_eq!(
             action,
             Action::Run {
-                animal_code: "O2u".to_string()
+                animal_code: "O2u".to_string(),
+                preview: None,
             }
         );
     }
@@ -113,7 +148,8 @@ mod tests {
         assert_eq!(
             action,
             Action::Run {
-                animal_code: "OG2g".to_string()
+                animal_code: "OG2g".to_string(),
+                preview: None,
             }
         );
     }
@@ -127,7 +163,8 @@ mod tests {
         assert_eq!(
             action,
             Action::Run {
-                animal_code: "OG2g".to_string()
+                animal_code: "OG2g".to_string(),
+                preview: None,
             }
         );
     }
@@ -159,6 +196,38 @@ mod tests {
 
         // Assert
         assert_eq!(result, Err(ArgsError::MissingValue("--animal")));
+    }
+
+    #[test]
+    fn preview_mood_flag_selects_a_pinned_mood() {
+        // Arrange / Act
+        let separate = parse(&args(&["--preview-mood", "waiting"]), "O2u").unwrap();
+        let joined = parse(&args(&["--preview-mood=disappointed"]), "O2u").unwrap();
+
+        // Assert
+        assert_eq!(
+            separate,
+            Action::Run {
+                animal_code: "O2u".to_string(),
+                preview: Some(MoodState::Waiting),
+            }
+        );
+        assert_eq!(
+            joined,
+            Action::Run {
+                animal_code: "O2u".to_string(),
+                preview: Some(MoodState::Disappointed),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_preview_mood_is_reported() {
+        // Arrange / Act
+        let result = parse(&args(&["--preview-mood", "sleepy"]), "O2u");
+
+        // Assert
+        assert_eq!(result, Err(ArgsError::UnknownMood("sleepy".to_string())));
     }
 
     #[test]

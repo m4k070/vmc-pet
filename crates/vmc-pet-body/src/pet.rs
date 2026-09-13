@@ -240,16 +240,19 @@ impl Pet {
         self.mood.disappointment()
     }
 
-    /// 評価専用: 時計を渡さずに、期待とがっかりを固定する。
+    /// 期待とがっかりを固定する。固定した後は `tick_clock` が来ても値が変わらない
+    /// (学習そのものは続く)。
     ///
-    /// 「元気/待っている/がっかり」を見た目で見分けられるかを測るとき、何日ぶんも
-    /// 学習させて条件を作るのは遅いうえ、クリックが場を乱してコントローラの貢献と
-    /// 区別がつかなくなる(エネルギーを固定して条件を作るのと同じ理由)。
-    /// `tick_clock` を呼ばない限り、この値が保たれる。評価モジュール(std のみ)
-    /// からだけ使うので、M5Stack のバイナリには含まれない。
-    #[cfg(feature = "std")]
-    pub(crate) fn set_mood_for_evaluation(&mut self, anticipation: f32, disappointment: f32) {
-        self.mood.set_for_evaluation(anticipation, disappointment);
+    /// 用途は2つある。
+    ///
+    /// - **評価**(`fitness::mood_trajectory`): 「元気/待っている/がっかり」を見た目で
+    ///   見分けられるかを測るとき、何日ぶんも学習させて条件を作るのは遅いうえ、
+    ///   クリックが場を乱してコントローラの貢献と区別がつかなくなる(エネルギーを
+    ///   固定して条件を作るのと同じ理由)
+    /// - **プレビュー**(PC の `--preview-mood`、M5Stack の `VMC_PET_PREVIEW_MOOD`):
+    ///   生活リズムを覚えるのを何日も待たずに、その気分の見た目を確かめる
+    pub fn pin_mood(&mut self, anticipation: f32, disappointment: f32) {
+        self.mood.pin(anticipation, disappointment);
     }
 
     /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
@@ -742,7 +745,7 @@ mod tests {
     fn a_pet_waiting_for_care_flushes_and_a_lively_one_does_not() {
         // Arrange
         let mut waiting = orbium();
-        waiting.set_mood_for_evaluation(1.0, 0.0);
+        waiting.pin_mood(1.0, 0.0);
         let mut lively = orbium();
 
         // Act: 1分ぶん進める
@@ -765,7 +768,7 @@ mod tests {
         // Arrange: 期待で揺らす強さが上がるぶんは、同じ強さを直接設定した個体と揃える。
         // 違いは色素が溜まっているかどうかだけになる
         let mut flushed = orbium();
-        flushed.set_mood_for_evaluation(1.0, 0.0);
+        flushed.pin_mood(1.0, 0.0);
         let same_stirring = ControllerParams {
             nudge_amount_when_depleted: 1.0,
             ..ControllerParams::default()
@@ -803,7 +806,7 @@ mod tests {
             let mut collapses = 0u32;
             for step in 0..3_000u32 {
                 let disappointment = (step.saturating_sub(2_250) as f32 / 750.0).min(1.0);
-                pet.set_mood_for_evaluation(0.0, disappointment);
+                pet.pin_mood(0.0, disappointment);
                 if pet.step() {
                     collapses += 1;
                 }

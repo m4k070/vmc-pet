@@ -73,6 +73,21 @@ impl Pet {
         Self::with_memory_store(code, MemoryStore::new())
     }
 
+    /// 気分を固定したプレビューとして起動する(`--preview-mood`)。
+    ///
+    /// 記憶は読みも書きもしない。プレビューの個体が保存すると、本物のペットが覚えた
+    /// 生活リズムとエネルギーを上書きしてしまうため。新品の個体で始まる。
+    pub fn preview(code: &str, state: vmc_pet_body::MoodState) -> Result<Self, PetError> {
+        let mut pet = Self::with_memory_store(code, MemoryStore::disabled())?;
+        let (anticipation, disappointment) = state.anticipation_and_disappointment();
+        pet.core.pin_mood(anticipation, disappointment);
+        eprintln!(
+            "vmc-pet: previewing the {} mood; memory is neither loaded nor saved",
+            state.name()
+        );
+        Ok(pet)
+    }
+
     /// 記憶の読み書き役を明示して作る。テストは
     /// `MemoryStore::disabled()` を渡し、実行環境に既にある保存ファイルに
     /// 左右されないようにする。

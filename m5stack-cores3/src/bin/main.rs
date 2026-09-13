@@ -80,6 +80,14 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 /// RTC から時刻を読んで `Pet::tick_clock` に渡す間隔。
 const CLOCK_READ_INTERVAL: Duration = Duration::from_secs(1);
 
+/// 気分を固定したプレビュー用ファームウェアにするときの指定(ビルド時の環境変数)。
+///
+/// `VMC_PET_PREVIEW_MOOD=waiting cargo run --release` のように書き込むと、生活リズムを
+/// 覚えるのを待たずに、その気分(lively / waiting / disappointed)の見た目を確かめられる。
+/// プレビュー中は記憶(フラッシュ)を読みも書きもしない。本物のペットが覚えた生活
+/// リズムとエネルギーを上書きしないため。見終わったら指定なしで書き込み直す。
+const PREVIEW_MOOD: Option<&str> = option_env!("VMC_PET_PREVIEW_MOOD");
+
 /// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
 /// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
 /// 減衰させる。
@@ -322,18 +330,37 @@ fn main() -> ! {
     };
 
     // 記憶の置き場所(フラッシュの `pet` パーティション)。
-    let mut memory_store = match MemoryStore::new(peripherals.FLASH) {
-        Ok(store) => {
-            esp_println::println!(
-                "vmc-pet-cores3: memory store ready; {}/{} slots used",
-                store.used_slots(),
-                store.slots()
-            );
-            Some(store)
-        }
-        Err(error) => {
-            esp_println::println!("vmc-pet-cores3: memory unavailable ({error:?}); starting fresh");
-            None
+    let preview = PREVIEW_MOOD.and_then(vmc_pet_body::MoodState::from_name);
+    if let (Some(name), None) = (PREVIEW_MOOD, preview) {
+        esp_println::println!(
+            "vmc-pet-cores3: unknown VMC_PET_PREVIEW_MOOD={name} \
+             (expected lively, waiting or disappointed); running normally"
+        );
+    }
+    // プレビュー中は記憶の置き場所を作らない。復元も保存も、置き場所があるときだけ
+    // 行う作りなので、これだけで本物のペットの記憶に一切触れなくなる。
+    let mut memory_store = if let Some(state) = preview {
+        esp_println::println!(
+            "vmc-pet-cores3: previewing the {} mood; memory is neither loaded nor saved",
+            state.name()
+        );
+        None
+    } else {
+        match MemoryStore::new(peripherals.FLASH) {
+            Ok(store) => {
+                esp_println::println!(
+                    "vmc-pet-cores3: memory store ready; {}/{} slots used",
+                    store.used_slots(),
+                    store.slots()
+                );
+                Some(store)
+            }
+            Err(error) => {
+                esp_println::println!(
+                    "vmc-pet-cores3: memory unavailable ({error:?}); starting fresh"
+                );
+                None
+            }
         }
     };
 
@@ -347,6 +374,10 @@ fn main() -> ! {
     );
 
     let mut pet = Pet::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+    if let Some(state) = preview {
+        let (anticipation, disappointment) = state.anticipation_and_disappointment();
+        pet.pin_mood(anticipation, disappointment);
+    }
 
     // 前回の続きから始める。時計が無い・記憶が無い・時計が巻き戻っている
     // のいずれでも、単に「新品として始まる」だけで先へ進む。
