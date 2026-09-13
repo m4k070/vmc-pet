@@ -8,27 +8,11 @@
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
 use crate::render::TouchEchoView;
+use vmc_pet_body::appearance::{appearance_of, DOT_GAP_RATIO};
 use vmc_pet_body::{CellPos, FieldView, PigmentView};
-
-/// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合。
-const DOT_GAP_RATIO: f32 = 0.18;
-
-/// これ以下の値のセルは描画しない(ほぼ透明なドットを描く無駄を省く)。
-const MIN_VISIBLE_VALUE: f32 = 0.004;
 
 /// 円の縁をぼかす幅(ピクセル)。ジャギーを消すために使う。
 const EDGE_FEATHER_PIXELS: f32 = 0.5;
-
-/// 体そのものの色(ティール)。
-const BODY_COLOR: (f32, f32, f32) = (0.35, 0.85, 0.80);
-
-/// 入力の echo の色(暖色の白)。体の色とはっきり区別がつくよう、あえて系統を変える。
-/// 「これは体の状態ではなく、触れた跡だ」と読み取れることを狙う。
-const ECHO_COLOR: (f32, f32, f32) = (1.0, 0.92, 0.70);
-
-/// 体に付く色素の色(珊瑚色)。世話を待っているときに体がこの色へ寄る。
-/// 体のティールとも echo の暖色の白とも区別がつく系統にしてある。
-const PIGMENT_COLOR: (f32, f32, f32) = (1.0, 0.55, 0.45);
 
 const BYTES_PER_PIXEL: usize = 4;
 
@@ -199,23 +183,18 @@ impl DotGrid {
                         row,
                     )
                 });
-                let visibility = body_value.max(echo_value);
-                if visibility <= MIN_VISIBLE_VALUE {
+                // 1セルの見え方(大きさ・色)は M5Stack版と共有する決まりに従う
+                // (`vmc_pet_body::appearance`)。ここが持つのはドットの配置だけ。
+                let Some(appearance) = appearance_of(body_value, echo_value, tint) else {
                     continue;
-                }
-                // echo が占める割合。体だけなら 0、echo だけなら 1 になる
-                let echo_mix = (echo_value / visibility).clamp(0.0, 1.0);
-                // 面積が値に比例するよう半径は sqrt をとる
+                };
+                let color = appearance.color;
                 let dot = Dot {
                     center_x: bounds.x as f32 + (column as f32 + 0.5 - shift.0) * cell_size,
                     center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
-                    radius: max_radius * visibility.sqrt(),
-                    value: visibility,
-                    color: lerp_color(
-                        lerp_color(BODY_COLOR, PIGMENT_COLOR, tint.clamp(0.0, 1.0)),
-                        ECHO_COLOR,
-                        echo_mix,
-                    ),
+                    radius: max_radius * appearance.size,
+                    value: appearance.opacity,
+                    color: (color.red, color.green, color.blue),
                 };
                 draw_dot(canvas, width, height, bounds, dot);
             }
@@ -298,12 +277,6 @@ fn draw_dot(canvas: &mut [u8], width: u32, height: u32, bounds: GridBounds, dot:
             canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
         }
     }
-}
-
-/// 2色を `t`(0.0〜1.0)で線形補間する。
-fn lerp_color(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
-    let lerp = |x: f32, y: f32| x + (y - x) * t;
-    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
 }
 
 /// 0.0〜1.0 の色とアルファを premultiplied ARGB8888 の1ピクセル分に変換する。

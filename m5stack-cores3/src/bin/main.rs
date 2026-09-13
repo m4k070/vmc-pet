@@ -53,6 +53,8 @@ use embedded_hal_bus::i2c::RefCellDevice;
 use vmc_pet_body::{Camera, CellPos, FieldView, Pet, PigmentView, TouchEchoView, load_animal};
 use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
 
+use vmc_pet_body::appearance::{Color, DOT_GAP_RATIO, appearance_of};
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// 場の解像度。縦は PC版と同じ 32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
@@ -83,37 +85,20 @@ const CLOCK_READ_INTERVAL: Duration = Duration::from_secs(1);
 /// 減衰させる。
 const ECHO_DECAY_PER_POLL: f32 = 0.90;
 
-/// ドット同士が接触しないよう、セル幅に対して空ける隙間の割合(dot_grid.rsと同じ)。
-const DOT_GAP_RATIO: f32 = 0.18;
-
-/// これ以下の値のセルは描画しない(dot_grid.rs の MIN_VISIBLE_VALUE と同じ)。
-const MIN_VISIBLE_VALUE: f32 = 0.004;
-
 /// 背景色。前フレームのドットを「消す」ときもこの色で塗る。
 const BACKGROUND_COLOR: Rgb565 = Rgb565::BLACK;
 
-/// 体の色(ティール)。PC版の BODY_COLOR と同じ狙い。
-const BODY_COLOR: Rgb565 = Rgb565::new(9, 43, 20);
-
-/// 入力 echo の色(暖色の白)。PC版の ECHO_COLOR と同じ狙いで、体の色とはっきり
-/// 区別がつくようにしてある。
-const ECHO_COLOR: Rgb565 = Rgb565::new(31, 58, 22);
-
-/// 体に付く色素の色(珊瑚色)。世話を待っているときに体がこの色へ寄る。
-/// PC版の PIGMENT_COLOR と同じ狙いで、体のティールとも echo の暖色の白とも
-/// 区別がつく系統にしてある。
-const PIGMENT_COLOR: Rgb565 = Rgb565::new(31, 31, 12);
-
-fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t) as u8
-}
-
-/// 2色を `t`(0.0〜1.0)で線形補間する(dot_grid.rs の lerp_color と同じ)。
-fn lerp_color(a: Rgb565, b: Rgb565, t: f32) -> Rgb565 {
+/// 共有の色(0.0..=1.0)を RGB565 に写す。
+///
+/// 以前は色ごとに RGB565 の値を手で書いていて、体の色が PC版より約2割暗く、
+/// 色素の色も少しずれていた(`vmc_pet_body::appearance` 参照)。色の定義と混ぜ方は
+/// PC版と共有し、ここは変換だけを持つ。
+fn to_rgb565(color: Color) -> Rgb565 {
+    let channel = |value: f32, levels: f32| (value.clamp(0.0, 1.0) * levels + 0.5) as u8;
     Rgb565::new(
-        lerp_channel(a.r(), b.r(), t),
-        lerp_channel(a.g(), b.g(), t),
-        lerp_channel(a.b(), b.b(), t),
+        channel(color.red, 31.0),
+        channel(color.green, 63.0),
+        channel(color.blue, 31.0),
     )
 }
 
@@ -202,25 +187,23 @@ impl DotRenderer {
                     ((row as i32 + cell_origin_y).rem_euclid(FIELD_HEIGHT as i32)) as usize;
                 let body_value = field.get(field_x, field_y);
                 let echo_value = echo.get(field_x, field_y);
-                // 体と echo の値のうち大きい方でドットの大きさを決める
-                // (dot_grid.rs と同じ考え方)。
-                let visibility = body_value.max(echo_value);
+                // 1セルの見え方(大きさ・色)は PC版と共有する決まりに従う
+                // (`vmc_pet_body::appearance`)。ここが持つのは RGB565 への変換と
+                // ドットの配置だけ。
+                let tint = pigment.get(field_x, field_y);
+                let appearance = appearance_of(body_value, echo_value, tint);
                 let index = row * FIELD_WIDTH + column;
-                if visibility <= MIN_VISIBLE_VALUE && self.previous_radius[index] == 0 {
+                if appearance.is_none() && self.previous_radius[index] == 0 {
                     continue;
                 }
-                let radius = (self.max_radius * libm::sqrtf(visibility)) as u32;
-                // echo が占める割合。体だけなら 0、echo だけなら 1 になる。
-                let echo_mix = if visibility > 0.0 {
-                    (echo_value / visibility).clamp(0.0, 1.0)
-                } else {
-                    0.0
+                // 見えなくなったセルは半径 0 として、前回描いたドットを消すだけにする
+                let (radius, color) = match appearance {
+                    Some(appearance) => (
+                        (self.max_radius * appearance.size) as u32,
+                        to_rgb565(appearance.color),
+                    ),
+                    None => (0, BACKGROUND_COLOR),
                 };
-                // 体の色は色素の濃さに応じて珊瑚色へ寄り、その上に echo を混ぜる。
-                // 色素はドットの大きさ(見えるかどうか)を変えない。
-                let tint = pigment.get(field_x, field_y).clamp(0.0, 1.0);
-                let body_color = lerp_color(BODY_COLOR, PIGMENT_COLOR, tint);
-                let color = lerp_color(body_color, ECHO_COLOR, echo_mix);
 
                 // 場のセルから画面座標への変換は、選ぶセル(cell_origin)と
                 // 画面上の位置(shift)を別々にずらす。これにより、生物の実際の

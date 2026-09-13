@@ -20,6 +20,7 @@ mod body_frame;
 mod math;
 
 pub mod animal;
+pub mod appearance;
 pub mod camera;
 pub mod care_prediction;
 pub mod civil_time;
