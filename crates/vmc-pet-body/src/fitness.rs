@@ -125,24 +125,129 @@ impl Trajectory {
     /// 平均。「滑空しているか、その場に留まっているか」の目安になる。
     /// 場が空だった区間(重心が定義できない)はスキップする。
     fn mean_step_displacement(&self, field_width: usize, field_height: usize) -> f32 {
+        let displacements: Vec<(f32, f32)> = self
+            .step_displacements(field_width, field_height)
+            .into_iter()
+            .flatten()
+            .collect();
+        if displacements.is_empty() {
+            return 0.0;
+        }
+        let total: f32 = displacements
+            .iter()
+            .map(|(dx, dy)| crate::math::sqrtf(dx * dx + dy * dy))
+            .sum();
+        total / displacements.len() as f32
+    }
+
+    /// 各ステップの重心の移動(トーラス上の符号付き最短距離)。前後どちらかの
+    /// ステップで場が空だった(重心が定義できない)ところは `None`。
+    fn step_displacements(
+        &self,
+        field_width: usize,
+        field_height: usize,
+    ) -> Vec<Option<(f32, f32)>> {
         let width = field_width as f32;
         let height = field_height as f32;
-        let mut total = 0.0f32;
-        let mut count = 0u32;
-        for pair in self.centroids.windows(2) {
-            let (Some(a), Some(b)) = (pair[0], pair[1]) else {
-                continue;
-            };
-            let dx = toroidal_signed_offset(b.0 - a.0, width);
-            let dy = toroidal_signed_offset(b.1 - a.1, height);
-            total += crate::math::sqrtf(dx * dx + dy * dy);
-            count += 1;
+        self.centroids
+            .windows(2)
+            .map(|pair| {
+                let (Some(a), Some(b)) = (pair[0], pair[1]) else {
+                    return None;
+                };
+                let dx = toroidal_signed_offset(b.0 - a.0, width);
+                let dy = toroidal_signed_offset(b.1 - a.1, height);
+                Some((dx, dy))
+            })
+            .collect()
+    }
+
+    /// 重心が定義できたステップだけからなる、`window_steps` ステップずつの区切り。
+    /// 途中に場が空のステップを含む区切りは使わない。
+    fn displacement_windows(
+        &self,
+        field_width: usize,
+        field_height: usize,
+        window_steps: usize,
+    ) -> Vec<Vec<(f32, f32)>> {
+        self.step_displacements(field_width, field_height)
+            .chunks_exact(window_steps.max(1))
+            .filter_map(|window| window.iter().copied().collect::<Option<Vec<_>>>())
+            .collect()
+    }
+
+    /// 速さのむら(止まったり動いたりして見えるか)。`window_steps` ステップごとの
+    /// 平均の速さの変動係数(標準偏差 ÷ 平均)。
+    ///
+    /// 「待っている」を元気と別物に見せるには、活発さの強弱ではなく質の違う動きが要る
+    /// (docs/DESIGN.md「3状態をテンポに割り当てて直接測った」)。その候補を測るために
+    /// 足したもので、`legibility` には入れていない(表現が通るように指標を作らないため。
+    /// docs/DESIGN.md「身じろぎの届け方(リズム)を試した」)。区切りは人の目が動きの
+    /// むらを感じ取れる1秒程度(15ステップ)を想定する。平均で割るのは、速い体と遅い体を
+    /// 「速さ」ではなく「むら」で比べるため。
+    pub fn speed_unevenness(
+        &self,
+        field_width: usize,
+        field_height: usize,
+        window_steps: usize,
+    ) -> f32 {
+        let speeds: Vec<f32> = self
+            .displacement_windows(field_width, field_height, window_steps)
+            .iter()
+            .map(|window| {
+                let path: f32 = window
+                    .iter()
+                    .map(|(dx, dy)| crate::math::sqrtf(dx * dx + dy * dy))
+                    .sum();
+                path / window.len() as f32
+            })
+            .collect();
+        if speeds.len() < 2 {
+            return 0.0;
         }
-        if count == 0 {
-            0.0
-        } else {
-            total / count as f32
+        let count = speeds.len() as f32;
+        let mean = speeds.iter().sum::<f32>() / count;
+        if mean <= 1e-6 {
+            return 0.0;
         }
+        let variance = speeds.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / count;
+        crate::math::sqrtf(variance) / mean
+    }
+
+    /// 動きのまっすぐさ(行ったり来たりして見えないか)。`window_steps` ステップごとの
+    /// 「始点から終点までの距離 ÷ 実際に動いた道のり」の平均。1.0 ならまっすぐ進み、
+    /// 行ったり来たりするほど 0 に近づく。ほとんど動いていない区切りは使わない。
+    ///
+    /// `speed_unevenness` と同じ理由で足したもので、`legibility` には入れていない。
+    pub fn path_straightness(
+        &self,
+        field_width: usize,
+        field_height: usize,
+        window_steps: usize,
+    ) -> f32 {
+        // 道のりがこれ未満の区切りは、向きが定まらないので数えない(1区切りで0.05セル)
+        const MIN_PATH_CELLS: f32 = 0.05;
+        let ratios: Vec<f32> = self
+            .displacement_windows(field_width, field_height, window_steps)
+            .iter()
+            .filter_map(|window| {
+                let path: f32 = window
+                    .iter()
+                    .map(|(dx, dy)| crate::math::sqrtf(dx * dx + dy * dy))
+                    .sum();
+                if path < MIN_PATH_CELLS {
+                    return None;
+                }
+                let (net_x, net_y) = window
+                    .iter()
+                    .fold((0.0, 0.0), |(x, y), (dx, dy)| (x + dx, y + dy));
+                Some(crate::math::sqrtf(net_x * net_x + net_y * net_y) / path)
+            })
+            .collect();
+        if ratios.is_empty() {
+            return 0.0;
+        }
+        ratios.iter().sum::<f32>() / ratios.len() as f32
     }
 
     /// この軌跡の適応度。崩壊が一度でも起きていれば `COLLAPSE_PENALTY`。
@@ -320,6 +425,105 @@ pub fn legibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 動きの質を見る区切り(15ステップ = 1秒)。
+    const WINDOW: usize = 15;
+
+    /// 重心の列だけを持つ軌跡。動きの質の特徴を、Lenia を回さずに確かめるため。
+    fn trajectory_through(centroids: Vec<Option<(f32, f32)>>) -> Trajectory {
+        let steps = centroids.len();
+        Trajectory {
+            centroids,
+            masses: vec![0.0; steps],
+            tints: vec![0.0; steps],
+            collapsed: false,
+        }
+    }
+
+    /// `start` から `moves` のとおりに1ステップずつ動く重心の列(32×32 の場で折り返す)。
+    fn path_from(start: (f32, f32), moves: &[(f32, f32)]) -> Vec<Option<(f32, f32)>> {
+        let mut position = start;
+        let mut centroids = vec![Some(position)];
+        for (dx, dy) in moves {
+            position = (
+                (position.0 + dx).rem_euclid(32.0),
+                (position.1 + dy).rem_euclid(32.0),
+            );
+            centroids.push(Some(position));
+        }
+        centroids
+    }
+
+    #[test]
+    fn a_steady_glide_is_even_and_straight_even_across_the_edge() {
+        // Arrange: 同じ速さ・同じ向きで進み続け、途中で場の端をまたぐ
+        let glide = trajectory_through(path_from((30.0, 5.0), &[(0.3, 0.0); 150]));
+
+        // Act
+        let unevenness = glide.speed_unevenness(32, 32, WINDOW);
+        let straightness = glide.path_straightness(32, 32, WINDOW);
+
+        // Assert: 端をまたいだところを跳びとして数えない
+        assert!(unevenness < 1e-3, "got {unevenness}");
+        assert!((straightness - 1.0).abs() < 1e-3, "got {straightness}");
+    }
+
+    #[test]
+    fn stopping_and_going_every_second_is_uneven() {
+        // Arrange: 1秒進んで1秒止まる、を繰り返す
+        let mut moves = Vec::new();
+        for _ in 0..5 {
+            moves.extend([(0.3, 0.0); WINDOW]);
+            moves.extend([(0.0, 0.0); WINDOW]);
+        }
+        let stop_and_go = trajectory_through(path_from((5.0, 5.0), &moves));
+
+        // Act
+        let unevenness = stop_and_go.speed_unevenness(32, 32, WINDOW);
+
+        // Assert: 1秒ごとの速さが 0.3 と 0 を交互にとるので、変動係数はちょうど 1
+        assert!((unevenness - 1.0).abs() < 1e-3, "got {unevenness}");
+    }
+
+    #[test]
+    fn going_back_and_forth_is_far_from_straight() {
+        // Arrange: 1ステップごとに右と左へ交互に動く
+        let moves: Vec<(f32, f32)> = (0..150)
+            .map(|step| {
+                if step % 2 == 0 {
+                    (0.3, 0.0)
+                } else {
+                    (-0.3, 0.0)
+                }
+            })
+            .collect();
+        let wobble = trajectory_through(path_from((5.0, 5.0), &moves));
+
+        // Act
+        let straightness = wobble.path_straightness(32, 32, WINDOW);
+
+        // Assert: 1秒の道のり 4.5 セルに対し、始点から終点までは 0.3 セルしか離れない
+        assert!(
+            (straightness - 0.3 / 4.5).abs() < 1e-3,
+            "got {straightness}"
+        );
+    }
+
+    #[test]
+    fn seconds_with_an_empty_field_are_left_out() {
+        // Arrange: 最初の1秒は場が空(重心なし)、その後はまっすぐ進む
+        let mut centroids = vec![None; WINDOW];
+        centroids.extend(path_from((5.0, 5.0), &[(0.3, 0.0); 2 * WINDOW]));
+        let trajectory = trajectory_through(centroids);
+
+        // Act
+        let unevenness = trajectory.speed_unevenness(32, 32, WINDOW);
+        let straightness = trajectory.path_straightness(32, 32, WINDOW);
+
+        // Assert: 空だった1秒を「止まっていた」と数えない
+        assert!(unevenness < 1e-3, "got {unevenness}");
+        assert!((straightness - 1.0).abs() < 1e-3, "got {straightness}");
+    }
 
     #[test]
     fn a_healthy_body_scores_above_the_collapse_penalty() {
