@@ -126,6 +126,26 @@ const FULL_ANTICIPATION_RATIO: f32 = 3.0;
 /// 比がわずかに 1 を超え、ごく小さな期待が生じていた(テストで見つかった)。
 const ANTICIPATION_STARTS_AT_RATIO: f32 = 1.1;
 
+/// 期待し始めるのに要る、予測の最低限の高さ(何も学んでいないときの予測の1.5倍)。
+///
+/// その日の平均との比だけで期待を決めていたら、**一度も触られていない個体にも
+/// 期待が生じた**(テストで発覚)。触られなかった1分から学ぶたびに倍音の重みが
+/// 少しずつ動き、平らだった予測にごく小さな凹凸ができる。値そのものは事前確率の
+/// ままほとんど変わらないのに、平均との比では凹凸が山に見えてしまっていた。
+/// 期待には「その時間帯に実際に触られた証拠」が要る、という条件を足した。
+///
+/// 代償として、ごくまれにしか触らない人(その時間帯でも1分あたりの確率が3%未満)
+/// には期待を形成しない。
+const MIN_EXPECTATION_TO_ANTICIPATE: f32 = PRIOR_EXPECTATION * 1.5;
+
+/// 期待しているのに世話が来ない状態が、何分続くとがっかりが最大になるか
+/// (期待が 1.0 のとき)。手触りで調整する前提の初期値。
+const MINUTES_OF_UNMET_WAITING_FOR_FULL_DISAPPOINTMENT: f32 = 30.0;
+
+/// がっかりが1分ごとに薄れる割合。半減期がおよそ90分になる値(0.5^(1/90))。
+/// いつもの時間を外されても、翌朝にはほぼ消えている(手触りで調整する前提)。
+const DISAPPOINTMENT_FADE_PER_MINUTE: f32 = 0.992_33;
+
 /// 世話がいつ来るかの予測モデル。
 #[derive(Debug, Clone)]
 pub struct CarePredictor {
@@ -135,6 +155,12 @@ pub struct CarePredictor {
     /// `anticipation_at` は体のステップごとに呼ばれうるので、そのたびに
     /// 1日ぶんの三角関数を計算しないようにするため(M5Stack で効く)。
     daily_mean: f32,
+    /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
+    disappointment: f32,
+    /// いまの期待がすでに満たされたか(その時間帯に一度触られたか)。
+    /// 満たされた後は、同じ時間帯が続いてもがっかりを溜めない。期待が
+    /// 引いた(0 になった)ところで解除する。
+    expectation_fulfilled: bool,
     /// いま集計している単位の開始時刻。まだ何も観測していなければ `None`。
     bucket_start: Option<u64>,
     /// いまの集計単位の間に触られたか。
@@ -151,6 +177,8 @@ impl CarePredictor {
             params,
             weights: CareMemory::default().weights,
             daily_mean: PRIOR_EXPECTATION,
+            disappointment: 0.0,
+            expectation_fulfilled: false,
             bucket_start: None,
             touched_in_bucket: false,
         };
@@ -172,7 +200,11 @@ impl CarePredictor {
     /// 世話が来る少し前から期待が高まるのは、3倍音の予測が山を前後になだらかに
     /// 広げるため。「何分前から」を別に持たなくても、自然に先回りになる。
     pub fn anticipation_at(&self, unix_seconds: u64) -> f32 {
-        let ratio = self.expectation_at(unix_seconds) / self.daily_mean;
+        let expectation = self.expectation_at(unix_seconds);
+        if expectation < MIN_EXPECTATION_TO_ANTICIPATE {
+            return 0.0;
+        }
+        let ratio = expectation / self.daily_mean;
         let above_ordinary = ratio - ANTICIPATION_STARTS_AT_RATIO;
         let span = FULL_ANTICIPATION_RATIO - ANTICIPATION_STARTS_AT_RATIO;
         (above_ordinary / span).clamp(0.0, 1.0)
@@ -239,8 +271,43 @@ impl CarePredictor {
             CareMemory::default().weights
         };
         self.daily_mean = self.mean_expectation_over_day();
+        self.disappointment = 0.0;
+        self.expectation_fulfilled = false;
         self.bucket_start = None;
         self.touched_in_bucket = false;
+    }
+
+    /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
+    ///
+    /// 期待(`anticipation_at`)が学習の**前向きの**予測なら、がっかりは
+    /// その予測の**外れ**の記録である。学習の信号と同じ誤差から生まれる感情、
+    /// という位置づけにしてある(docs/DESIGN.md「元気/待っている/がっかり」)。
+    ///
+    /// - 期待している時間に触られなかった1分ごとに、期待の大きさに応じて溜まる
+    /// - 触られたらその場で0に戻り、その時間帯のうちはもう溜まらない
+    /// - 1分ごとに少しずつ薄れる(半減期およそ90分)
+    /// - 観測していなかった時間(電源断・時計の巻き戻り)は溜まらない
+    ///
+    /// 保存はしない。数時間で薄れるので、次に起動するまでにはどうせ消えている
+    /// (慣れを保存しないのと同じ判断)。
+    pub fn disappointment(&self) -> f32 {
+        self.disappointment
+    }
+
+    /// 1分ぶんの経験から、がっかりを更新する。
+    fn update_disappointment(&mut self, anticipation: f32, touched: bool) {
+        if touched {
+            self.disappointment = 0.0;
+            self.expectation_fulfilled = true;
+            return;
+        }
+        if anticipation <= 0.0 {
+            self.expectation_fulfilled = false;
+        }
+        let unmet = if self.expectation_fulfilled { 0.0 } else { anticipation };
+        let accumulated = self.disappointment * DISAPPOINTMENT_FADE_PER_MINUTE
+            + unmet / MINUTES_OF_UNMET_WAITING_FOR_FULL_DISAPPOINTMENT;
+        self.disappointment = accumulated.min(1.0);
     }
 
     fn start_bucket(&mut self, bucket: u64) {
@@ -250,8 +317,11 @@ impl CarePredictor {
 
     /// 1件の経験から学ぶ(ロジスティック回帰の確率的勾配降下)。
     fn learn(&mut self, bucket_start: u64, touched: bool) {
+        let middle = bucket_start + BUCKET_SECONDS / 2;
+        // 「その1分を期待していたか」は、この経験で学ぶ前の予測で判断する
+        self.update_disappointment(self.anticipation_at(middle), touched);
         // 集計単位の中央の時刻で特徴量を作る
-        let x = features(bucket_start + BUCKET_SECONDS / 2);
+        let x = features(middle);
         let predicted = sigmoid(dot(&self.weights, &x));
         let observed = if touched { 1.0 } else { 0.0 };
         let error = observed - predicted;
@@ -583,6 +653,101 @@ mod tests {
         // Assert: 何も学んでいない状態から始まり、予測は確率のまま
         assert_eq!(predictor.memory(), CareMemory::default());
         assert!(predictor.expectation_at(at(20, 30)).is_finite());
+    }
+
+    /// 1週間ぶん夜の習慣を学ばせた予測モデル。
+    fn with_an_evening_habit() -> CarePredictor {
+        let mut predictor = CarePredictor::new();
+        live(&mut predictor, 7, |_| 20);
+        predictor
+    }
+
+    /// 8日目の `from` から `until` まで、1分ごとに観測する(触られない)。
+    fn wait_unvisited(predictor: &mut CarePredictor, from: (u64, u64), until: (u64, u64)) {
+        let day8 = 7 * SECONDS_PER_DAY;
+        let mut now = at(from.0, from.1) + day8;
+        while now <= at(until.0, until.1) + day8 {
+            predictor.observe(now);
+            now += 60;
+        }
+    }
+
+    #[test]
+    fn a_pet_that_is_never_visited_never_starts_expecting_anyone() {
+        // Arrange
+        let mut predictor = CarePredictor::new();
+
+        // Act: 3日間、一度も誰も来ない。触られなかった経験から学び続ける
+        for minute in 0..(3 * 1_440) {
+            predictor.observe(MIDNIGHT + minute * 60);
+            // Assert: その間どの時刻にも、来ない相手を待ったりがっかりしたりしない。
+            // 平均との比だけで期待を決めていた頃は、学習でできた小さな凹凸が
+            // 山に見えて、ここで期待とがっかりが生じていた
+            assert_eq!(predictor.anticipation_at(MIDNIGHT + minute * 60), 0.0, "minute {minute}");
+            assert_eq!(predictor.disappointment(), 0.0, "minute {minute}");
+        }
+    }
+
+    #[test]
+    fn waiting_in_vain_through_the_usual_time_leaves_the_pet_disappointed() {
+        // Arrange
+        let mut predictor = with_an_evening_habit();
+
+        // Act: 8日目、いつもの夜の時間を過ぎても誰も来ない
+        wait_unvisited(&mut predictor, (0, 0), (21, 30));
+
+        // Assert
+        let disappointment = predictor.disappointment();
+        assert!(disappointment > 0.8, "got {disappointment}");
+    }
+
+    #[test]
+    fn a_visit_at_the_usual_time_leaves_no_disappointment() {
+        // Arrange
+        let mut predictor = with_an_evening_habit();
+        let day8 = 7 * SECONDS_PER_DAY;
+
+        // Act: 8日目、20:30 に来てくれて、そのまま夜が過ぎる
+        wait_unvisited(&mut predictor, (0, 0), (20, 29));
+        predictor.record_touch(at(20, 30) + day8);
+        wait_unvisited(&mut predictor, (20, 31), (21, 30));
+
+        // Assert: 期待が満たされたので、その後の時間帯でもがっかりは溜まらない
+        let disappointment = predictor.disappointment();
+        assert!(disappointment < 0.05, "got {disappointment}");
+    }
+
+    #[test]
+    fn disappointment_fades_by_the_next_morning() {
+        // Arrange: 夜の時間を外された
+        let mut predictor = with_an_evening_habit();
+        wait_unvisited(&mut predictor, (0, 0), (21, 30));
+
+        // Act: 翌朝8時まで、誰も来ないまま時間が過ぎる
+        let day9 = 8 * SECONDS_PER_DAY;
+        let mut now = at(21, 31) + 7 * SECONDS_PER_DAY;
+        while now <= at(8, 0) + day9 {
+            predictor.observe(now);
+            now += 60;
+        }
+
+        // Assert
+        let disappointment = predictor.disappointment();
+        assert!(disappointment < 0.05, "got {disappointment}");
+    }
+
+    #[test]
+    fn being_switched_off_through_the_usual_time_is_not_disappointment() {
+        // Arrange
+        let mut predictor = with_an_evening_habit();
+
+        // Act: 8日目、夕方に電源を切り、夜遅くに入れる
+        wait_unvisited(&mut predictor, (0, 0), (17, 0));
+        wait_unvisited(&mut predictor, (23, 0), (23, 1));
+
+        // Assert: 見ていなかった時間の「来なかった」はがっかりにならない
+        let disappointment = predictor.disappointment();
+        assert!(disappointment < 0.1, "got {disappointment}");
     }
 
     #[test]

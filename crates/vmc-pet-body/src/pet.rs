@@ -56,6 +56,9 @@ pub struct Pet {
     /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。`tick_clock` で更新する。
     /// 時計を渡されない限り 0.0 のままなので、評価やテストでは振る舞いが変わらない。
     anticipation: f32,
+    /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
+    /// `tick_clock` で更新する。時計を渡されない限り 0.0 のまま。
+    disappointment: f32,
     /// 最後に知らされた時刻(Unix 秒)。クリックを予測モデルに記録するのに使う。
     now_unix_seconds: Option<u64>,
 }
@@ -88,6 +91,7 @@ impl Pet {
             habituation: Habituation::new(width, height),
             care: CarePredictor::new(),
             anticipation: 0.0,
+            disappointment: 0.0,
             now_unix_seconds: None,
         };
         // 最初の1ステップより前に触られても、光が体に貼りつくようにしておく。
@@ -220,11 +224,30 @@ impl Pet {
         self.now_unix_seconds = Some(now_unix_seconds);
         self.care.observe(now_unix_seconds);
         self.anticipation = self.care.anticipation_at(now_unix_seconds);
+        self.disappointment = self.care.disappointment();
     }
 
     /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。
     pub fn anticipation(&self) -> f32 {
         self.anticipation
+    }
+
+    /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
+    pub fn disappointment(&self) -> f32 {
+        self.disappointment
+    }
+
+    /// 評価専用: 時計を渡さずに、期待とがっかりを固定する。
+    ///
+    /// 「元気/待っている/がっかり」を見た目で見分けられるかを測るとき、何日ぶんも
+    /// 学習させて条件を作るのは遅いうえ、クリックが場を乱してコントローラの貢献と
+    /// 区別がつかなくなる(エネルギーを固定して条件を作るのと同じ理由)。
+    /// `tick_clock` を呼ばない限り、この値が保たれる。評価モジュール(std のみ)
+    /// からだけ使うので、M5Stack のバイナリには含まれない。
+    #[cfg(feature = "std")]
+    pub(crate) fn set_mood_for_evaluation(&mut self, anticipation: f32, disappointment: f32) {
+        self.anticipation = anticipation;
+        self.disappointment = disappointment;
     }
 
     /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
@@ -665,6 +688,34 @@ mod tests {
             remembered > 0.5,
             "the learned rhythm must survive a restart; got {remembered}"
         );
+    }
+
+    #[test]
+    fn missing_the_usual_visit_leaves_the_pet_disappointed() {
+        // Arrange: 1週間、毎晩20時台に2分おきにクリックしに来る
+        const DAY: u64 = 86_400;
+        let midnight = 20_000 * DAY;
+        let mut pet = orbium();
+        let at = CellPos { x: 3, y: 3 };
+        for day in 0..7 {
+            for minute in 0..1_440 {
+                pet.tick_clock(midnight + day * DAY + minute * 60);
+                if minute / 60 == 20 && minute % 2 == 0 {
+                    pet.click(at);
+                    pet.leave();
+                }
+            }
+        }
+        assert_eq!(pet.disappointment(), 0.0, "every evening was visited");
+
+        // Act: 8日目は夜を過ぎても来ない
+        for minute in 0..(21 * 60 + 30) {
+            pet.tick_clock(midnight + 7 * DAY + minute * 60);
+        }
+
+        // Assert
+        let disappointment = pet.disappointment();
+        assert!(disappointment > 0.8, "got {disappointment}");
     }
 
     /// 自律コントローラの自己摂動は `disturb` 経由でエネルギーを変えないため、
