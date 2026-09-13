@@ -73,13 +73,18 @@ impl Pet {
         height: usize,
         controller_params: ControllerParams,
     ) -> Self {
-        Self {
+        let mut pet = Self {
             body: LeniaBody::new(animal, width, height),
             echo: TouchEcho::new(width, height),
             touching_at: None,
             controller: AutonomousController::with_params(controller_params),
             habituation: Habituation::new(width, height),
-        }
+        };
+        // 最初の1ステップより前に触られても、光が体に貼りつくようにしておく。
+        // これを忘れると、最初のステップで原点が(0, 0)から重心へ跳び、
+        // それまでに触った跡が一緒に跳んで見える。
+        pet.echo.follow_body(pet.body_centroid());
+        pet
     }
 
     /// 体を1ステップ進め、崩壊していたら置き直す。
@@ -95,6 +100,9 @@ impl Pet {
     /// 戻り値は、このステップで崩壊を検知して置き直したかどうか。
     pub fn step(&mut self) -> bool {
         self.body.step();
+        // 光(echo)は体に貼りつけて覚えるので、体が進んだらすぐ重心を渡す。
+        // 下の自律行動の光も、進んだ後の体を基準に記録される。
+        self.echo.follow_body(self.body_centroid());
         // 慣れは体の時間に乗せて薄れていく。描画フレームではなくここで進めるのは、
         // フレームレートが PC と M5Stack で違うのに対し、体のステップはどちらも
         // 15/s で揃っているため(habituation.rs 参照)。
@@ -117,6 +125,8 @@ impl Pet {
         }
         if self.body.mass() < COLLAPSE_MASS {
             self.body.revive();
+            // 置き直すと重心が跳ぶので、光の基準も合わせる
+            self.echo.follow_body(self.body_centroid());
             true
         } else {
             false
@@ -220,15 +230,22 @@ impl Pet {
     /// 記録されるだけで、体が無い以上それで困ることはない。
     fn body_centre(&self) -> CellPos {
         let field = self.body.observe();
-        let Some((x, y)) = field.toroidal_centroid() else {
-            return CellPos { x: 0, y: 0 };
-        };
+        let (x, y) = self.body_centroid();
         // 重心は 0..width の範囲にあるので、0.5 を足して切り捨てれば四捨五入になる
         // (no_std では f32::round が使えない)。
         CellPos {
             x: (x + 0.5) as usize % field.width(),
             y: (y + 0.5) as usize % field.height(),
         }
+    }
+
+    /// 体の重心(場の座標、小数)。光(echo)を体に貼りつける基準。
+    ///
+    /// 慣れはセル単位で足りるので `body_centre` で丸めて使うが、光は描画の
+    /// たびに読まれるので、丸めずに渡して補間で読む(touch_echo.rs 参照)。
+    /// 場が空のときは原点を返す。
+    fn body_centroid(&self) -> (f32, f32) {
+        self.body.observe().toroidal_centroid().unwrap_or((0.0, 0.0))
     }
 
     pub fn observe(&self) -> FieldView<'_> {
@@ -708,6 +725,36 @@ mod tests {
         assert!(
             attention < 0.3,
             "touching the same part of a moving body must habituate; attention = {attention}"
+        );
+    }
+
+    #[test]
+    fn the_glow_of_a_click_stays_on_the_body_while_it_glides() {
+        // Arrange: 体の中心から見て下へ10セルの位置をクリックする
+        let mut pet = orbium();
+        let (dx, dy) = (0, 10);
+        let clicked = on_body(&pet, dx, dy);
+        pet.click(clicked);
+        pet.leave();
+
+        // Act: 1秒ぶん進める(O2u は約9セル滑る)。光の減衰は描画側
+        // (tick_input)が進めるので、ここでは減らない
+        for _ in 0..15 {
+            pet.step();
+        }
+
+        // Assert: 光は体の同じ部位(=画面上で触った位置)に留まり、
+        // 世界の元の座標には残らない
+        let same_part = on_body(&pet, dx, dy);
+        let moved = (same_part.x as i32 - clicked.x as i32).abs();
+        assert!(moved >= 3, "the body must have glided for this test to mean anything; moved {moved}");
+        let echo = pet.echo_view();
+        let on_the_body = echo.get(same_part.x, same_part.y);
+        let left_behind = echo.get(clicked.x, clicked.y);
+        assert!(on_the_body > 0.8, "the glow must stay on the body; got {on_the_body}");
+        assert!(
+            on_the_body > left_behind,
+            "the glow must not be left behind; on_body={on_the_body} left_behind={left_behind}"
         );
     }
 

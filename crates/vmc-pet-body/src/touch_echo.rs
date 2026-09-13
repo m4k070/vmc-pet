@@ -15,6 +15,24 @@
 //!
 //! Lenia のような成長規則は持たない。指数減衰するだけの、純粋な描画用の記憶。
 //!
+//! # 光は体(=カメラ)に貼りつける
+//!
+//! 光は場(世界)の座標ではなく、**体の重心からの相対位置**で覚える。当初は場の
+//! 座標で覚えていたため、生物が進む(O2u は約9セル/秒)とカメラがそれを追い、
+//! 触った場所の光が画面上を後ろへ流れて見えていた。カメラは重心を画面中央に置く
+//! だけなので、体基準の座標はカメラの座標そのものであり、光は触った指の下に
+//! 留まる。慣れ(`habituation`)を体の部位ごとに覚えるようにしたのと同じ理由。
+//!
+//! 体の重心は `follow_body` で受け取る。`Camera::follow` と同じ形にしてあるのは、
+//! どちらも「体の重心を基準に座標をずらす」同じ操作だから。受け取らなければ
+//! 原点(0, 0)のままで、場の座標で記録・読み出しするのと同じになる。
+//!
+//! 重心は小数で持ち、読み出し(`TouchEchoView::get`)のときに双線形補間する。
+//! 整数セルに丸めて読むと、重心が1セル進むたびに光が最大±0.5セル跳ね、
+//! 体全体で一度踏んだ「丸めによる揺れ」(camera.rs 参照)を光だけで再現してしまう。
+//! 補間して読めば、読む位置は画面上の位置だけで決まり、光は滑らかに留まる。
+//! 記録(`touch`)は1回きりなので、そこでの丸め(最大0.5セル)は揺れにならない。
+//!
 //! なお、この分離は副次的に、体を差し替える将来の拡張(docs/DESIGN.md「将来の拡張」)で
 //! 世界モデル的なものを足す際に必要になる「行動のコピー」の置き場にもなりうる。
 //! いまは render 層に閉じた描画専用データだが、場(z 相当)と行動(a 相当)を最初から
@@ -23,17 +41,22 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::{accumulate_into, Perturbation};
+use crate::math::{floorf, rem_euclidf};
+use crate::{accumulate_into, CellPos, Perturbation};
 
 /// heat の値域。Field の値域(0.0..=1.0)と揃えてある。
 const MIN_HEAT: f32 = 0.0;
 const MAX_HEAT: f32 = 1.0;
 
 /// 触れた跡の記憶。体には一切影響しない。
+///
+/// 内部の配列は体の重心を原点とした座標で並んでいる。
 pub struct TouchEcho {
     width: usize,
     height: usize,
     heat: Vec<f32>,
+    /// いまの体の重心(場の座標、小数)。
+    body_centre: (f32, f32),
 }
 
 impl TouchEcho {
@@ -43,16 +66,31 @@ impl TouchEcho {
             width,
             height,
             heat: vec![MIN_HEAT; width * height],
+            body_centre: (0.0, 0.0),
         }
     }
 
+    /// 体の重心(場の座標)を受け取る。体が進むたびに呼ぶ。
+    pub fn follow_body(&mut self, body_centre: (f32, f32)) {
+        self.body_centre = body_centre;
+    }
+
     /// 触れた位置に加算する。`Field::inject` と同じ山型・トーラス折り返しを共有する。
+    ///
+    /// `perturbation.at` は場の座標。いまの体の重心からの相対位置に直して記録する。
     pub fn touch(&mut self, perturbation: &Perturbation) {
+        let on_body = CellPos {
+            x: nearest_cell(perturbation.at.x as f32 - self.body_centre.0, self.width),
+            y: nearest_cell(perturbation.at.y as f32 - self.body_centre.1, self.height),
+        };
         accumulate_into(
             &mut self.heat,
             self.width,
             self.height,
-            perturbation,
+            &Perturbation {
+                at: on_body,
+                ..*perturbation
+            },
             MIN_HEAT,
             MAX_HEAT,
         );
@@ -71,8 +109,14 @@ impl TouchEcho {
             width: self.width,
             height: self.height,
             heat: &self.heat,
+            body_centre: self.body_centre,
         }
     }
+}
+
+/// トーラス上の小数の位置に最も近いセル。
+fn nearest_cell(position: f32, size: usize) -> usize {
+    floorf(rem_euclidf(position + 0.5, size as f32)) as usize % size
 }
 
 /// echo の読み取り専用ビュー。
@@ -81,6 +125,7 @@ pub struct TouchEchoView<'a> {
     width: usize,
     height: usize,
     heat: &'a [f32],
+    body_centre: (f32, f32),
 }
 
 impl TouchEchoView<'_> {
@@ -92,19 +137,37 @@ impl TouchEchoView<'_> {
         self.height
     }
 
-    /// 範囲外の座標は 0.0 を返す。
+    /// 場の座標 `(x, y)` に見える光の強さ。範囲外の座標は 0.0 を返す。
+    ///
+    /// 体の重心からの相対位置(小数)を双線形補間して読む。重心が整数のときは
+    /// 補間の重みが片側に寄り切るので、記録した値がそのまま返る。
     pub fn get(&self, x: usize, y: usize) -> f32 {
         if x >= self.width || y >= self.height {
             return MIN_HEAT;
         }
-        self.heat[y * self.width + x]
+        let on_body_x = rem_euclidf(x as f32 - self.body_centre.0, self.width as f32);
+        let on_body_y = rem_euclidf(y as f32 - self.body_centre.1, self.height as f32);
+        let (left, right, toward_right) = neighbours(on_body_x, self.width);
+        let (top, bottom, toward_bottom) = neighbours(on_body_y, self.height);
+
+        let cell = |column: usize, row: usize| self.heat[row * self.width + column];
+        let upper = cell(left, top) * (1.0 - toward_right) + cell(right, top) * toward_right;
+        let lower = cell(left, bottom) * (1.0 - toward_right) + cell(right, bottom) * toward_right;
+        upper * (1.0 - toward_bottom) + lower * toward_bottom
     }
+}
+
+/// `0.0..size` の小数の位置を挟む2つのセル(トーラスで折り返す)と、
+/// 後ろのセルへの寄り具合(0.0..1.0)。
+fn neighbours(position: f32, size: usize) -> (usize, usize, f32) {
+    let before = floorf(position);
+    let first = before as usize % size;
+    ((first), (first + 1) % size, position - before)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CellPos;
 
     #[test]
     fn touch_raises_the_centre_most() {
@@ -191,5 +254,67 @@ mod tests {
             echo.view().get(8, 8) < 0.02,
             "the glow must fade within a couple of seconds after release"
         );
+    }
+
+    #[test]
+    fn the_glow_moves_with_the_body() {
+        // Arrange: 体の右側を触る
+        let mut echo = TouchEcho::new(32, 32);
+        echo.touch(&Perturbation {
+            at: CellPos { x: 8, y: 8 },
+            radius: 3.0,
+            amount: 0.5,
+        });
+
+        // Act: 体が9セル進む(O2u が1秒に進む距離)
+        echo.follow_body((9.0, 0.0));
+
+        // Assert: 光は体と一緒に9セル先へ移り、世界の元の座標には残らない
+        let view = echo.view();
+        assert!((view.get(17, 8) - 0.5).abs() < 1e-5, "got {}", view.get(17, 8));
+        assert_eq!(view.get(8, 8), 0.0);
+    }
+
+    #[test]
+    fn a_body_between_cells_is_read_smoothly_instead_of_snapping() {
+        // Arrange
+        let mut echo = TouchEcho::new(32, 32);
+        echo.touch(&Perturbation {
+            at: CellPos { x: 8, y: 8 },
+            radius: 3.0,
+            amount: 0.5,
+        });
+
+        // Act: 重心が半セルだけ進んだ状態
+        echo.follow_body((0.5, 0.0));
+
+        // Assert: 光の山は 8.5 にあるように見える。丸めて読んでいたら、
+        // どちらか片方のセルに山ごと跳んでいたはず
+        let view = echo.view();
+        let (left, right) = (view.get(8, 8), view.get(9, 8));
+        assert!((left - right).abs() < 1e-5, "left={left} right={right}");
+        assert!(left < 0.5 && left > 0.3, "got {left}");
+    }
+
+    #[test]
+    fn a_touch_on_a_moved_body_lights_where_it_landed() {
+        // Arrange: 体がセルの間にいるときに触る
+        let mut echo = TouchEcho::new(32, 32);
+        echo.follow_body((3.3, 0.0));
+
+        // Act
+        echo.touch(&Perturbation {
+            at: CellPos { x: 10, y: 8 },
+            radius: 3.0,
+            amount: 0.5,
+        });
+
+        // Assert: 記録時の丸め(0.3セル)ぶんだけ山から外れるが、触った位置が
+        // ほぼ最も明るく光る
+        let view = echo.view();
+        let at_touch = view.get(10, 8);
+        assert!(at_touch > 0.45, "got {at_touch}");
+        assert!(at_touch > view.get(12, 8));
+        assert!(at_touch > view.get(8, 8));
     }
 }
