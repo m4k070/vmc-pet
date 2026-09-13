@@ -16,9 +16,9 @@
 
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
-    Animal, AutonomousController, BodyPort, CarePredictor, CellPos, ControllerParams, FieldView,
-    Habituation, LeniaBody, Observation, Perturbation, PetMemory, Pigment, PigmentView, Touch,
-    TouchEcho, TouchEchoView,
+    Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, Habituation,
+    LeniaBody, Mood, Observation, Perturbation, PetMemory, Pigment, PigmentView, Touch, TouchEcho,
+    TouchEchoView,
 };
 
 /// 自律コントローラが働きかけたことを echo として光らせる強さ。
@@ -39,14 +39,6 @@ const SELF_ACTION_ECHO_AMOUNT: f32 = 0.5;
 /// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
 const COLLAPSE_MASS: f32 = 5.0;
 
-/// がっかりしきったときの体のテンポ(1.0 がいつもどおり)。
-///
-/// 3状態をテンポに割り当てた計測(docs/DESIGN.md「3状態をテンポに割り当てて直接測った」)
-/// で、×0.6 は全生物で崩壊せず、コントローラでは見分けられなかった OG2g・2S1v でも
-/// 「待っている⇔がっかり」が 0.36 前後になった。がっかりの溜まり具合に比例して
-/// 遅くなり、がっかりが薄れればいつものテンポに戻る。
-const DISAPPOINTED_TEMPO: f32 = 0.6;
-
 /// 体(世界モデル)・入力の翻訳・崩壊検知・echo を束ねたもの。
 /// PC版・M5Stack版で共通して使う。
 pub struct Pet {
@@ -62,16 +54,8 @@ pub struct Pet {
     controller: AutonomousController,
     /// 同じ場所への刺激に慣れる度合い。触れられた場所ごとに覚え、次の刺激を弱める。
     habituation: Habituation,
-    /// 世話がいつ来るかを経験から学ぶ予測モデル。
-    care: CarePredictor,
-    /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。`tick_clock` で更新する。
-    /// 時計を渡されない限り 0.0 のままなので、評価やテストでは振る舞いが変わらない。
-    anticipation: f32,
-    /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
-    /// `tick_clock` で更新する。時計を渡されない限り 0.0 のまま。
-    disappointment: f32,
-    /// 最後に知らされた時刻(Unix 秒)。クリックを予測モデルに記録するのに使う。
-    now_unix_seconds: Option<u64>,
+    /// 気分(世話がいつ来るかの学習と、期待・がっかり)。体のテンポと色素への刺激を決める。
+    mood: Mood,
 }
 
 impl Pet {
@@ -105,10 +89,7 @@ impl Pet {
             touching_at: None,
             controller: AutonomousController::with_params(controller_params),
             habituation: Habituation::new(width, height),
-            care: CarePredictor::new(),
-            anticipation: 0.0,
-            disappointment: 0.0,
-            now_unix_seconds: None,
+            mood: Mood::new(),
         };
         // 最初の1ステップより前に触られても、光が体に貼りつくようにしておく。
         // これを忘れると、最初のステップで原点が(0, 0)から重心へ跳び、
@@ -132,9 +113,7 @@ impl Pet {
     /// 戻り値は、このステップで崩壊を検知して置き直したかどうか。
     pub fn step(&mut self) -> bool {
         // がっかりしているほど体の時間がゆっくり進む(表情としてのテンポ)
-        let disappointment = self.disappointment.clamp(0.0, 1.0);
-        self.body
-            .set_tempo(1.0 - (1.0 - DISAPPOINTED_TEMPO) * disappointment);
+        self.body.set_tempo(self.mood.tempo());
         self.body.step();
         // 光(echo)と色素は体に貼りつけて覚えるので、体が進んだらすぐ重心を渡す。
         // 下の自律行動の光も、進んだ後の体を基準に記録される。
@@ -142,7 +121,8 @@ impl Pet {
         self.echo.follow_body(centroid);
         self.pigment.follow_body(centroid);
         // 世話を待っているほど、体があるところに色素が溜まる(ゆっくり色づく)
-        self.pigment.step(self.body.observe(), self.anticipation);
+        self.pigment
+            .step(self.body.observe(), self.mood.pigment_stimulus());
         // 慣れは体の時間に乗せて薄れていく。描画フレームではなくここで進めるのは、
         // フレームレートが PC と M5Stack で違うのに対し、体のステップはどちらも
         // 15/s で揃っているため(habituation.rs 参照)。
@@ -153,7 +133,7 @@ impl Pet {
         let observation = Observation {
             field: self.body.observe(),
             energy: self.body.energy(),
-            anticipation: self.anticipation,
+            anticipation: self.mood.anticipation(),
         };
         if let Some(perturbation) = self.controller.maybe_act(observation) {
             self.body.disturb(perturbation);
@@ -186,7 +166,7 @@ impl Pet {
     pub fn memory(&self) -> PetMemory {
         PetMemory {
             energy: self.body.energy(),
-            care: self.care.memory(),
+            care: self.mood.memory(),
         }
     }
 
@@ -198,7 +178,7 @@ impl Pet {
     pub fn restore(&mut self, memory: PetMemory, seconds_away: f32) {
         self.body.restore_energy(memory.energy);
         self.body.apply_offline_decay(seconds_away);
-        self.care.restore(memory.care);
+        self.mood.restore(memory.care);
     }
 
     /// 触れている(またはホバーしている)位置を更新するだけで、体には一切触れない。
@@ -220,9 +200,7 @@ impl Pet {
         // 世話が来た時刻として覚える。慣れた場所へのクリックでも、ユーザーが
         // 来たことには変わりないので数える(予測するのは「いつ来るか」であって、
         // 世話の質ではない)。
-        if let Some(now) = self.now_unix_seconds {
-            self.care.record_touch(now);
-        }
+        self.mood.record_visit();
         self.touch(Touch::Click { at });
     }
 
@@ -249,20 +227,17 @@ impl Pet {
     /// 呼ぶと世話がいつ来るかの学習が進み、期待が振る舞いに現れる。呼ばなければ
     /// 何も学ばず、期待も 0.0 のまま(docs/DESIGN.md「世話の予測」)。
     pub fn tick_clock(&mut self, now_unix_seconds: u64) {
-        self.now_unix_seconds = Some(now_unix_seconds);
-        self.care.observe(now_unix_seconds);
-        self.anticipation = self.care.anticipation_at(now_unix_seconds);
-        self.disappointment = self.care.disappointment();
+        self.mood.tick_clock(now_unix_seconds);
     }
 
     /// いま世話が来ることをどれだけ期待しているか(0.0..=1.0)。
     pub fn anticipation(&self) -> f32 {
-        self.anticipation
+        self.mood.anticipation()
     }
 
     /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
     pub fn disappointment(&self) -> f32 {
-        self.disappointment
+        self.mood.disappointment()
     }
 
     /// 評価専用: 時計を渡さずに、期待とがっかりを固定する。
@@ -274,8 +249,7 @@ impl Pet {
     /// からだけ使うので、M5Stack のバイナリには含まれない。
     #[cfg(feature = "std")]
     pub(crate) fn set_mood_for_evaluation(&mut self, anticipation: f32, disappointment: f32) {
-        self.anticipation = anticipation;
-        self.disappointment = disappointment;
+        self.mood.set_for_evaluation(anticipation, disappointment);
     }
 
     /// 触れ方を、体への摂動と echo への摂動にそれぞれ翻訳して渡す。
