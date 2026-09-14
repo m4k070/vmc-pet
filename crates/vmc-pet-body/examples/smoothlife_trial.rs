@@ -20,6 +20,9 @@
 //!
 //! 使い方: `cargo run --release -p vmc-pet-body --example smoothlife_trial -- <出力ディレクトリ>`。
 //! 条件ごと・時刻ごとの場を PGM で書き出し、占有率・塊の数・直前10ステップの変化量を表示する。
+//! 出力ディレクトリの後ろに `--animate` を付けると、条件 E(グライダー)と F(紐でつながった塊)の
+//! 場を細かい間隔で書き出す(アニメーションにするため。スナップショットと同じ初期配置なので、
+//! 同じ動きになる)。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -323,6 +326,56 @@ fn run(condition: &Condition, output: &Path) -> String {
     line
 }
 
+/// アニメーションにする範囲。`CONDITIONS` の `condition_index` 番目を、`from`〜`to` ステップの間
+/// `every` ステップごとに書き出す。
+struct Animation {
+    condition_index: usize,
+    from: u32,
+    to: u32,
+    every: u32,
+}
+
+const ANIMATIONS: [Animation; 2] = [
+    // E: グライダーは100ステップまでに残るので、そこから滑っていく様子
+    Animation {
+        condition_index: 0,
+        from: 100,
+        to: 700,
+        every: 4,
+    },
+    // F: 最初から形を変えていく様子
+    Animation {
+        condition_index: 1,
+        from: 0,
+        to: 900,
+        every: 6,
+    },
+];
+
+/// 1つの条件を動かしながらコマを書き出し、書き出したコマの数を返す。
+fn animate(animation: &Animation, output: &Path) -> (String, usize) {
+    let condition = &CONDITIONS[animation.condition_index];
+    let kernel = kernel(condition.outer_radius);
+    let mut rng = Rng(0x5EED_1234_ABCD_0001 ^ condition.size as u64);
+    let mut field = seeded_field(condition.size, condition.outer_radius, &mut rng);
+    let mut frames = 0;
+    for step_index in 0..=animation.to {
+        let in_range = step_index >= animation.from;
+        if in_range && (step_index - animation.from).is_multiple_of(animation.every) {
+            write_pgm(
+                &output.join(format!("{}_frame_{step_index:05}.pgm", condition.name)),
+                &field,
+                condition.size,
+            );
+            frames += 1;
+        }
+        if step_index < animation.to {
+            field = step(&field, condition.size, &kernel, condition.rules);
+        }
+    }
+    (condition.name.to_string(), frames)
+}
+
 fn main() {
     let output = PathBuf::from(
         std::env::args()
@@ -330,6 +383,26 @@ fn main() {
             .expect("出力ディレクトリを引数で渡す"),
     );
     fs::create_dir_all(&output).expect("出力ディレクトリを作れない");
+
+    if std::env::args().any(|arg| arg == "--animate") {
+        let written: Vec<(String, usize)> = thread::scope(|scope| {
+            let handles: Vec<_> = ANIMATIONS
+                .iter()
+                .map(|animation| {
+                    let output = &output;
+                    scope.spawn(move || animate(animation, output))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        for (name, frames) in written {
+            println!("{name}: {frames} コマ");
+        }
+        return;
+    }
 
     let lines: Vec<String> = thread::scope(|scope| {
         let handles: Vec<_> = CONDITIONS
