@@ -112,6 +112,22 @@ impl GrowthMapping {
     }
 }
 
+/// 成長関数1つぶんの定義(形・中心・幅)。Glaberish の「生まれる関数」と「生き残る関数」を
+/// 別々に持つために、`LeniaParams` の成長関数の部分を切り出したもの。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GrowthFunction {
+    pub mapping: GrowthMapping,
+    pub center: f32,
+    pub width: f32,
+}
+
+impl GrowthFunction {
+    /// ポテンシャルに対する成長量(-1.0..=1.0)。
+    pub fn value_at(self, potential: f32) -> f32 {
+        self.mapping.value_at(potential, self.center, self.width)
+    }
+}
+
 /// Lenia の規則パラメータ。animals.json の `params` に対応する。
 #[derive(Debug, Clone)]
 pub struct LeniaParams {
@@ -127,6 +143,18 @@ pub struct LeniaParams {
     pub growth_width: f32,
     pub kernel_core: KernelCore,
     pub growth_mapping: GrowthMapping,
+}
+
+impl LeniaParams {
+    /// この生物の成長関数。Glaberish で「生まれる関数」と「生き残る関数」の両方に使えば、
+    /// いまの Lenia と同じ規則になる。
+    pub fn growth_function(&self) -> GrowthFunction {
+        GrowthFunction {
+            mapping: self.growth_mapping,
+            center: self.growth_center,
+            width: self.growth_width,
+        }
+    }
 }
 
 /// 畳み込みの1タップ。中心からの変位と正規化済みの重み。
@@ -206,6 +234,43 @@ impl Lenia {
         }
     }
 
+    /// 【実験】半径ごとの形 `profile` からカーネルを作る(`profile` に渡す距離は、中心が 0、
+    /// `params.radius` だけ離れた点が 1)。
+    ///
+    /// yuca(Davis & Bongard、MIT)の `get_kernel` と同じ作り方をする: (2R+1)×(2R+1) の格子の
+    /// 各点で `profile` を評価し、最小値を引いてから合計が1になるように割る。`animals.json` の
+    /// 生物のカーネル(`KernelCore` とリングの重み)では表せない、ガウス混合などのカーネルを
+    /// 試すためのもの。`params` のうちカーネルに関する値(`kernel_peaks`・`kernel_core`)は使わない。
+    pub fn with_radial_profile(params: LeniaParams, profile: impl Fn(f32) -> f32) -> Self {
+        let radius = params.radius as i32;
+        let mut samples = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let distance =
+                    crate::math::sqrtf((dx * dx + dy * dy) as f32) / params.radius as f32;
+                samples.push((dx, dy, profile(distance)));
+            }
+        }
+        let lowest = samples
+            .iter()
+            .map(|(_, _, value)| *value)
+            .fold(f32::INFINITY, f32::min);
+        let total: f32 = samples.iter().map(|(_, _, value)| value - lowest).sum();
+        let taps = samples
+            .into_iter()
+            .filter_map(|(dx, dy, value)| {
+                let weight = (value - lowest) / total;
+                (weight > NEGLIGIBLE_KERNEL_WEIGHT).then_some(KernelTap { dx, dy, weight })
+            })
+            .collect();
+        Self {
+            params,
+            taps,
+            potential: Vec::new(),
+            wrap_tables: WrapTables::empty(),
+        }
+    }
+
     /// 場を1ステップ進める。
     ///
     /// `growth_scale` は成長のうち正の部分(自己修復)にだけ掛ける倍率。
@@ -273,6 +338,45 @@ impl Lenia {
                 rate
             };
             value + time_step * scaled_rate
+        });
+    }
+
+    /// 【実験】Glaberish の規則で1ステップ進める(Davis & Bongard 2022、実装 yuca は MIT)。
+    ///
+    /// `A ← clip(A + Δt [(1 − A) G(K∗A) + A P(K∗A)])`。いまの Lenia の成長関数を、空のセル
+    /// ほど効く「生まれる関数」G と、生きているセルほど効く「生き残る関数」P に分けたもの。
+    /// ライフゲームの誕生・生存の条件に当たり、生まれる条件が生き残る条件に含まれない規則
+    /// (Morley など)も書ける。G と P を同じ関数にすれば `(1 − A) G + A G = G` で、いまの
+    /// Lenia(`step_at_tempo`)と同じ規則になる(浮動小数点の計算順序のぶんだけ差が出る)。
+    /// yuca の「今の値」は、既定では中心だけ1の 3×3 カーネルで、セルの値そのものと同じ。
+    ///
+    /// 成長の強さ `growth_scale` は、いまの規則と同じく合わせた成長量の正の部分にだけ掛ける。
+    /// ペットはまだ使っていない(docs/DESIGN.md「Glaberish を取り込む」)。
+    pub fn step_glaberish(
+        &mut self,
+        field: &mut Field,
+        genesis: GrowthFunction,
+        persistence: GrowthFunction,
+        growth_scale: f32,
+        tempo: f32,
+    ) {
+        self.accumulate_potential(field.view());
+
+        let time_step = tempo / self.params.time_divisor;
+        let width = field.view().width();
+        let potential = &self.potential;
+
+        field.map(|x, y, value| {
+            let neighbourhood = potential[y * width + x];
+            let born = genesis.value_at(neighbourhood);
+            let kept = persistence.value_at(neighbourhood);
+            let growth = (1.0 - value) * born + value * kept;
+            let scaled_growth = if growth > 0.0 {
+                growth * growth_scale
+            } else {
+                growth
+            };
+            value + time_step * scaled_growth
         });
     }
 
@@ -399,6 +503,83 @@ mod tests {
         let falling = above_target.view().get(0, 0);
         assert!((rising - 0.1925).abs() < 1e-5, "got {rising}");
         assert!((falling - 0.45).abs() < 1e-5, "got {falling}");
+    }
+
+    #[test]
+    fn glaberish_with_one_growth_function_matches_lenia() {
+        // Arrange: 値がばらついた場を2つ用意し、片方をいまの規則、片方を Glaberish で進める
+        let params = orbium_params();
+        let growth = params.growth_function();
+        let mut lenia = Lenia::new(params);
+        let pattern = |x: usize, y: usize, _: f32| ((x * 7 + y * 13) % 17) as f32 / 17.0 * 0.6;
+        let mut classic = Field::new(32, 32);
+        let mut glaberish = Field::new(32, 32);
+        classic.map(pattern);
+        glaberish.map(pattern);
+
+        // Act
+        lenia.step_at_tempo(&mut classic, 0.9, 1.0);
+        lenia.step_glaberish(&mut glaberish, growth, growth, 0.9, 1.0);
+
+        // Assert: 生まれる関数と生き残る関数が同じなら、いまの規則と同じ値になる
+        let largest_difference = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .map(|(x, y)| (classic.view().get(x, y) - glaberish.view().get(x, y)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            largest_difference < 1e-6,
+            "largest difference {largest_difference}"
+        );
+    }
+
+    #[test]
+    fn glaberish_uses_genesis_for_empty_cells_and_persistence_for_full_cells() {
+        // Arrange: 生まれる関数はポテンシャル 0 で、生き残る関数はポテンシャル 1 で最大になる
+        // ようにし、反対側では -1 に近い値を返すようにしておく
+        let peak_at = |center: f32| GrowthFunction {
+            mapping: GrowthMapping::Exponential,
+            center,
+            width: 0.1,
+        };
+        let mut lenia = Lenia::new(orbium_params());
+        let mut empty = uniform_field(0.0);
+        let mut full = uniform_field(1.0);
+
+        // Act: 空の場ではポテンシャルが 0、満ちた場では 1
+        lenia.step_glaberish(&mut empty, peak_at(0.0), peak_at(1.0), 1.0, 1.0);
+        let mut lenia = Lenia::new(orbium_params());
+        lenia.step_glaberish(&mut full, peak_at(1.0), peak_at(0.0), 1.0, 1.0);
+
+        // Assert: 空のセルは生まれる関数だけで Δt = 0.1 増え、満ちたセルは生き残る関数だけで
+        // 0.1 減る
+        let born = empty.view().get(0, 0);
+        let decayed = full.view().get(0, 0);
+        assert!((born - 0.1).abs() < 1e-5, "got {born}");
+        assert!((decayed - 0.9).abs() < 1e-5, "got {decayed}");
+    }
+
+    #[test]
+    fn a_radial_profile_kernel_is_normalized_and_follows_the_profile() {
+        // Arrange: 半径の 0.4〜0.6 だけが 1 の、細い輪
+        let ring = |distance: f32| {
+            if (0.4..=0.6).contains(&distance) {
+                1.0
+            } else {
+                0.0
+            }
+        };
+
+        // Act
+        let lenia = Lenia::with_radial_profile(orbium_params(), ring);
+
+        // Assert: 重みの合計は1で、タップは輪の上にしか無い
+        let total: f32 = lenia.taps.iter().map(|tap| tap.weight).sum();
+        assert!((total - 1.0).abs() < 1e-4, "got {total}");
+        let radius = orbium_params().radius as f32;
+        assert!(lenia.taps.iter().all(|tap| {
+            let distance = ((tap.dx * tap.dx + tap.dy * tap.dy) as f32).sqrt() / radius;
+            (0.4..=0.6).contains(&distance)
+        }));
     }
 
     #[test]

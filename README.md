@@ -156,3 +156,8 @@ src/               # デスクトップ版バイナリ(vmc-pet-body に依存)
 `assets/animals.json` の生物データは Bert Chan 氏の
 [Lenia](https://github.com/Chakazul/Lenia) (MIT License) から4体を抜き出したもの。
 詳細は [assets/NOTICE.md](assets/NOTICE.md) を参照。
+
+実験用の Glaberish の更新式(`Lenia::step_glaberish`)と、半径ごとの形からカーネルを作る方法
+(`Lenia::with_radial_profile`)、`examples/glaberish_trial.rs` の s613 の規則は、Q. Tyrell Davis 氏と
+Josh Bongard 氏の研究([Glaberish](https://arxiv.org/abs/2205.10463))と、その実装
+[yuca](https://github.com/riveSunder/yuca) (MIT License, Copyright (c) 2022 riveSunder) による。

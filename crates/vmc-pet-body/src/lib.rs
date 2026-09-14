@@ -48,7 +48,7 @@ pub use civil_time::{civil_from_unix_seconds, unix_seconds_from_civil, CivilDate
 pub use controller::{AutonomousController, ControllerParams, Observation};
 pub use field::{Field, FieldView};
 pub use habituation::Habituation;
-pub use lenia::Lenia;
+pub use lenia::{GrowthFunction, Lenia};
 pub use lenia_body::LeniaBody;
 pub use memory::{scan_records, PetMemory, SavedMemory, RECORD_LEN};
 pub use mood::{Mood, MoodState};
