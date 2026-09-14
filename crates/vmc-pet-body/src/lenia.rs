@@ -242,6 +242,40 @@ impl Lenia {
         });
     }
 
+    /// 【実験】Asymptotic Lenia の規則で1ステップ進める(Kawaguchi et al., ALIFE 2021)。
+    ///
+    /// `u ← u + Δt (T(K∗u) − u)`、目標関数 `T = (G + 1) / 2`(0〜1)。いまの Lenia が成長量を
+    /// 足してから 0〜1 に切り詰めるのに対し、こちらは目標値へ近づくので切り詰めが要らず、
+    /// 微分方程式として書ける(時間の刻みに依らない形)。issue #1 の候補を確かめるための
+    /// もので、ペットはまだ使っていない(docs/DESIGN.md「Asymptotic Lenia で既存の生物は
+    /// 生きられるか」)。
+    ///
+    /// 成長の強さ `growth_scale` は、いまの規則と同じく近づく向きが正(目標へ増える)の
+    /// 変化にだけ掛ける。`Δt ≤ 1` なら値は今の値と目標値の間に留まるので、`Field::map` の
+    /// 切り詰めは効かない。
+    pub fn step_asymptotic(&mut self, field: &mut Field, growth_scale: f32, tempo: f32) {
+        self.accumulate_potential(field.view());
+
+        let time_step = tempo / self.params.time_divisor;
+        let width = field.view().width();
+        let center = self.params.growth_center;
+        let growth_width = self.params.growth_width;
+        let mapping = self.params.growth_mapping;
+        let potential = &self.potential;
+
+        field.map(|x, y, value| {
+            let growth = mapping.value_at(potential[y * width + x], center, growth_width);
+            let target = (growth + 1.0) / 2.0;
+            let rate = target - value;
+            let scaled_rate = if rate > 0.0 {
+                rate * growth_scale
+            } else {
+                rate
+            };
+            value + time_step * scaled_rate
+        });
+    }
+
     /// 各セルのポテンシャル(カーネルとの畳み込み)を求める。
     ///
     /// 値を持つセルからタップ先へ加算していく散布型にしてある。
@@ -321,6 +355,50 @@ mod tests {
             kernel_core: KernelCore::Polynomial,
             growth_mapping: GrowthMapping::Polynomial,
         }
+    }
+
+    /// すべてのセルが `value` の場。カーネルは正規化されているので、ポテンシャルもどこでも `value`。
+    fn uniform_field(value: f32) -> Field {
+        let mut field = Field::new(32, 32);
+        field.map(|_, _, _| value);
+        field
+    }
+
+    #[test]
+    fn an_asymptotic_step_moves_toward_the_target_by_the_time_step() {
+        // Arrange: ポテンシャル 0.5 は成長の中心 0.15 から遠く、G = -1 なので目標は 0
+        let mut lenia = Lenia::new(orbium_params());
+        let mut full_tempo = uniform_field(0.5);
+        let mut half_tempo = uniform_field(0.5);
+
+        // Act
+        lenia.step_asymptotic(&mut full_tempo, 1.0, 1.0);
+        lenia.step_asymptotic(&mut half_tempo, 1.0, 0.5);
+
+        // Assert: Δt = 1/10 だけ目標 0 へ近づき、テンポ ×0.5 ではその半分
+        let full = full_tempo.view().get(0, 0);
+        let half = half_tempo.view().get(0, 0);
+        assert!((full - 0.45).abs() < 1e-5, "got {full}");
+        assert!((half - 0.475).abs() < 1e-5, "got {half}");
+    }
+
+    #[test]
+    fn asymptotic_growth_scale_only_weakens_the_approach_from_below() {
+        // Arrange: ポテンシャルが成長の中心 0.15 にあるので G = 1、目標は 1
+        let mut lenia = Lenia::new(orbium_params());
+        let mut weakened = uniform_field(0.15);
+        let mut above_target = uniform_field(0.5);
+
+        // Act
+        lenia.step_asymptotic(&mut weakened, 0.5, 1.0);
+        lenia.step_asymptotic(&mut above_target, 0.5, 1.0);
+
+        // Assert: 目標へ増える変化だけが半分になり(0.15 + 0.1 × 0.5 × 0.85)、
+        // 目標へ減る変化は弱めない(0.5 + 0.1 × (0 - 0.5))
+        let rising = weakened.view().get(0, 0);
+        let falling = above_target.view().get(0, 0);
+        assert!((rising - 0.1925).abs() < 1e-5, "got {rising}");
+        assert!((falling - 0.45).abs() < 1e-5, "got {falling}");
     }
 
     #[test]
