@@ -22,7 +22,7 @@
 //! `-- --field` を付けると、要約8つの代わりに場そのものを読むモデルと比べる。場の値の
 //! 分布と1ステップ・1秒の変化(位置や向きに依らない)と、重心を中心に切り出した場
 //! そのもの(16×16 とその1秒の変化)の2つ。エピソードは同じものを作る
-//! (docs/DESIGN.md「崩壊を場から先読みできるか」)。
+//! (docs/experiments/collapse-prediction.md「崩壊を場から先読みできるか」)。
 
 use std::collections::VecDeque;
 use std::thread;

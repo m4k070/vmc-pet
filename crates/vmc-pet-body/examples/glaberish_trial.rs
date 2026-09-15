@@ -1,5 +1,6 @@
 //! 【実験】Glaberish(Davis & Bongard 2022、実装 yuca は MIT)を取り込み、2つを確かめる
-//! (docs/DESIGN.md「Glaberish を取り込む」)。ペット本体の振る舞いには触れない。
+//! (docs/experiments/rule-candidates.md「Glaberish を取り込む」)。
+//! ペット本体の振る舞いには触れない。
 //!
 //! 1. **今までの生き物はそのまま使えるか**: 生まれる関数と生き残る関数を、その生物の成長関数に
 //!    そろえると、式の上ではいまの Lenia と同じ規則になる。浮動小数点の計算順序のぶんだけずれる

@@ -312,8 +312,8 @@ impl Lenia {
     /// `u ← u + Δt (T(K∗u) − u)`、目標関数 `T = (G + 1) / 2`(0〜1)。いまの Lenia が成長量を
     /// 足してから 0〜1 に切り詰めるのに対し、こちらは目標値へ近づくので切り詰めが要らず、
     /// 微分方程式として書ける(時間の刻みに依らない形)。issue #1 の候補を確かめるための
-    /// もので、ペットはまだ使っていない(docs/DESIGN.md「Asymptotic Lenia で既存の生物は
-    /// 生きられるか」)。
+    /// もので、ペットはまだ使っていない
+    /// (docs/experiments/rule-candidates.md「Asymptotic Lenia で既存の生物は生きられるか」)。
     ///
     /// 成長の強さ `growth_scale` は、いまの規則と同じく近づく向きが正(目標へ増える)の
     /// 変化にだけ掛ける。`Δt ≤ 1` なら値は今の値と目標値の間に留まるので、`Field::map` の
@@ -351,7 +351,7 @@ impl Lenia {
     /// yuca の「今の値」は、既定では中心だけ1の 3×3 カーネルで、セルの値そのものと同じ。
     ///
     /// 成長の強さ `growth_scale` は、いまの規則と同じく合わせた成長量の正の部分にだけ掛ける。
-    /// ペットはまだ使っていない(docs/DESIGN.md「Glaberish を取り込む」)。
+    /// ペットはまだ使っていない(docs/experiments/rule-candidates.md「Glaberish を取り込む」)。
     pub fn step_glaberish(
         &mut self,
         field: &mut Field,

@@ -4,7 +4,7 @@
 //! 崖(growth_scale 0.78 で生き延び、0.77 で完全崩壊)が離散時間ステップ由来の不安定性かも
 //! しれず、時間を連続に近づけた Asymptotic Lenia なら崖がなだらかになるかもしれない、と
 //! 提案している。ルールを実装する前に、今の Lenia のまま時間の刻みを小さくして崖を測り直す
-//! (docs/DESIGN.md「成長の強さの崖は時間の刻みから来ているか」)。
+//! (docs/experiments/rule-candidates.md「成長の強さの崖は時間の刻みから来ているか」)。
 //!
 //! - 時間の刻みはテンポ(`Lenia::step_at_tempo`)で変える。同じ「体の時間」だけ進めて比べる
 //!   (テンポ ×0.5 なら2倍のステップ数)
@@ -21,8 +21,8 @@
 //!
 //! `-- --asymptotic` を付けると、同じ測り方を Asymptotic Lenia(`Lenia::step_asymptotic`、
 //! Kawaguchi et al. 2021)で行う。先に、成長を弱めないとき既存の生物が形を保って動くかを
-//! 確かめる(docs/DESIGN.md「Asymptotic Lenia で既存の生物は生きられるか」)。既存のテストの
-//! 再現確認は、どちらの場合もいまの Lenia で行う。
+//! 確かめる(docs/experiments/rule-candidates.md「Asymptotic Lenia で既存の生物は生きられるか」)。
+//! 既存のテストの再現確認は、どちらの場合もいまの Lenia で行う。
 
 use std::thread;
 use std::time::Instant;
