@@ -67,7 +67,12 @@ cargo run --release -- --animal OG2g    # Gyrorbium gyrans で起動
 ```sh
 cargo run --release -- --list-multichannel            # 表示できる生物の一覧
 cargo run --release -- --preview-multichannel 231-04  # 64x64 の場で表示する(クリックで突ける)
+cargo run --release -- --multichannel 231-04          # 元気・テンポ・クリックだけつないで動かす
+cargo run --release -- --multichannel 231-04 --preview-mood disappointed  # がっかりのテンポで動かす
 ```
+
+`--multichannel` では、放っておくと約150秒でエネルギーが尽きて体が弱り、クリックすると回復する。
+慣れ・色素・生活リズムの学習・自律コントローラ・記憶はまだつないでいない。
 
 体の上にポインタを乗せると撫でている扱いになり、触れた場所がほんのり光る
 (見た目だけの反応で、体そのものには影響しない)。クリックすると突いた扱いになり、

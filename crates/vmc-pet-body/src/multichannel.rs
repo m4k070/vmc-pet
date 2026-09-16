@@ -5,8 +5,8 @@
 //! numpy で同じ式を写した参照実装と、チャンネルごとの総量が5〜6桁まで一致することを確かめてある
 //! (docs/experiments/rule-candidates.md「多チャンネル Lenia の生物を動かす」)。
 //!
-//! ペット本体(`Pet`)はまだ使っていない。PC 版の `--preview-multichannel` で、同梱した生物
-//! (`assets/multichannel.json`、ペットの試験一式に合格した9体)を見て確かめるためにある。
+//! ペット本体(`Pet`)はまだ使っていない。PC 版の `--preview-multichannel` / `--multichannel` で、同梱した生物
+//! (`assets/multichannel.json`、ペットの試験一式に合格した9体)を動かして確かめるためにある。
 //! PC 専用の実験なので `std` フィーチャの下に置く。
 
 use serde::Deserialize;
@@ -366,9 +366,122 @@ impl MultiWorld {
     }
 }
 
+/// 【実験】多チャンネルの体。PC 版の `--multichannel` で、いまのペットの仕組みのうち、元気(成長の
+/// 強さ)・テンポ・クリックだけをつなぐ。決まりは `LeniaBody` と同じ `Vitality` を使う。
+///
+/// - 成長の強さはエネルギーで決まり、全チャンネルに同じ強さを掛ける(試験一式・放置の試験と同じ)
+/// - テンポは呼び出し側が `set_tempo` で渡す(PC 版では気分を固定したときだけ変わる)
+/// - クリックは、いまのペットと同じ強さの摂動を全チャンネルへ注入し、満額の世話として数える。
+///   慣れ(同じ場所を叩き続けると効かなくなる)はつないでいない
+/// - 崩壊したら置き直し、エネルギーを満タンに戻す
+///
+/// つないでいないもの: 慣れ・色素・学習・自律コントローラ・記憶。
+pub struct MultiBody {
+    animal: MultiAnimal,
+    size: usize,
+    radius: usize,
+    world: MultiWorld,
+    vitality: crate::vitality::Vitality,
+}
+
+impl MultiBody {
+    /// 生物を一辺 `size` の場に、全体の R を `radius` にして置く。場に収まらなければ `None`。
+    pub fn new(animal: MultiAnimal, size: usize, radius: usize) -> Option<Self> {
+        let world = MultiWorld::place(&animal, size, radius)?;
+        Some(Self {
+            animal,
+            size,
+            radius,
+            world,
+            vitality: crate::vitality::Vitality::new(),
+        })
+    }
+
+    /// 体を1ステップ進め、崩壊していたら置き直す。戻り値は置き直したかどうか。
+    /// 成長の強さは、このステップの前のエネルギーで決まり、エネルギーはステップの後に減る
+    /// (`LeniaBody::step` と同じ順序)。
+    pub fn step(&mut self) -> bool {
+        let scales = vec![self.vitality.growth_scale(); self.world.channels.len()];
+        self.world.step_with(&scales, self.vitality.tempo());
+        self.vitality.decay_step();
+        if self.world.collapsed() {
+            self.revive();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 体の時間の進み方を変える(`Vitality::set_tempo` の範囲に丸める)。
+    pub fn set_tempo(&mut self, tempo: f32) {
+        self.vitality.set_tempo(tempo);
+    }
+
+    pub fn energy(&self) -> f32 {
+        self.vitality.energy()
+    }
+
+    /// 環境ストレス(PC 版では CPU 負荷)に応じて、エネルギーを追加で削る。
+    pub fn apply_environmental_stress(&mut self, stress: f32) {
+        self.vitality.apply_environmental_stress(stress);
+    }
+
+    /// エネルギーを満タンに戻す。表示だけのモードで、弱らせずに見るために使う。
+    pub fn refill_energy(&mut self) {
+        self.vitality.refill();
+    }
+
+    /// クリック。いまのペットと同じ強さの摂動を全チャンネルへ注入し、満額の世話として数える。
+    pub fn click(&mut self, at: crate::CellPos) {
+        let Some(perturbation) = crate::body_perturbation_for(crate::Touch::Click { at }) else {
+            return;
+        };
+        for channel in &mut self.world.channels {
+            crate::accumulate_into(channel, self.size, self.size, &perturbation, 0.0, 1.0);
+        }
+        self.vitality.receive_care(1.0);
+    }
+
+    /// 生物を置き直し、エネルギーを満タンに戻す。
+    pub fn revive(&mut self) {
+        if let Some(world) = MultiWorld::place(&self.animal, self.size, self.radius) {
+            self.world = world;
+        }
+        self.vitality.refill();
+    }
+
+    pub fn world(&self) -> &MultiWorld {
+        &self.world
+    }
+
+    pub fn animal(&self) -> &MultiAnimal {
+        &self.animal
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multichannel_body_weakens_when_left_alone_and_recovers_when_clicked() {
+        // Arrange: 231-04 を PC 版と同じ 64×64・R 13 に置く
+        let animal = load_multichannel("231-04").unwrap().unwrap();
+        let mut body = MultiBody::new(animal, 64, 13).unwrap();
+
+        // Act: 150 秒ぶん放置する
+        for _ in 0..(15 * 150 + 5) {
+            assert!(!body.step(), "放置で弱る間に崩壊した");
+        }
+        let neglected = body.energy();
+        let mass_before = body.world().mass();
+        body.click(crate::CellPos { x: 32, y: 32 });
+
+        // Assert: エネルギーは尽き、クリックで世話として回復し、全チャンネルに注入される
+        assert_eq!(neglected, 0.0);
+        assert!((body.energy() - crate::vitality::ENERGY_PER_TOUCH).abs() < 1e-6);
+        assert!(body.world().mass() > mass_before);
+    }
 
     #[test]
     fn every_bundled_animal_loads_and_fits_a_64_field_at_radius_13() {

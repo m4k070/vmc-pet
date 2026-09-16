@@ -18,6 +18,12 @@ pub enum Action {
     ListAnimals,
     /// 【実験】多チャンネル Lenia の生物を、ペットの仕組みにつながずに表示する。
     PreviewMultichannel { id: String },
+    /// 【実験】多チャンネル Lenia の生物を、元気・テンポ・クリックだけつないで動かす。
+    /// `preview` があれば、その気分に固定する(テンポが変わる)。
+    RunMultichannel {
+        id: String,
+        preview: Option<MoodState>,
+    },
     /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
     ListMultichannel,
     /// 使い方を表示して終了する。
@@ -60,6 +66,7 @@ impl std::error::Error for ArgsError {}
 pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsError> {
     let mut animal_code = default_animal_code.to_string();
     let mut preview = None;
+    let mut multichannel: Option<String> = None;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -82,6 +89,17 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             return Ok(Action::PreviewMultichannel {
                 id: value.to_string(),
             });
+        }
+        if arg == "--multichannel" {
+            let value = iter
+                .next()
+                .ok_or(ArgsError::MissingValue("--multichannel"))?;
+            multichannel = Some(value.clone());
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--multichannel=") {
+            multichannel = Some(value.to_string());
+            continue;
         }
         if arg == "--animal" {
             let value = iter.next().ok_or(ArgsError::MissingValue("--animal"))?;
@@ -106,6 +124,9 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         return Err(ArgsError::UnknownFlag(arg.clone()));
     }
 
+    if let Some(id) = multichannel {
+        return Ok(Action::RunMultichannel { id, preview });
+    }
     Ok(Action::Run {
         animal_code,
         preview,
@@ -126,6 +147,9 @@ vmc-pet [オプション]
   --preview-multichannel <id>
                      【実験】多チャンネル Lenia の生物を 64x64 の場で表示する
                      (エネルギー・学習・記憶にはつながない。クリックで突ける)
+  --multichannel <id>
+                     【実験】多チャンネル Lenia の生物を、元気・テンポ・クリックだけつないで動かす
+                     (--preview-mood と組み合わせると、その気分のテンポになる)
   -h, --help         このメッセージを表示して終了する
 ";
 
@@ -248,6 +272,47 @@ mod tests {
         assert_eq!(
             result,
             Err(ArgsError::MissingValue("--preview-multichannel"))
+        );
+    }
+
+    #[test]
+    fn multichannel_runs_the_body_and_can_be_combined_with_a_pinned_mood() {
+        // Arrange / Act / Assert: 気分の指定はどちらの順でもよい
+        assert_eq!(
+            parse(&args(&["--multichannel", "231-04"]), "O2u").unwrap(),
+            Action::RunMultichannel {
+                id: "231-04".to_string(),
+                preview: None,
+            }
+        );
+        let expected = Action::RunMultichannel {
+            id: "231-04".to_string(),
+            preview: Some(MoodState::Disappointed),
+        };
+        assert_eq!(
+            parse(
+                &args(&["--preview-mood", "disappointed", "--multichannel=231-04"]),
+                "O2u"
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse(
+                &args(&["--multichannel", "231-04", "--preview-mood=disappointed"]),
+                "O2u"
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_dangling_multichannel_flag_is_a_missing_value_error() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(&args(&["--multichannel"]), "O2u"),
+            Err(ArgsError::MissingValue("--multichannel"))
         );
     }
 

@@ -41,8 +41,23 @@ fn main() {
             }
             return;
         }
+        Ok(cli::Action::RunMultichannel { id, preview }) => {
+            let surface = match multichannel_preview::MultichannelSurface::body(&id, preview) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    eprintln!("vmc-pet: {error}");
+                    eprintln!("vmc-pet: run with --list-multichannel to see the available ids");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(error) = LayerWindow::run(LayerWindowConfig::default(), Box::new(surface)) {
+                eprintln!("vmc-pet: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Ok(cli::Action::PreviewMultichannel { id }) => {
-            let preview = match multichannel_preview::MultichannelPreview::new(&id) {
+            let preview = match multichannel_preview::MultichannelSurface::display(&id) {
                 Ok(preview) => preview,
                 Err(error) => {
                     eprintln!("vmc-pet: {error}");
