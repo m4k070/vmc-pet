@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod interface;
+mod multichannel_preview;
 mod persistence;
 mod render;
 mod shell;
@@ -27,6 +28,31 @@ fn main() {
                     eprintln!("vmc-pet: {error}");
                     std::process::exit(1);
                 }
+            }
+            return;
+        }
+        Ok(cli::Action::ListMultichannel) => {
+            match cli::format_multichannel_list() {
+                Ok(list) => print!("{list}"),
+                Err(error) => {
+                    eprintln!("vmc-pet: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Ok(cli::Action::PreviewMultichannel { id }) => {
+            let preview = match multichannel_preview::MultichannelPreview::new(&id) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    eprintln!("vmc-pet: {error}");
+                    eprintln!("vmc-pet: run with --list-multichannel to see the available ids");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(error) = LayerWindow::run(LayerWindowConfig::default(), Box::new(preview)) {
+                eprintln!("vmc-pet: {error}");
+                std::process::exit(1);
             }
             return;
         }

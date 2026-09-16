@@ -16,6 +16,10 @@ pub enum Action {
     },
     /// 選べる生物の一覧を表示して終了する。
     ListAnimals,
+    /// 【実験】多チャンネル Lenia の生物を、ペットの仕組みにつながずに表示する。
+    PreviewMultichannel { id: String },
+    /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
+    ListMultichannel,
     /// 使い方を表示して終了する。
     Help,
 }
@@ -65,6 +69,20 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         if arg == "--list-animals" {
             return Ok(Action::ListAnimals);
         }
+        if arg == "--list-multichannel" {
+            return Ok(Action::ListMultichannel);
+        }
+        if arg == "--preview-multichannel" {
+            let value = iter
+                .next()
+                .ok_or(ArgsError::MissingValue("--preview-multichannel"))?;
+            return Ok(Action::PreviewMultichannel { id: value.clone() });
+        }
+        if let Some(value) = arg.strip_prefix("--preview-multichannel=") {
+            return Ok(Action::PreviewMultichannel {
+                id: value.to_string(),
+            });
+        }
         if arg == "--animal" {
             let value = iter.next().ok_or(ArgsError::MissingValue("--animal"))?;
             animal_code = value.clone();
@@ -103,8 +121,33 @@ vmc-pet [オプション]
   --list-animals     選べる生物の一覧を表示して終了する
   --preview-mood <lively|waiting|disappointed>
                      気分を固定して、その見た目を確かめる(記憶は読みも書きもしない)
+  --list-multichannel
+                     【実験】表示できる多チャンネル Lenia の生物の一覧を表示して終了する
+  --preview-multichannel <id>
+                     【実験】多チャンネル Lenia の生物を 64x64 の場で表示する
+                     (エネルギー・学習・記憶にはつながない。クリックで突ける)
   -h, --help         このメッセージを表示して終了する
 ";
+
+/// 表示できる多チャンネルの生物の一覧を人間向けに整形する。
+pub fn format_multichannel_list() -> Result<String, serde_json::Error> {
+    let animals = vmc_pet_body::multichannel::list_multichannel()?;
+    let mut out = String::new();
+    for animal in animals {
+        let name = if animal.name.is_empty() {
+            "(名前なし)"
+        } else {
+            &animal.name
+        };
+        out.push_str(&format!(
+            "  {:7} {name} ({} チャンネル・カーネル {} 本)\n",
+            animal.id,
+            animal.cells.len(),
+            animal.params.len()
+        ));
+    }
+    Ok(out)
+}
 
 /// 選べる生物の一覧を人間向けに整形する。
 pub fn format_animal_list() -> Result<String, vmc_pet_body::animal::AnimalError> {
@@ -177,6 +220,43 @@ mod tests {
         assert_eq!(
             parse(&args(&["--animal", "OG2g", "--help"]), "O2u").unwrap(),
             Action::Help
+        );
+    }
+
+    #[test]
+    fn preview_multichannel_takes_an_id_in_either_form() {
+        // Arrange / Act / Assert
+        let expected = Action::PreviewMultichannel {
+            id: "221-09".to_string(),
+        };
+        assert_eq!(
+            parse(&args(&["--preview-multichannel", "221-09"]), "O2u").unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse(&args(&["--preview-multichannel=221-09"]), "O2u").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_dangling_preview_multichannel_flag_is_a_missing_value_error() {
+        // Arrange / Act
+        let result = parse(&args(&["--preview-multichannel"]), "O2u");
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(ArgsError::MissingValue("--preview-multichannel"))
+        );
+    }
+
+    #[test]
+    fn list_multichannel_flag_is_recognized() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(&args(&["--list-multichannel"]), "O2u").unwrap(),
+            Action::ListMultichannel
         );
     }
 

@@ -18,7 +18,9 @@
 //! 足したカーネルの `h_k` の合計で割り、0〜1 に切り詰める。時間の刻み `dt = 1/T` と成長関数の形は
 //! 最初のカーネルの値を使う。カーネルは相対半径 r・リングの重み b の多項式の輪で、合計が1になる
 //! よう正規化する。Chan 氏の実装は FFT で畳み込むが、ここでは体と同じ疎な散布型で畳み込む
-//! (場はトーラスなので結果は同じになる)。
+//! (場はトーラスなので結果は同じになる)。式・データの型・RLE の読み方・R の縮め方は crate の
+//! `vmc_pet_body::multichannel` にあり(PC 版の `--preview-multichannel` と同じ実装)、このツールは
+//! 分析と試験の処理だけを持つ。
 //!
 //! 使い方: `cargo run --release -p vmc-pet-body --example multichannel_trial -- <found の JSON が
 //! あるディレクトリ> <出力先>`。ディレクトリには `found221.json` などの名前で置く。出力先に、
@@ -36,8 +38,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
 
-use serde::Deserialize;
 use vmc_pet_body::lenia::{GrowthMapping, KernelCore};
+use vmc_pet_body::multichannel::{KernelData, MultiAnimal, MultiWorld, COLLAPSE_MASS};
 use vmc_pet_body::{accumulate_into, load_animal, CellPos, Perturbation};
 
 /// 読むファイル(`found{名前}.json`)。2チャンネル・自己1本、2チャンネル・自己2本、3チャンネル・自己1本。
@@ -47,16 +49,11 @@ const STEPS: u32 = 3_000;
 const SPEED_WINDOW: u32 = 300;
 /// 途中の様子を記録するステップ。
 const CHECKPOINT: u32 = 1_000;
-/// 総量(全チャンネルの和)がこれ未満なら崩壊。
-const COLLAPSE_MASS: f32 = 5.0;
 /// どれかのチャンネルがこの値を超えるセルを、はっきり見える点とする。
 const CLEARLY_VISIBLE: f32 = 0.2;
 /// 塊を数えるときの目安と、主な塊とみなす総量の割合(`flexible_search.rs` と同じ)。
 const BLOB_THRESHOLD: f32 = 0.1;
 const MAJOR_BLOB_SHARE: f32 = 0.1;
-/// 散布型の畳み込みで寄与元とみなす値。
-const NEGLIGIBLE_CELL_VALUE: f32 = 1e-5;
-const NEGLIGIBLE_KERNEL_WEIGHT: f32 = 1e-5;
 /// 縮めた後の R。いまの体(O2u など)と同じ。
 const PET_RADIUS: usize = 13;
 
@@ -67,264 +64,19 @@ const VARIANTS: [(&str, usize, bool); 3] = [
     ("R 13・32×32", 32, true),
 ];
 
-#[derive(Deserialize, Clone)]
-struct KernelData {
-    #[serde(rename = "R")]
-    radius: usize,
-    #[serde(rename = "T")]
-    time_divisor: f32,
-    b: String,
-    m: f32,
-    s: f32,
-    #[serde(default = "one")]
-    h: f32,
-    #[serde(default = "one")]
-    r: f32,
-    kn: u32,
-    gn: u32,
-    c: [usize; 2],
+/// 多チャンネルの場と生物は crate の実装を使う(PC 版の `--preview-multichannel` と同じ式)。
+type World = MultiWorld;
+type AnimalData = MultiAnimal;
+
+/// 分析のための読み取り(crate の `MultiWorld` には持たせない、この実験ツールだけの処理)。
+trait Analysis {
+    fn visible_area(&self) -> usize;
+    fn centroid(&self) -> Option<(f32, f32)>;
+    fn major_blobs(&self) -> usize;
+    fn write_ppm(&self, path: &Path);
 }
 
-fn one() -> f32 {
-    1.0
-}
-
-#[derive(Deserialize, Clone)]
-struct AnimalData {
-    #[serde(default)]
-    code: String,
-    #[serde(default)]
-    name: String,
-    params: Vec<KernelData>,
-    cells: Vec<String>,
-}
-
-/// "1/2,1" のようなリングの重みを数に直す。
-fn parse_fractions(text: &str) -> Vec<f32> {
-    text.split(',')
-        .map(|part| match part.split_once('/') {
-            Some((numerator, denominator)) => {
-                numerator.trim().parse::<f32>().unwrap()
-                    / denominator.trim().parse::<f32>().unwrap()
-            }
-            None => part.trim().parse::<f32>().unwrap(),
-        })
-        .collect()
-}
-
-/// `LeniaNDKC.py` の `ch2val`(0〜255)。
-fn cell_value(token: &str) -> f32 {
-    let chars: Vec<char> = token.chars().collect();
-    let value = match chars.as_slice() {
-        ['.'] | ['b'] => 0,
-        ['o'] => 255,
-        [single] => *single as u32 - 'A' as u32 + 1,
-        [prefix, letter] => (*prefix as u32 - 'p' as u32) * 24 + (*letter as u32 - 'A' as u32 + 25),
-        _ => panic!("読めない RLE の値: {token}"),
-    };
-    value as f32 / 255.0
-}
-
-/// 2次元の RLE を、行優先の値と (幅, 高さ) に直す(`LeniaNDKC.py` の `rle2cells` と同じ手順)。
-/// 回数つきの値はその数だけ繰り返し、回数つきの行区切り `n$` は、今の行の後に空の行を n−1 行足す。
-/// 短い行は 0 で埋める。
-fn decode_rle(rle: &str) -> (Vec<f32>, usize, usize) {
-    let mut rows: Vec<Vec<f32>> = Vec::new();
-    let mut row: Vec<f32> = Vec::new();
-    let mut count = String::new();
-    let mut prefix: Option<char> = None;
-    let text = format!("{}$", rle.trim_end_matches('!'));
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            count.push(ch);
-            continue;
-        }
-        if ('p'..='y').contains(&ch) || ch == '@' {
-            prefix = Some(ch);
-            continue;
-        }
-        let token: String = prefix
-            .take()
-            .into_iter()
-            .chain(std::iter::once(ch))
-            .collect();
-        let repeat = count.parse::<usize>().unwrap_or(1);
-        count.clear();
-        if token == "$" {
-            rows.push(std::mem::take(&mut row));
-            for _ in 1..repeat {
-                rows.push(Vec::new());
-            }
-        } else {
-            let value = cell_value(&token);
-            row.extend(std::iter::repeat_n(value, repeat));
-        }
-    }
-    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let height = rows.len();
-    let mut values = vec![0.0; width * height];
-    for (y, row) in rows.iter().enumerate() {
-        values[y * width..y * width + row.len()].copy_from_slice(row);
-    }
-    (values, width, height)
-}
-
-/// 最近傍で拡大縮小する(`scipy.ndimage.zoom(order=0)` に倣う)。
-fn zoom(values: &[f32], width: usize, height: usize, ratio: f32) -> (Vec<f32>, usize, usize) {
-    let new_width = ((width as f32 * ratio).round() as usize).max(1);
-    let new_height = ((height as f32 * ratio).round() as usize).max(1);
-    let source = |new: usize, old: usize, index: usize| {
-        if new <= 1 {
-            0
-        } else {
-            ((index as f32 * (old - 1) as f32 / (new - 1) as f32).round() as usize).min(old - 1)
-        }
-    };
-    let mut out = vec![0.0; new_width * new_height];
-    for y in 0..new_height {
-        for x in 0..new_width {
-            let (sx, sy) = (source(new_width, width, x), source(new_height, height, y));
-            out[y * new_width + x] = values[sy * width + sx];
-        }
-    }
-    (out, new_width, new_height)
-}
-
-/// 多項式の輪(`kn` = 1)。
-fn kernel_core(x: f32) -> f32 {
-    (4.0 * x * (1.0 - x)).powi(4)
-}
-
-/// 多項式の成長関数(`gn` = 1)。
-fn growth(potential: f32, center: f32, width: f32) -> f32 {
-    let deviation = potential - center;
-    (1.0 - deviation * deviation / (9.0 * width * width))
-        .max(0.0)
-        .powi(4)
-        * 2.0
-        - 1.0
-}
-
-struct Tap {
-    dx: i32,
-    dy: i32,
-    weight: f32,
-}
-
-struct Kernel {
-    taps: Vec<Tap>,
-    center: f32,
-    width: f32,
-    h: f32,
-    source: usize,
-    target: usize,
-}
-
-/// `LeniaNDKC.py` の `kernel_shell` と同じ形のカーネルを、合計1に正規化して作る。距離は全体の R
-/// (最初のカーネルの R)で割り、相対半径 r の内側だけを使う。
-fn build_kernel(data: &KernelData, radius: usize) -> Kernel {
-    let rings = parse_fractions(&data.b);
-    let ring_count = rings.len() as f32;
-    let r = radius as i32;
-    let mut taps = Vec::new();
-    let mut total = 0.0;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            let distance = ((dx * dx + dy * dy) as f32).sqrt() / radius as f32;
-            if distance >= data.r {
-                continue;
-            }
-            let scaled = ring_count * distance / data.r;
-            let ring = (scaled.floor() as usize).min(rings.len() - 1);
-            let weight = kernel_core((scaled % 1.0).min(1.0)) * rings[ring];
-            if weight <= NEGLIGIBLE_KERNEL_WEIGHT {
-                continue;
-            }
-            total += weight;
-            taps.push(Tap { dx, dy, weight });
-        }
-    }
-    for tap in &mut taps {
-        tap.weight /= total;
-    }
-    Kernel {
-        taps,
-        center: data.m,
-        width: data.s,
-        h: data.h,
-        source: data.c[0],
-        target: data.c[1],
-    }
-}
-
-struct World {
-    size: usize,
-    channels: Vec<Vec<f32>>,
-    kernels: Vec<Kernel>,
-    time_step: f32,
-    potential: Vec<f32>,
-    increments: Vec<Vec<f32>>,
-}
-
-impl World {
-    fn step(&mut self) {
-        let scales = vec![1.0; self.channels.len()];
-        self.step_with(&scales, 1.0);
-    }
-
-    /// 育てるチャンネルごとの成長の強さと、テンポを指定して1ステップ進める。成長の強さは、
-    /// いまのペットと同じく正の成長にだけ掛ける。どちらも 1 なら `LeniaNDKC.py` と同じ規則。
-    fn step_with(&mut self, growth_scales: &[f32], tempo: f32) {
-        let size = self.size;
-        for increment in &mut self.increments {
-            increment.fill(0.0);
-        }
-        let mut weights = vec![0.0f32; self.channels.len()];
-        for kernel in &self.kernels {
-            self.potential.fill(0.0);
-            for (index, &value) in self.channels[kernel.source].iter().enumerate() {
-                if value <= NEGLIGIBLE_CELL_VALUE {
-                    continue;
-                }
-                let (x, y) = ((index % size) as i32, (index / size) as i32);
-                for tap in &kernel.taps {
-                    let tx = (x + tap.dx).rem_euclid(size as i32) as usize;
-                    let ty = (y + tap.dy).rem_euclid(size as i32) as usize;
-                    self.potential[ty * size + tx] += value * tap.weight;
-                }
-            }
-            let increment = &mut self.increments[kernel.target];
-            let scale = growth_scales[kernel.target];
-            let time_step = self.time_step * tempo;
-            for (added, &potential) in increment.iter_mut().zip(&self.potential) {
-                let grown = growth(potential, kernel.center, kernel.width);
-                let scaled = if grown > 0.0 { grown * scale } else { grown };
-                *added += time_step * kernel.h * scaled;
-            }
-            weights[kernel.target] += kernel.h;
-        }
-        for (channel, values) in self.channels.iter_mut().enumerate() {
-            if weights[channel] <= 0.0 {
-                continue;
-            }
-            for (value, increment) in values.iter_mut().zip(&self.increments[channel]) {
-                *value = (*value + increment / weights[channel]).clamp(0.0, 1.0);
-            }
-        }
-    }
-
-    fn total(&self, index: usize) -> f32 {
-        self.channels.iter().map(|c| c[index]).sum()
-    }
-
-    fn mass(&self) -> f32 {
-        (0..self.size * self.size).map(|i| self.total(i)).sum()
-    }
-
-    fn channel_masses(&self) -> Vec<f32> {
-        self.channels.iter().map(|c| c.iter().sum()).collect()
-    }
-
+impl Analysis for World {
     fn visible_area(&self) -> usize {
         (0..self.size * self.size)
             .filter(|&i| self.channels.iter().any(|c| c[i] > CLEARLY_VISIBLE))
@@ -427,32 +179,14 @@ fn toroidal_offset(offset: f32, size: f32) -> f32 {
     }
 }
 
-/// 生物を条件に合わせて場に置く。場に収まらない(パターンが場より大きい)ときは `None`。
+/// 生物を条件に合わせて場に置く。`shrink` なら R を 13 に縮める。場に収まらなければ `None`。
 fn place(animal: &AnimalData, size: usize, shrink: bool) -> Option<World> {
-    let original_radius = animal.params[0].radius;
-    let radius = if shrink { PET_RADIUS } else { original_radius };
-    let ratio = radius as f32 / original_radius as f32;
-    let mut channels = Vec::new();
-    for rle in &animal.cells {
-        let (values, width, height) = decode_rle(rle);
-        let (values, width, height) = if shrink {
-            zoom(&values, width, height, ratio)
-        } else {
-            (values, width, height)
-        };
-        if width > size || height > size {
-            return None;
-        }
-        let (left, top) = ((size - width) / 2, (size - height) / 2);
-        let mut field = vec![0.0; size * size];
-        for y in 0..height {
-            for x in 0..width {
-                field[(top + y) * size + left + x] = values[y * width + x];
-            }
-        }
-        channels.push(field);
-    }
-    Some(build_world(&animal.params, radius, channels, size))
+    let radius = if shrink {
+        PET_RADIUS
+    } else {
+        animal.params[0].radius
+    };
+    MultiWorld::place(animal, size, radius)
 }
 
 /// カーネルのパラメータ(全体の R は `radius`)と、チャンネルごとの場の値から世界を作る。
@@ -462,16 +196,7 @@ fn build_world(
     channels: Vec<Vec<f32>>,
     size: usize,
 ) -> World {
-    let kernels = params.iter().map(|p| build_kernel(p, radius)).collect();
-    let channel_count = channels.len();
-    World {
-        size,
-        channels,
-        kernels,
-        time_step: 1.0 / params[0].time_divisor,
-        potential: vec![0.0; size * size],
-        increments: vec![vec![0.0; size * size]; channel_count],
-    }
+    MultiWorld::new(params, radius, channels, size)
 }
 
 /// 1つの条件での結末。
@@ -705,7 +430,21 @@ fn colour_difference(a: &Features, b: &Features) -> f32 {
         .fold(0.0, f32::max)
 }
 
-impl World {
+/// 試験のための操作(この実験ツールだけの処理)。
+trait SuiteWorld {
+    fn broken(&self) -> bool;
+    fn measure(
+        &mut self,
+        steps: u32,
+        scales: &[f32],
+        tempo: f32,
+        before_step: impl FnMut(&mut World, u32),
+    ) -> Option<Features>;
+    fn ramp(&mut self, steps: u32, from: (&[f32], f32), to: (&[f32], f32)) -> bool;
+    fn click(&mut self);
+}
+
+impl SuiteWorld for World {
     fn broken(&self) -> bool {
         self.mass() < COLLAPSE_MASS || self.visible_area() > self.size * self.size / 2
     }

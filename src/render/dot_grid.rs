@@ -8,7 +8,7 @@
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
 use crate::render::TouchEchoView;
-use vmc_pet_body::appearance::{appearance_of, DOT_GAP_RATIO};
+use vmc_pet_body::appearance::{appearance_of, DOT_GAP_RATIO, MIN_VISIBLE_VALUE};
 use vmc_pet_body::{CellPos, FieldView, PigmentView};
 
 /// 円の縁をぼかす幅(ピクセル)。ジャギーを消すために使う。
@@ -195,6 +195,64 @@ impl DotGrid {
                     radius: max_radius * appearance.size,
                     value: appearance.opacity,
                     color: (color.red, color.green, color.blue),
+                };
+                draw_dot(canvas, width, height, bounds, dot);
+            }
+        }
+    }
+}
+
+impl DotGrid {
+    /// 【実験】多チャンネルの場を描く(`--preview-multichannel`)。チャンネルを赤・緑・青に割り当てる。
+    ///
+    /// ドットの大きさと不透明度は、体の場と同じ決まり(全チャンネルのうち一番大きい値の平方根と、
+    /// その値そのもの)に従う。色は、各チャンネルの値を一番大きい値で割った割合。2チャンネルなら
+    /// 赤と緑が重なったところが黄色になる。echo と色素は描かない。
+    pub fn draw_channels(
+        &self,
+        channels: &[Vec<f32>],
+        field_size: usize,
+        origin: (f32, f32),
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+    ) {
+        let bounds = self.bounds(width, height);
+        if bounds.width == 0 {
+            return;
+        }
+        let cell_size = bounds.width as f32 / self.columns as f32;
+        let max_radius = cell_size * 0.5 * (1.0 - DOT_GAP_RATIO);
+        let cell_origin = (origin.0.floor() as i32, origin.1.floor() as i32);
+        let shift = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
+
+        for row in -1..=self.rows as i32 {
+            for column in -1..=self.columns as i32 {
+                let pooled: Vec<f32> = channels
+                    .iter()
+                    .map(|values| {
+                        pool_cell(
+                            |x, y| values[y * field_size + x],
+                            (field_size, field_size),
+                            cell_origin,
+                            self.columns,
+                            self.rows,
+                            column,
+                            row,
+                        )
+                    })
+                    .collect();
+                let visibility = pooled.iter().copied().fold(0.0, f32::max);
+                if visibility <= MIN_VISIBLE_VALUE {
+                    continue;
+                }
+                let share = |channel: usize| pooled.get(channel).map_or(0.0, |v| v / visibility);
+                let dot = Dot {
+                    center_x: bounds.x as f32 + (column as f32 + 0.5 - shift.0) * cell_size,
+                    center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
+                    radius: max_radius * visibility.sqrt(),
+                    value: visibility.min(1.0),
+                    color: (share(0), share(1), share(2)),
                 };
                 draw_dot(canvas, width, height, bounds, dot);
             }

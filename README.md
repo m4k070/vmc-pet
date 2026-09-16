@@ -61,6 +61,14 @@ cargo run --release -- --list-animals   # 選べる生物の一覧
 cargo run --release -- --animal OG2g    # Gyrorbium gyrans で起動
 ```
 
+【実験】多チャンネル Lenia の生物(Chan 氏のリポジトリの探索結果から、ペットの試験一式に合格した
+9体)を、ペットの仕組みにはつながずに表示することもできる([docs/experiments/rule-candidates.md](docs/experiments/rule-candidates.md))。
+
+```sh
+cargo run --release -- --list-multichannel            # 表示できる生物の一覧
+cargo run --release -- --preview-multichannel 231-04  # 64x64 の場で表示する(クリックで突ける)
+```
+
 体の上にポインタを乗せると撫でている扱いになり、触れた場所がほんのり光る
 (見た目だけの反応で、体そのものには影響しない)。クリックすると突いた扱いになり、
 体に実際にエネルギーが注入されて反応する。Lenia はカオス系なので触り方によっては
