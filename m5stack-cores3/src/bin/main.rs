@@ -55,7 +55,11 @@ use vmc_pet_body::{
     Camera, CellPos, FieldView, LineReader, Pet, PigmentView, SerialCommand, TouchEchoView,
     load_animal,
 };
-use vmc_pet_cores3::{clock::Clock, persistence::MemoryStore};
+use vmc_pet_cores3::{
+    clock::Clock,
+    multichannel::{self, MultiRenderer},
+    persistence::MemoryStore,
+};
 
 use vmc_pet_body::appearance::{Color, DOT_GAP_RATIO, appearance_of};
 
@@ -91,6 +95,13 @@ const CLOCK_READ_INTERVAL: Duration = Duration::from_secs(1);
 /// プレビュー中は記憶(フラッシュ)を読みも書きもしない。本物のペットが覚えた生活
 /// リズムとエネルギーを上書きしないため。見終わったら指定なしで書き込み直す。
 const PREVIEW_MOOD: Option<&str> = option_env!("VMC_PET_PREVIEW_MOOD");
+
+/// 【実験】多チャンネル Lenia の生物を体にするときの指定(ビルド時の環境変数)。
+///
+/// `VMC_PET_MULTICHANNEL=231-04 cargo run --release` のように書き込むと、いつものペットの代わりに
+/// その生物を元気とタッチだけつないで動かす(`vmc_pet_cores3::multichannel`)。記憶は読みも書きも
+/// しない。見終わったら指定なしで書き込み直す。
+const MULTICHANNEL_ID: Option<&str> = option_env!("VMC_PET_MULTICHANNEL");
 
 /// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
 /// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
@@ -311,6 +322,107 @@ fn apply_serial_command<I2C, E>(
     }
 }
 
+/// 【実験】多チャンネルの生物を体として動かし続ける(`MULTICHANNEL_ID` を指定したとき)。
+///
+/// いつものループと同じく、タッチを読み、1ステップ進めるごとに描く。体のステップが目標(66ms)より
+/// ずっと重いと見込まれるので、実際にかかった時間を 15 ステップごとに出す。生物を読めなければ止まる
+/// (記憶に触れないモードなので、いつものペットに黙って切り替えない)。
+fn run_multichannel<D, I2C>(
+    id: &str,
+    display: &mut D,
+    board: &core_s3::Board,
+    touch_ready: bool,
+    touch: &mut Ft6336u<I2C>,
+    delay: &Delay,
+) -> !
+where
+    D: DrawTarget<Color = Rgb565>,
+    I2C: embedded_hal::i2c::I2c,
+{
+    esp_println::println!("vmc-pet-cores3: loading multichannel animal {id}");
+    let mut body = match multichannel::load_body(id) {
+        Ok(body) => body,
+        Err(reason) => loop {
+            esp_println::println!("vmc-pet-cores3: cannot run multichannel animal {id}: {reason}");
+            delay.delay(Duration::from_secs(5));
+        },
+    };
+    esp_println::println!(
+        "vmc-pet-cores3: running multichannel animal {id} ({} channels, {} kernels) on {size}x{size} at R={radius}; \
+         connected: energy, touch; not connected: tempo, habituation, pigment, learning, controller, memory; \
+         heap {}",
+        body.animal().cells.len(),
+        body.animal().params.len(),
+        esp_alloc::HEAP.stats(),
+        size = multichannel::FIELD_SIZE,
+        radius = multichannel::RADIUS,
+    );
+
+    let mut renderer = MultiRenderer::new(board.display.width as u32, board.display.height as u32);
+    let mut camera = Camera::new();
+    let mut summed = vmc_pet_body::Field::new(multichannel::FIELD_SIZE, multichannel::FIELD_SIZE);
+    let mut was_touching = false;
+    let mut step: u32 = 0;
+    let mut stepping_time = Duration::from_millis(0);
+    let mut last_step = Instant::now();
+    loop {
+        if touch_ready {
+            let touched_cell = match touch.read_report() {
+                Ok(report) => report
+                    .events
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .filter(|event| !matches!(event.phase, TouchPhase::Up))
+                    .map(|event| renderer.cell_at(event.point.x, event.point.y, camera.origin())),
+                Err(_) => None,
+            };
+            // 新たに触れ始めたときだけ突く(いつものペットと同じ判定。慣れはつないでいない)
+            if let Some(Some(at)) = touched_cell
+                && !was_touching
+            {
+                body.click(at);
+            }
+            was_touching = touched_cell.is_some();
+        }
+
+        if last_step.elapsed() >= STEP_INTERVAL {
+            let started = Instant::now();
+            let energy_before = body.energy();
+            let collapsed = body.step();
+            stepping_time += started.elapsed();
+            // 体が目標より遅いと遅れが溜まり続けるので、追いつこうとせず今から数え直す
+            last_step = Instant::now();
+            step += 1;
+
+            multichannel::follow_body(&mut camera, &mut summed, &body);
+            renderer.update(display, &body.world().channels, camera.origin());
+
+            if collapsed {
+                esp_println::println!(
+                    "vmc-pet-cores3: the multichannel body collapsed; placing it again"
+                );
+            }
+            if energy_before > 0.0 && body.energy() == 0.0 {
+                esp_println::println!(
+                    "vmc-pet-cores3: energy depleted; the body is weakening from neglect"
+                );
+            }
+            if step.is_multiple_of(15) {
+                esp_println::println!(
+                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} step_ms={}",
+                    body.world().mass(),
+                    body.energy(),
+                    stepping_time.as_millis() / 15
+                );
+                stepping_time = Duration::from_millis(0);
+            }
+        }
+
+        delay.delay(TOUCH_POLL_INTERVAL);
+    }
+}
+
 #[main]
 fn main() -> ! {
     // CPU クロックは 240MHz を既定にする。Lenia の畳み込みが CPU バウンドで、80MHz の
@@ -341,6 +453,12 @@ fn main() -> ! {
     );
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    // 【実験】多チャンネルの体は、64×64 の場を3チャンネルぶんと、その作業領域・カーネル9本のタップを
+    // 持つ(合わせて約 25 万バイトの見積もり)。いつものペットの領域には収まらないので、このモードの
+    // ときだけ内蔵 RAM から追加の領域を足す。
+    if MULTICHANNEL_ID.is_some() {
+        esp_alloc::heap_allocator!(size: 320 * 1024);
+    }
 
     let mut parts = CoreS3::init_display(CoreS3DisplayResources {
         i2c0: peripherals.I2C0,
@@ -370,6 +488,17 @@ fn main() -> ! {
         if touch_ready { "ok" } else { "FAILED" }
     );
     let delay = Delay::new();
+
+    if let Some(id) = MULTICHANNEL_ID {
+        run_multichannel(
+            id,
+            &mut parts.display,
+            &board,
+            touch_ready,
+            &mut touch,
+            &delay,
+        );
+    }
 
     // 電源が切れている間も進む時計。これが無いと「停止していた時間」が
     // 分からず、記憶を持ち越しても再起動のたびに時間が止まったままになる。

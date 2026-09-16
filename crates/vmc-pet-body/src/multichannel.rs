@@ -5,11 +5,19 @@
 //! numpy で同じ式を写した参照実装と、チャンネルごとの総量が5〜6桁まで一致することを確かめてある
 //! (docs/experiments/rule-candidates.md「多チャンネル Lenia の生物を動かす」)。
 //!
-//! ペット本体(`Pet`)はまだ使っていない。PC 版の `--preview-multichannel` / `--multichannel` で、同梱した生物
+//! ペット本体(`Pet`)はまだ使っていない。PC 版の `--preview-multichannel` / `--multichannel` と、
+//! M5Stack の実験用ファームウェア(`VMC_PET_MULTICHANNEL`)で、同梱した生物
 //! (`assets/multichannel.json`、ペットの試験一式に合格した9体)を動かして確かめるためにある。
-//! PC 専用の実験なので `std` フィーチャの下に置く。
+//! どちらでも同じ式を使うため、数学関数は `math` のシムを通し、`no_std` でも動くようにしてある。
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use serde::Deserialize;
+
+use crate::math::{floorf, fractf, sqrtf};
 
 /// 同梱した多チャンネルの生物。出典とライセンスは `assets/NOTICE.md`。
 const MULTICHANNEL_JSON: &str = include_str!("../../../assets/multichannel.json");
@@ -152,13 +160,14 @@ pub fn decode_rle(rle: &str) -> (Vec<f32>, usize, usize) {
 
 /// 最近傍で拡大縮小する(`scipy.ndimage.zoom(order=0)` に倣う)。
 pub fn zoom(values: &[f32], width: usize, height: usize, ratio: f32) -> (Vec<f32>, usize, usize) {
-    let new_width = ((width as f32 * ratio).round() as usize).max(1);
-    let new_height = ((height as f32 * ratio).round() as usize).max(1);
+    let new_width = (round_non_negative(width as f32 * ratio) as usize).max(1);
+    let new_height = (round_non_negative(height as f32 * ratio) as usize).max(1);
     let source = |new: usize, old: usize, index: usize| {
         if new <= 1 {
             0
         } else {
-            ((index as f32 * (old - 1) as f32 / (new - 1) as f32).round() as usize).min(old - 1)
+            (round_non_negative(index as f32 * (old - 1) as f32 / (new - 1) as f32) as usize)
+                .min(old - 1)
         }
     };
     let mut out = vec![0.0; new_width * new_height];
@@ -171,19 +180,26 @@ pub fn zoom(values: &[f32], width: usize, height: usize, ratio: f32) -> (Vec<f32
     (out, new_width, new_height)
 }
 
+/// 0 以上の値を四捨五入する(`f32::round` は `std` にしか無いため)。
+fn round_non_negative(x: f32) -> f32 {
+    floorf(x + 0.5)
+}
+
+/// 4乗(`powi` は `std` にしか無いため、掛け算に展開する。`lenia.rs` と同じ)。
+fn fourth_power(x: f32) -> f32 {
+    let squared = x * x;
+    squared * squared
+}
+
 /// 多項式の輪(`kn` = 1)。
 fn kernel_core(x: f32) -> f32 {
-    (4.0 * x * (1.0 - x)).powi(4)
+    fourth_power(4.0 * x * (1.0 - x))
 }
 
 /// 多項式の成長関数(`gn` = 1)。
 fn growth(potential: f32, center: f32, width: f32) -> f32 {
     let deviation = potential - center;
-    (1.0 - deviation * deviation / (9.0 * width * width))
-        .max(0.0)
-        .powi(4)
-        * 2.0
-        - 1.0
+    fourth_power((1.0 - deviation * deviation / (9.0 * width * width)).max(0.0)) * 2.0 - 1.0
 }
 
 struct Tap {
@@ -211,13 +227,13 @@ fn build_kernel(data: &KernelData, radius: usize) -> Kernel {
     let mut total = 0.0;
     for dy in -r..=r {
         for dx in -r..=r {
-            let distance = ((dx * dx + dy * dy) as f32).sqrt() / radius as f32;
+            let distance = sqrtf((dx * dx + dy * dy) as f32) / radius as f32;
             if distance >= data.r {
                 continue;
             }
             let scaled = ring_count * distance / data.r;
-            let ring = (scaled.floor() as usize).min(rings.len() - 1);
-            let weight = kernel_core((scaled % 1.0).min(1.0)) * rings[ring];
+            let ring = (floorf(scaled) as usize).min(rings.len() - 1);
+            let weight = kernel_core(fractf(scaled).min(1.0)) * rings[ring];
             if weight <= NEGLIGIBLE_KERNEL_WEIGHT {
                 continue;
             }

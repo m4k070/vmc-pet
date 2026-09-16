@@ -33,7 +33,6 @@ pub mod lenia;
 pub mod lenia_body;
 pub mod memory;
 pub mod mood;
-#[cfg(feature = "std")]
 pub mod multichannel;
 pub mod perturbation;
 pub mod pet;
