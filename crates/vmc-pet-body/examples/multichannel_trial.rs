@@ -31,6 +31,11 @@
 //! 弱る 0.85・テンポ ×0.6・×1.6・クリック ×5 に加え、1つのチャンネルだけ成長を弱めて戻し、
 //! チャンネルの配分(色の割合)が表情の軸になるかを見る。比べるため、1チャンネルの O2u も
 //! 同じ手順にかける。
+//!
+//! `-- <ディレクトリ> --neglect <出力先>` で、同梱した9体(`assets/multichannel.json`)と O2u を、
+//! 実際のペットと同じ流れで弱らせる(docs/experiments/rule-candidates.md「多チャンネルの生物を
+//! ペットと同じ流れで放置する」): 2250 ステップかけて成長の強さを 0.85 へ、750 ステップかけて
+//! テンポを ×0.6 へ下げ、20000 ステップ過ごしてから、750 ステップで元に戻して 3000 ステップ保つ。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -888,6 +893,191 @@ fn suite(directory: &Path, output: &Path) {
     println!("合計 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+// ==== 実際のペットと同じ流れで放置する(--neglect) ====
+
+/// 触られないままエネルギーが尽きるまでのステップ数(`LeniaBody` の減り方と同じ約150秒)。
+const NEGLECT_STEPS: u32 = 2_250;
+/// エネルギーが尽きてから、がっかりを最大にする(テンポを下げる)までのステップ数。
+const MOOD_RAMP_STEPS: u32 = 750;
+/// がっかりしきったまま過ごすステップ数(docs/DESIGN.md で1チャンネルの4種を確かめた長さ)。
+const NEGLECTED_HOLD_STEPS: u32 = 20_000;
+/// 世話されて元に戻る流れの長さ。
+const RECOVER_STEPS: u32 = 750;
+const NEGLECT_TRIALS: u64 = 8;
+/// がっかりしきったときのテンポ(`mood::DISAPPOINTED_TEMPO`)。
+const DISAPPOINTED_TEMPO: f32 = 0.6;
+
+/// 1回の放置の結果。
+struct NeglectResult {
+    /// 壊れた区間。壊れなければ `None`。
+    broken_in: Option<&'static str>,
+    /// がっかりしきって過ごした最後の 900 ステップの、基準との差(見た目, 色)。
+    neglected: Option<(f32, f32)>,
+    /// 戻して保った後の、基準との差(見た目, 色)。
+    returned: Option<(f32, f32)>,
+}
+
+fn run_neglect(subject: &SuiteSubject, trial: u64, output: &Path) -> NeglectResult {
+    let mut result = NeglectResult {
+        broken_in: None,
+        neglected: None,
+        returned: None,
+    };
+    let mut world = build_world(
+        &subject.params,
+        subject.radius,
+        subject.channels.clone(),
+        SUITE_FIELD,
+    );
+    let normal = vec![1.0; world.channels.len()];
+    for _ in 0..SETTLE_STEPS {
+        world.step();
+        if world.broken() {
+            result.broken_in = Some("落ち着かせる間");
+            return result;
+        }
+    }
+    let mut rng = trial.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5EED_0000_0000_0002;
+    for channel in &mut world.channels {
+        for value in channel.iter_mut() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let noise = ((rng >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0) * NOISE;
+            *value = (*value * (1.0 + noise)).min(1.0);
+        }
+    }
+    let Some(baseline) = world.measure(MEASURE_STEPS, &normal, 1.0, |_, _| {}) else {
+        result.broken_in = Some("基準を測る間");
+        return result;
+    };
+    let weak = vec![ENERGY_FLOOR; normal.len()];
+    if !world.ramp(NEGLECT_STEPS, (&normal, 1.0), (&weak, 1.0)) {
+        result.broken_in = Some("エネルギーが尽きる間");
+        return result;
+    }
+    if !world.ramp(MOOD_RAMP_STEPS, (&weak, 1.0), (&weak, DISAPPOINTED_TEMPO)) {
+        result.broken_in = Some("がっかりしていく間");
+        return result;
+    }
+    let Some(neglected) = world.measure(NEGLECTED_HOLD_STEPS, &weak, DISAPPOINTED_TEMPO, |_, _| {})
+    else {
+        result.broken_in = Some("がっかりしきって過ごす間");
+        return result;
+    };
+    result.neglected = Some((
+        distance(&neglected, &baseline),
+        colour_difference(&neglected, &baseline),
+    ));
+    let file_label = subject.label.replace([' ', '#', ',', '(', ')'], "_");
+    if trial == 0 {
+        world.write_ppm(&output.join(format!("{file_label}_neglected.ppm")));
+    }
+    if !world.ramp(RECOVER_STEPS, (&weak, DISAPPOINTED_TEMPO), (&normal, 1.0)) {
+        result.broken_in = Some("元に戻る間");
+        return result;
+    }
+    let Some(returned) = world.measure(RETURN_HOLD_STEPS, &normal, 1.0, |_, _| {}) else {
+        result.broken_in = Some("戻して保つ間");
+        return result;
+    };
+    result.returned = Some((
+        distance(&returned, &baseline),
+        colour_difference(&returned, &baseline),
+    ));
+    if trial == 0 {
+        world.write_ppm(&output.join(format!("{file_label}_returned.ppm")));
+    }
+    result
+}
+
+fn neglect(output: &Path) {
+    fs::create_dir_all(output).expect("出力先を作れない");
+    let started = Instant::now();
+    let mut subjects = vec![single_channel_subject("O2u")];
+    for animal in vmc_pet_body::multichannel::list_multichannel().expect("同梱データが壊れている")
+    {
+        let world =
+            MultiWorld::place(&animal, SUITE_FIELD, PET_RADIUS).expect("64×64 に置けるはず");
+        subjects.push(SuiteSubject {
+            label: format!("{} {}", animal.id, animal.name).trim().to_string(),
+            params: animal.params.clone(),
+            radius: PET_RADIUS,
+            channels: world.channels,
+        });
+    }
+    let jobs: Vec<(usize, u64)> = (0..subjects.len())
+        .flat_map(|s| (0..NEGLECT_TRIALS).map(move |t| (s, t)))
+        .collect();
+    let job_count = jobs.len();
+    let queue = Mutex::new(jobs.into_iter().enumerate());
+    let results: Mutex<Vec<Option<NeglectResult>>> =
+        Mutex::new((0..job_count).map(|_| None).collect());
+    let workers = thread::available_parallelism().map_or(4, |n| n.get());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let Some((index, (subject, trial))) = queue.lock().unwrap().next() else {
+                    break;
+                };
+                let result = run_neglect(&subjects[subject], trial, output);
+                results.lock().unwrap()[index] = Some(result);
+            });
+        }
+    });
+    let results: Vec<NeglectResult> = results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect();
+
+    println!(
+        "場 {SUITE_FIELD}×{SUITE_FIELD}・R {PET_RADIUS}、各 {NEGLECT_TRIALS} 回。成長の強さを {NEGLECT_STEPS} ステップで {ENERGY_FLOOR} へ、テンポを {MOOD_RAMP_STEPS} ステップで ×{DISAPPOINTED_TEMPO} へ下げ、{NEGLECTED_HOLD_STEPS} ステップ過ごし、{RECOVER_STEPS} ステップで戻して {RETURN_HOLD_STEPS} ステップ保つ"
+    );
+    println!(
+        "差は基準との「見た目の差/色の差」(生き延びた試行の平均)。戻った = 見た目の差 {RETURNED_DISTANCE} 未満かつ色の差 {RETURNED_COLOUR} 未満"
+    );
+    for (index, subject) in subjects.iter().enumerate() {
+        let trials =
+            &results[index * NEGLECT_TRIALS as usize..(index + 1) * NEGLECT_TRIALS as usize];
+        let mut broken: Vec<&str> = trials.iter().filter_map(|r| r.broken_in).collect();
+        let broken_count = broken.len();
+        broken.sort_unstable();
+        broken.dedup();
+        let mean = |pick: fn(&NeglectResult) -> Option<(f32, f32)>| {
+            let values: Vec<(f32, f32)> = trials.iter().filter_map(pick).collect();
+            if values.is_empty() {
+                return "-".to_string();
+            }
+            let n = values.len() as f32;
+            let (d, c) = values
+                .iter()
+                .fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+            format!("{:.2}/{:.2}", d / n, c / n)
+        };
+        let returned_home = trials
+            .iter()
+            .filter(|r| {
+                r.returned
+                    .is_some_and(|(d, c)| d < RETURNED_DISTANCE && c < RETURNED_COLOUR)
+            })
+            .count();
+        println!(
+            "  {:28} 壊れた {broken_count}/{NEGLECT_TRIALS}{} | 弱りきったとき {} | 戻した後 {} | 戻った {returned_home}/{NEGLECT_TRIALS}",
+            subject.label,
+            if broken.is_empty() {
+                String::new()
+            } else {
+                format!("({})", broken.join("・"))
+            },
+            mean(|r| r.neglected),
+            mean(|r| r.returned),
+        );
+    }
+    println!("合計 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let directory = PathBuf::from(args.next().expect("found の JSON があるディレクトリを渡す"));
@@ -906,6 +1096,11 @@ fn main() {
     if second == "--suite" {
         let output = PathBuf::from(args.next().expect("--suite の後に出力先を渡す"));
         suite(&directory, &output);
+        return;
+    }
+    if second == "--neglect" {
+        let output = PathBuf::from(args.next().expect("--neglect の後に出力先を渡す"));
+        neglect(&output);
         return;
     }
     let output = PathBuf::from(second);
