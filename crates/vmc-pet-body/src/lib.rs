@@ -42,6 +42,7 @@ pub mod port;
 pub mod time_sync;
 pub mod touch;
 pub mod touch_echo;
+pub mod vitality;
 
 pub use animal::{list_animals, load_animal, Animal};
 pub use camera::Camera;

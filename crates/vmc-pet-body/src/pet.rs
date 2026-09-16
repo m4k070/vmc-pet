@@ -1081,7 +1081,7 @@ mod tests {
         // Assert: 場に効かないのと同じく、機嫌もほとんど直らない
         let gain = pet.energy() - energy_before;
         assert!(
-            gain < crate::lenia_body::ENERGY_PER_TOUCH * 0.05,
+            gain < crate::vitality::ENERGY_PER_TOUCH * 0.05,
             "a habituated touch must not count as care; gained {gain}"
         );
     }
@@ -1114,7 +1114,7 @@ mod tests {
         // 「何をしても回復しない」状態にはならない
         let gain = pet.energy() - energy_before;
         assert!(
-            (gain - crate::lenia_body::ENERGY_PER_TOUCH).abs() < 1e-6,
+            (gain - crate::vitality::ENERGY_PER_TOUCH).abs() < 1e-6,
             "a fresh place must count as full care; gained {gain}"
         );
     }
