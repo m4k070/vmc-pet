@@ -23,6 +23,12 @@
 //! 使い方: `cargo run --release -p vmc-pet-body --example multichannel_trial -- <found の JSON が
 //! あるディレクトリ> <出力先>`。ディレクトリには `found221.json` などの名前で置く。出力先に、
 //! 最後の姿をチャンネルを色(赤・緑・青)に割り当てた PPM で書き出す。ペット本体には触れない。
+//!
+//! `-- <ディレクトリ> --suite <出力先>` で、R 13・64×64 で形を保った生物を、ペットの試験一式に
+//! かける(docs/experiments/rule-candidates.md「多チャンネルの生物をペットの試験にかける」)。
+//! 弱る 0.85・テンポ ×0.6・×1.6・クリック ×5 に加え、1つのチャンネルだけ成長を弱めて戻し、
+//! チャンネルの配分(色の割合)が表情の軸になるかを見る。比べるため、1チャンネルの O2u も
+//! 同じ手順にかける。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +37,8 @@ use std::thread;
 use std::time::Instant;
 
 use serde::Deserialize;
+use vmc_pet_body::lenia::{GrowthMapping, KernelCore};
+use vmc_pet_body::{accumulate_into, load_animal, CellPos, Perturbation};
 
 /// 読むファイル(`found{名前}.json`)。2チャンネル・自己1本、2チャンネル・自己2本、3チャンネル・自己1本。
 const FILES: [&str; 3] = ["221", "222", "231"];
@@ -260,6 +268,13 @@ struct World {
 
 impl World {
     fn step(&mut self) {
+        let scales = vec![1.0; self.channels.len()];
+        self.step_with(&scales, 1.0);
+    }
+
+    /// 育てるチャンネルごとの成長の強さと、テンポを指定して1ステップ進める。成長の強さは、
+    /// いまのペットと同じく正の成長にだけ掛ける。どちらも 1 なら `LeniaNDKC.py` と同じ規則。
+    fn step_with(&mut self, growth_scales: &[f32], tempo: f32) {
         let size = self.size;
         for increment in &mut self.increments {
             increment.fill(0.0);
@@ -279,9 +294,12 @@ impl World {
                 }
             }
             let increment = &mut self.increments[kernel.target];
+            let scale = growth_scales[kernel.target];
+            let time_step = self.time_step * tempo;
             for (added, &potential) in increment.iter_mut().zip(&self.potential) {
-                *added +=
-                    self.time_step * kernel.h * growth(potential, kernel.center, kernel.width);
+                let grown = growth(potential, kernel.center, kernel.width);
+                let scaled = if grown > 0.0 { grown * scale } else { grown };
+                *added += time_step * kernel.h * scaled;
             }
             weights[kernel.target] += kernel.h;
         }
@@ -434,20 +452,26 @@ fn place(animal: &AnimalData, size: usize, shrink: bool) -> Option<World> {
         }
         channels.push(field);
     }
-    let kernels = animal
-        .params
-        .iter()
-        .map(|p| build_kernel(p, radius))
-        .collect();
+    Some(build_world(&animal.params, radius, channels, size))
+}
+
+/// カーネルのパラメータ(全体の R は `radius`)と、チャンネルごとの場の値から世界を作る。
+fn build_world(
+    params: &[KernelData],
+    radius: usize,
+    channels: Vec<Vec<f32>>,
+    size: usize,
+) -> World {
+    let kernels = params.iter().map(|p| build_kernel(p, radius)).collect();
     let channel_count = channels.len();
-    Some(World {
+    World {
         size,
         channels,
         kernels,
-        time_step: 1.0 / animal.params[0].time_divisor,
+        time_step: 1.0 / params[0].time_divisor,
         potential: vec![0.0; size * size],
         increments: vec![vec![0.0; size * size]; channel_count],
-    })
+    }
 }
 
 /// 1つの条件での結末。
@@ -592,6 +616,539 @@ fn trace(directory: &Path, file: &str, index: usize) {
     }
 }
 
+// ==== 試験の一式(--suite) ====
+
+/// 試験にかける場の一辺。R 13 で形を保つ生物が多かった 64×64。
+const SUITE_FIELD: usize = 64;
+/// 落ち着かせる長さ(形を保つかの判定は、生物を動かした検証の 3000 ステップと同じ)。
+const SETTLE_STEPS: u32 = 3_000;
+const MEASURE_STEPS: u32 = 900;
+const RAMP_STEPS: u32 = 750;
+const HOLD_STEPS: u32 = 1_500;
+const RETURN_HOLD_STEPS: u32 = 3_000;
+const SUITE_TRIALS: u64 = 2;
+const NOISE: f32 = 1e-3;
+/// 実際のクリックと同じ半径と量(`touch.rs`)を、1秒ごとに5回、全チャンネルへ注入する。
+const CLICK_RADIUS: f32 = 4.5;
+const CLICK_AMOUNT: f32 = 0.20;
+const CLICK_COUNT: u32 = 5;
+const CLICK_INTERVAL_STEPS: u32 = 15;
+/// 放置されて弱りきった体の成長の強さ(`MIN_GROWTH_SCALE`)。
+const ENERGY_FLOOR: f32 = 0.85;
+/// 見た目の差の相対差の分母の下限と、戻ったとみなす差(`flexible_search.rs` と同じ)。
+const SPEED_FLOOR: f32 = 0.05;
+const MASS_DEVIATION_FLOOR: f32 = 0.5;
+const AREA_FLOOR: f32 = 5.0;
+const RETURNED_DISTANCE: f32 = 0.3;
+/// 色の差(チャンネルの割合の差の最大)がこれ未満なら、色も戻ったとみなす。
+const RETURNED_COLOUR: f32 = 0.05;
+/// 形を保つとみなす総量の比の範囲と、チャンネルごとの残りの下限(生物を動かした検証と同じ)。
+const FORM_MASS_RANGE: (f32, f32) = (0.8, 1.25);
+const FORM_CHANNEL_MIN: f32 = 0.5;
+
+#[derive(Clone, Copy)]
+enum SuiteTest {
+    /// 全チャンネルの成長を弱める(放置されて弱る)。
+    Energy,
+    /// テンポを変える(がっかり ×0.6、速い ×1.6)。
+    Tempo(f32),
+    /// 実際のクリックを重心に5回。
+    Clicks,
+    /// 1つのチャンネルだけ成長を弱める。チャンネルの配分(色の割合)が表情の軸になるかを見る。
+    ChannelEnergy(usize),
+}
+
+impl SuiteTest {
+    fn label(self) -> String {
+        match self {
+            Self::Energy => "弱る".into(),
+            Self::Tempo(tempo) => format!("テンポ×{tempo}"),
+            Self::Clicks => "クリック".into(),
+            Self::ChannelEnergy(channel) => format!("ch{channel}だけ弱る"),
+        }
+    }
+
+    /// ペットがいま体に与える変化か(合格の条件に使う)。
+    fn is_pet_test(self) -> bool {
+        !matches!(self, Self::ChannelEnergy(_))
+    }
+}
+
+/// 60秒ぶんの見た目の特徴。
+#[derive(Clone)]
+struct Features {
+    speed: f32,
+    mass_deviation: f32,
+    area: f32,
+    /// チャンネルごとの総量の割合(色の割合)。
+    shares: Vec<f32>,
+}
+
+fn floored_difference(a: f32, b: f32, floor: f32) -> f32 {
+    (a - b).abs() / a.abs().max(b.abs()).max(floor)
+}
+
+/// 見た目の差(動き差 + 形差)。
+fn distance(a: &Features, b: &Features) -> f32 {
+    let motion = (floored_difference(a.speed, b.speed, SPEED_FLOOR)
+        + floored_difference(a.mass_deviation, b.mass_deviation, MASS_DEVIATION_FLOOR))
+        / 2.0;
+    motion + floored_difference(a.area, b.area, AREA_FLOOR)
+}
+
+/// 色の差(チャンネルの割合の差の最大)。
+fn colour_difference(a: &Features, b: &Features) -> f32 {
+    a.shares
+        .iter()
+        .zip(&b.shares)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
+}
+
+impl World {
+    fn broken(&self) -> bool {
+        self.mass() < COLLAPSE_MASS || self.visible_area() > self.size * self.size / 2
+    }
+
+    /// `steps` ステップ進め、最後の `MEASURE_STEPS`(足りなければ全部)で特徴を測る。
+    /// `before_step` はステップの前に呼ぶ(クリックに使う)。壊れたら `None`。
+    fn measure(
+        &mut self,
+        steps: u32,
+        scales: &[f32],
+        tempo: f32,
+        mut before_step: impl FnMut(&mut World, u32),
+    ) -> Option<Features> {
+        let size = self.size as f32;
+        let (mut path, mut moves) = (0.0f32, 0u32);
+        let mut previous: Option<(f32, f32)> = None;
+        let mut masses = Vec::new();
+        let mut area = 0.0f32;
+        let mut shares = vec![0.0f32; self.channels.len()];
+        let start = steps.saturating_sub(MEASURE_STEPS);
+        for step in 0..steps {
+            before_step(self, step);
+            self.step_with(scales, tempo);
+            if self.broken() {
+                return None;
+            }
+            if step < start {
+                continue;
+            }
+            let current = self.centroid();
+            if let (Some(a), Some(b)) = (previous, current) {
+                let (dx, dy) = (
+                    toroidal_offset(b.0 - a.0, size),
+                    toroidal_offset(b.1 - a.1, size),
+                );
+                path += (dx * dx + dy * dy).sqrt();
+                moves += 1;
+            }
+            previous = current;
+            let channel_masses = self.channel_masses();
+            let total: f32 = channel_masses.iter().sum();
+            for (share, mass) in shares.iter_mut().zip(&channel_masses) {
+                *share += mass / total.max(1e-6);
+            }
+            masses.push(total);
+            area += self.visible_area() as f32;
+        }
+        let count = masses.len().max(1) as f32;
+        let mean = masses.iter().sum::<f32>() / count;
+        let variance = masses.iter().map(|m| (m - mean) * (m - mean)).sum::<f32>() / count;
+        Some(Features {
+            speed: path / moves.max(1) as f32,
+            mass_deviation: variance.sqrt(),
+            area: area / count,
+            shares: shares.iter().map(|s| s / count).collect(),
+        })
+    }
+
+    /// 成長の強さとテンポを、`from` から `to` へ `steps` ステップかけて動かす。壊れたら `false`。
+    fn ramp(&mut self, steps: u32, from: (&[f32], f32), to: (&[f32], f32)) -> bool {
+        for step in 0..steps {
+            let progress = step as f32 / steps as f32;
+            let scales: Vec<f32> = from
+                .0
+                .iter()
+                .zip(to.0)
+                .map(|(a, b)| a + (b - a) * progress)
+                .collect();
+            let tempo = from.1 + (to.1 - from.1) * progress;
+            self.step_with(&scales, tempo);
+            if self.broken() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 全チャンネルの和の重心へ、実際のクリックと同じ山型の摂動を全チャンネルに注入する。
+    fn click(&mut self) {
+        let Some((x, y)) = self.centroid() else {
+            return;
+        };
+        let size = self.size;
+        let perturbation = Perturbation {
+            at: CellPos {
+                x: (x.round() as usize) % size,
+                y: (y.round() as usize) % size,
+            },
+            radius: CLICK_RADIUS,
+            amount: CLICK_AMOUNT,
+        };
+        for channel in &mut self.channels {
+            accumulate_into(channel, size, size, &perturbation, 0.0, 1.0);
+        }
+    }
+}
+
+/// 1つの試験・1回の結果。
+#[derive(Clone, Copy)]
+struct TestResult {
+    expressed: f32,
+    expressed_colour: f32,
+    returned: f32,
+    returned_colour: f32,
+}
+
+impl TestResult {
+    fn returned_home(self) -> bool {
+        self.returned < RETURNED_DISTANCE && self.returned_colour < RETURNED_COLOUR
+    }
+}
+
+/// 候補の姿 `state` から試験を1つ行う。`snapshot` があれば、変化をかけ終えたときの姿を書き出す。
+fn run_suite_test(
+    params: &[KernelData],
+    radius: usize,
+    state: &[Vec<f32>],
+    baseline: &Features,
+    test: SuiteTest,
+    snapshot: Option<&Path>,
+) -> Option<TestResult> {
+    let mut world = build_world(params, radius, state.to_vec(), SUITE_FIELD);
+    let normal = vec![1.0; world.channels.len()];
+    let expressed = match test {
+        SuiteTest::Clicks => world.measure(MEASURE_STEPS, &normal, 1.0, |world, step| {
+            let clicking = step.is_multiple_of(CLICK_INTERVAL_STEPS)
+                && step / CLICK_INTERVAL_STEPS < CLICK_COUNT;
+            if clicking {
+                world.click();
+            }
+        })?,
+        _ => {
+            let (scales, tempo) = match test {
+                SuiteTest::Energy => (vec![ENERGY_FLOOR; normal.len()], 1.0),
+                SuiteTest::Tempo(tempo) => (normal.clone(), tempo),
+                SuiteTest::ChannelEnergy(channel) => {
+                    let mut scales = normal.clone();
+                    scales[channel] = ENERGY_FLOOR;
+                    (scales, 1.0)
+                }
+                SuiteTest::Clicks => unreachable!(),
+            };
+            if !world.ramp(RAMP_STEPS, (&normal, 1.0), (&scales, tempo)) {
+                return None;
+            }
+            let features = world.measure(HOLD_STEPS, &scales, tempo, |_, _| {})?;
+            if let Some(path) = snapshot {
+                world.write_ppm(path);
+            }
+            if !world.ramp(RAMP_STEPS, (&scales, tempo), (&normal, 1.0)) {
+                return None;
+            }
+            features
+        }
+    };
+    let returned = world.measure(RETURN_HOLD_STEPS, &normal, 1.0, |_, _| {})?;
+    Some(TestResult {
+        expressed: distance(&expressed, baseline),
+        expressed_colour: colour_difference(&expressed, baseline),
+        returned: distance(&returned, baseline),
+        returned_colour: colour_difference(&returned, baseline),
+    })
+}
+
+/// 試験にかける生物(見つかった生物、または比べるための1チャンネルの生物)。
+struct SuiteSubject {
+    label: String,
+    params: Vec<KernelData>,
+    radius: usize,
+    channels: Vec<Vec<f32>>,
+}
+
+/// 1体の試験の結果。
+struct SuiteOutcome {
+    label: String,
+    channel_count: usize,
+    /// 候補になれなかった理由。候補なら `None`。
+    rejection: Option<String>,
+    baseline: Option<Features>,
+    noise: (f32, f32),
+    /// (試験, 試行ごとの結果)
+    tests: Vec<(SuiteTest, Vec<Option<TestResult>>)>,
+}
+
+fn run_suite(subject: &SuiteSubject, output: &Path) -> SuiteOutcome {
+    let mut outcome = SuiteOutcome {
+        label: subject.label.clone(),
+        channel_count: subject.channels.len(),
+        rejection: None,
+        baseline: None,
+        noise: (0.0, 0.0),
+        tests: Vec::new(),
+    };
+    let mut world = build_world(
+        &subject.params,
+        subject.radius,
+        subject.channels.clone(),
+        SUITE_FIELD,
+    );
+    let initial_total = world.mass().max(1e-6);
+    let initial_channels = world.channel_masses();
+    for step in 1..=SETTLE_STEPS {
+        world.step();
+        if world.broken() {
+            outcome.rejection = Some(format!("落ち着かせる間に壊れた({step} ステップ目)"));
+            return outcome;
+        }
+    }
+    let ratio = world.mass() / initial_total;
+    let channel_min = world
+        .channel_masses()
+        .iter()
+        .zip(&initial_channels)
+        .map(|(now, first)| now / first.max(1e-6))
+        .fold(f32::INFINITY, f32::min);
+    let blobs = world.major_blobs();
+    let keeps_form = (FORM_MASS_RANGE.0..=FORM_MASS_RANGE.1).contains(&ratio)
+        && channel_min >= FORM_CHANNEL_MIN
+        && blobs == 1;
+    if !keeps_form {
+        outcome.rejection = Some(format!(
+            "形を保たない(総量×{ratio:.2}・チャンネルの残りの最小 {channel_min:.2}・主な塊 {blobs})"
+        ));
+        return outcome;
+    }
+    let file_label = subject.label.replace([' ', '#', ','], "_");
+    let settled = world.channels.clone();
+
+    let mut baselines = Vec::new();
+    let mut states = Vec::new();
+    for trial in 0..SUITE_TRIALS {
+        let mut rng = trial.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5EED_0000_0000_0001;
+        let mut noise = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            ((rng >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0) * NOISE
+        };
+        let noisy: Vec<Vec<f32>> = settled
+            .iter()
+            .map(|c| c.iter().map(|v| (v * (1.0 + noise())).min(1.0)).collect())
+            .collect();
+        let mut trial_world = build_world(&subject.params, subject.radius, noisy, SUITE_FIELD);
+        let normal = vec![1.0; settled.len()];
+        let Some(baseline) = trial_world.measure(MEASURE_STEPS, &normal, 1.0, |_, _| {}) else {
+            outcome.rejection = Some("基準を測る間に壊れた".into());
+            return outcome;
+        };
+        if trial == 0 {
+            trial_world.write_ppm(&output.join(format!("{file_label}_base.ppm")));
+        }
+        baselines.push(baseline);
+        states.push(trial_world.channels);
+    }
+    outcome.noise = (
+        distance(&baselines[0], &baselines[1]),
+        colour_difference(&baselines[0], &baselines[1]),
+    );
+    let mut tests = vec![
+        SuiteTest::Energy,
+        SuiteTest::Tempo(0.6),
+        SuiteTest::Tempo(1.6),
+        SuiteTest::Clicks,
+    ];
+    if settled.len() > 1 {
+        tests.extend((0..settled.len()).map(SuiteTest::ChannelEnergy));
+    }
+    for test in tests {
+        let results = (0..SUITE_TRIALS as usize)
+            .map(|trial| {
+                let snapshot = (trial == 0 && !matches!(test, SuiteTest::Clicks))
+                    .then(|| output.join(format!("{file_label}_{}.ppm", test.label())));
+                run_suite_test(
+                    &subject.params,
+                    subject.radius,
+                    &states[trial],
+                    &baselines[trial],
+                    test,
+                    snapshot.as_deref(),
+                )
+            })
+            .collect();
+        outcome.tests.push((test, results));
+    }
+    outcome.baseline = Some(baselines.swap_remove(0));
+    outcome
+}
+
+/// 比べるための1チャンネルの生物(vmc-pet の animals.json)を、試験にかけられる形にする。
+fn single_channel_subject(code: &str) -> SuiteSubject {
+    let animal = load_animal(code).unwrap();
+    assert_eq!(animal.params.kernel_core, KernelCore::Polynomial);
+    assert_eq!(animal.params.growth_mapping, GrowthMapping::Polynomial);
+    let peaks: Vec<String> = animal
+        .params
+        .kernel_peaks
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    let params = vec![KernelData {
+        radius: animal.params.radius,
+        time_divisor: animal.params.time_divisor,
+        b: peaks.join(","),
+        m: animal.params.growth_center,
+        s: animal.params.growth_width,
+        h: 1.0,
+        r: 1.0,
+        kn: 1,
+        gn: 1,
+        c: [0, 0],
+    }];
+    let (width, height) = (animal.pattern.width(), animal.pattern.height());
+    let (left, top) = ((SUITE_FIELD - width) / 2, (SUITE_FIELD - height) / 2);
+    let mut field = vec![0.0; SUITE_FIELD * SUITE_FIELD];
+    for y in 0..height {
+        for x in 0..width {
+            field[(top + y) * SUITE_FIELD + left + x] = animal.pattern.get(x, y);
+        }
+    }
+    SuiteSubject {
+        label: format!("比較 {code}(1チャンネル)"),
+        params,
+        radius: animal.params.radius,
+        channels: vec![field],
+    }
+}
+
+fn format_test(results: &[Option<TestResult>]) -> String {
+    let Some(all) = results.iter().copied().collect::<Option<Vec<TestResult>>>() else {
+        return format!("{:>11}", "崩壊");
+    };
+    let n = all.len() as f32;
+    let expressed = all.iter().map(|r| r.expressed).sum::<f32>() / n;
+    let colour = all.iter().map(|r| r.expressed_colour).sum::<f32>() / n;
+    let mark = if all.iter().all(|r| r.returned_home()) {
+        " "
+    } else {
+        "✗"
+    };
+    format!("{expressed:>4.2}/{colour:>4.2}{mark}")
+}
+
+fn suite(directory: &Path, output: &Path) {
+    fs::create_dir_all(output).expect("出力先を作れない");
+    let started = Instant::now();
+    let mut subjects = vec![single_channel_subject("O2u")];
+    for name in FILES {
+        for (index, animal) in load(directory, name).into_iter().enumerate() {
+            let label = format!("{name} #{index:02} {}", animal.name)
+                .trim()
+                .to_string();
+            let shrunk = place(&animal, SUITE_FIELD, true);
+            let Some(world) = shrunk else {
+                continue;
+            };
+            subjects.push(SuiteSubject {
+                label,
+                params: animal.params.clone(),
+                radius: PET_RADIUS,
+                channels: world.channels,
+            });
+        }
+    }
+    let job_count = subjects.len();
+    let queue = Mutex::new((0..job_count).collect::<Vec<_>>().into_iter());
+    let results: Mutex<Vec<Option<SuiteOutcome>>> =
+        Mutex::new((0..job_count).map(|_| None).collect());
+    let workers = thread::available_parallelism().map_or(4, |n| n.get());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let Some(index) = queue.lock().unwrap().next() else {
+                    break;
+                };
+                let outcome = run_suite(&subjects[index], output);
+                results.lock().unwrap()[index] = Some(outcome);
+            });
+        }
+    });
+    let results: Vec<SuiteOutcome> = results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect();
+
+    println!(
+        "場 {SUITE_FIELD}×{SUITE_FIELD}・R {PET_RADIUS}、各試験 {SUITE_TRIALS} 回。数字は変化をかけている間の「見た目の差/色の差」(試行の平均)"
+    );
+    println!(
+        "✗ は戻らなかった試行がある(見た目の差 {RETURNED_DISTANCE} 以上か色の差 {RETURNED_COLOUR} 以上)。合格 = ペットの4試験で壊れず戻った"
+    );
+    let mut rejected = 0;
+    let mut passed = Vec::new();
+    for outcome in &results {
+        let Some(baseline) = &outcome.baseline else {
+            rejected += 1;
+            continue;
+        };
+        let pet_pass = outcome
+            .tests
+            .iter()
+            .filter(|(test, _)| test.is_pet_test())
+            .all(|(_, results)| results.iter().all(|r| r.is_some_and(|r| r.returned_home())));
+        if pet_pass {
+            passed.push(outcome.label.clone());
+        }
+        let shares: Vec<String> = baseline.shares.iter().map(|s| format!("{s:.2}")).collect();
+        let tests: Vec<String> = outcome
+            .tests
+            .iter()
+            .map(|(test, results)| format!("{} {}", test.label(), format_test(results)))
+            .collect();
+        println!(
+            "{}{} | ch{} 速さ {:.3} 点 {:.0} 色の割合 [{}] ゆらぎ {:.2}/{:.2}",
+            outcome.label,
+            if pet_pass { "  合格" } else { "" },
+            outcome.channel_count,
+            baseline.speed,
+            baseline.area,
+            shares.join(" "),
+            outcome.noise.0,
+            outcome.noise.1
+        );
+        println!("    {}", tests.join(" | "));
+    }
+    println!();
+    println!(
+        "候補 {} 体(形を保たなかった・壊れた {rejected} 体)、合格 {} 体: {}",
+        results.len() - rejected,
+        passed.len(),
+        passed.join("、")
+    );
+    for outcome in results.iter().filter(|o| o.rejection.is_some()) {
+        println!(
+            "  候補外: {} {}",
+            outcome.label,
+            outcome.rejection.as_deref().unwrap_or("")
+        );
+    }
+    println!("合計 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let directory = PathBuf::from(args.next().expect("found の JSON があるディレクトリを渡す"));
@@ -605,6 +1162,11 @@ fn main() {
             .and_then(|i| i.parse().ok())
             .expect("--trace の後に生物の番号を渡す");
         trace(&directory, &file, index);
+        return;
+    }
+    if second == "--suite" {
+        let output = PathBuf::from(args.next().expect("--suite の後に出力先を渡す"));
+        suite(&directory, &output);
         return;
     }
     let output = PathBuf::from(second);
