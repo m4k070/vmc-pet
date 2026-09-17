@@ -34,6 +34,10 @@
 //!   エネルギーに応じて行動を変える学習を、定数の行動の学習と比べる
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- shaped <候補の番号>...`:
 //!   まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- excess <候補の番号>...`:
+//!   代償を「誘っているあいだの速さの超過の和」に直し、古い測り方と比べ、和の形の報酬の重みを探す
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- shaped-sum <候補の番号>...`:
+//!   `shaped` を、和の形の報酬(平均の速さの超過、重み 10)でやり直す
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -990,6 +994,16 @@ struct LureEpisode {
     peak_speed: f32,
     /// 粒子の速さの平均の、窓全体での平均。
     mean_speed: f32,
+    /// まとまりが 0.9 を下回っていた秒数(1 秒ごとに見る)。`policy_episode` だけが測る。
+    broken_seconds: f32,
+    /// 誘っていたステップで、粒子の速さの平均がふだんの揺らぎの上限を超えた分の和(セル/ステップ)。
+    /// `policy_episode` だけが測る。
+    excess_speed: f32,
+    /// 誘っていたステップで、粒子1つずつの速さがふだんの揺らぎの上限を超えた分の和を、粒子の数で割ったもの。
+    /// 散らばった粒子だけが速く吸い寄せられる動きは、平均の速さでは薄まるため。`policy_episode` だけが測る。
+    particle_excess_speed: f32,
+    /// まとまりが 0.9 以上なのに誘っていた秒数(判断のときに見る)。`policy_episode` だけが測る。
+    idle_seconds: f32,
 }
 
 /// エネルギーが尽きたときの力の倍率(試験で崩れずに戻れた ×0.6)。
@@ -2039,6 +2053,27 @@ struct Transition {
     strength: f32,
     /// この判断のあと 1 秒のあいだの、粒子の速さの平均のピーク。
     next_peak_speed: f32,
+    /// この判断のあと 1 秒のあいだの、速さがふだんの揺らぎの上限を超えた分の和(誘っていたステップだけ)。
+    next_excess_speed: f32,
+    /// 同じく、粒子1つずつで数えた超過の和(粒子の数で割る)。
+    next_particle_excess_speed: f32,
+}
+
+/// ふだんの揺らぎの上限とみなす速さ。これを超えた分を、吸い寄せの超過として数える。
+#[derive(Clone, Copy, Debug)]
+struct SpeedLimits {
+    /// 粒子の速さの平均の上限。
+    mean: f32,
+    /// 粒子1つずつの速さの上限。
+    particle: f32,
+}
+
+impl SpeedLimits {
+    /// 超過を測らない。
+    const NONE: Self = Self {
+        mean: f32::INFINITY,
+        particle: f32::INFINITY,
+    };
 }
 
 /// 誘いの強さの上限(試験で崩れずに戻れた範囲)。学び方を変えても、行動はこの範囲に丸める。
@@ -2065,10 +2100,12 @@ fn observe_body(world: &ParticleWorld) -> BodyObservation {
 
 /// 観測から誘いの強さを決める行動 `policy` を、`lure_episode` と同じ場面(出発点, 散らし方の乱数, 散らす割合)で1回走らせる。1 秒ごとに観測し、強さが
 /// 0 より大きければ最大の塊の重心へ誘う。`log` を渡すと、判断ごとの記録を足す。形の差は測らない(0)。
+/// `limits` は、ふだんの揺らぎの上限とみなす速さ(超過を測るときの基準)。
 fn policy_episode(
     seed: u64,
     (trial, scatter_seed, scatter): (u64, u64, f32),
     radius: f32,
+    limits: SpeedLimits,
     policy: &dyn Fn(&BodyObservation) -> f32,
     mut log: Option<&mut Vec<Transition>>,
 ) -> LureEpisode {
@@ -2097,11 +2134,16 @@ fn policy_episode(
             } else {
                 None
             };
+            if strength > 0.0 && observation.cohesion >= COHESION {
+                run.idle_seconds += 1.0;
+            }
             if let Some(log) = log.as_deref_mut() {
                 log.push(Transition {
                     observation,
                     strength,
                     next_peak_speed: 0.0,
+                    next_excess_speed: 0.0,
+                    next_particle_excess_speed: 0.0,
                 });
             }
         }
@@ -2119,13 +2161,32 @@ fn policy_episode(
             / world.x.len() as f32;
         run.peak_speed = run.peak_speed.max(particle_speed);
         run.mean_speed += particle_speed / LURE_WINDOW as f32;
+        let (excess, particle_excess) = if world.lure.is_some() {
+            let each = world
+                .vx
+                .iter()
+                .zip(&world.vy)
+                .map(|(vx, vy)| ((vx * vx + vy * vy).sqrt() - limits.particle).max(0.0))
+                .sum::<f32>()
+                / world.x.len() as f32;
+            ((particle_speed - limits.mean).max(0.0), each)
+        } else {
+            (0.0, 0.0)
+        };
+        run.excess_speed += excess;
+        run.particle_excess_speed += particle_excess;
         if let Some(last) = log.as_deref_mut().and_then(|log| log.last_mut()) {
             last.next_peak_speed = last.next_peak_speed.max(particle_speed);
+            last.next_excess_speed += excess;
+            last.next_particle_excess_speed += particle_excess;
         }
         if step % SAMPLE_EVERY != 0 {
             continue;
         }
         cohesion = world.largest_cluster().len() as f32 / world.x.len() as f32;
+        if cohesion < COHESION {
+            run.broken_seconds += 1.0;
+        }
         if cohesion >= COHESION && !recovered {
             run.seconds = if scatter == 0.0 {
                 0.0
@@ -2141,14 +2202,24 @@ fn policy_episode(
     run
 }
 
+/// `learn_shaped` の報酬の形。
+#[derive(Clone, Copy)]
+enum RewardForm {
+    /// 戻るまでの秒・吸い寄せの激しさ(窓の中の速さのピーク)・崩れていないのに誘う割合(`learn` と同じ)。
+    PeakAndIdle,
+    /// 和の形の報酬(`sum_reward`)。
+    Sum { measure: ExcessMeasure, weight: f32 },
+}
+
 /// まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる。
 ///
 /// - しきい値で切り替える一定の強さ(`learn` と同じ3つ): 強さ = s(まとまり < しきい値のとき)
 /// - まとまりに応じた強さ(5つ): 強さ = 最大の強さ × clamp((効き始め − まとまり) / 幅, 0, 1)^曲がり方。距離は共通
 ///
-/// 報酬は `learn` と同じ(吸い寄せの重み 0.1、崩れていないのに誘う重み 1)、進化戦略も同じ (3/3, 10)-ES・30 世代・世代ごとに
-/// 5 場面。学習に使っていない場面で比べ、判断ごとの記録から、速さのピークがまとまりのどの段階で起きているかも集計する。
-fn learn_shaped(seeds: &[u64]) {
+/// 報酬は `form` で選ぶ。`RewardForm::PeakAndIdle` は `learn` と同じ(吸い寄せの重み 0.1、崩れていないのに誘う重み 1)、
+/// `RewardForm::Sum` は和の形の報酬(`sum_reward`)。進化戦略は `learn` と同じ (3/3, 10)-ES・30 世代・世代ごとに 5 場面。
+/// 学習に使っていない場面で比べ、判断ごとの記録から、速さのピークと超過がまとまりのどの段階で起きているかも集計する。
+fn learn_shaped(seeds: &[u64], form: RewardForm) {
     const PARENTS: usize = 3;
     const OFFSPRING: usize = 10;
     const GENERATIONS: usize = 30;
@@ -2275,12 +2346,16 @@ fn learn_shaped(seeds: &[u64]) {
 
     type Scene = (u64, u64, f32);
 
-    /// 行動の組を場面の組で走らせ、行動ごとに (報酬, 戻るまでの秒, 吸い寄せの激しさ, 崩れていないのに誘う割合) を返す。
+    /// 行動の組を場面の組で走らせ、行動ごとに (報酬, 3つの中身) を返す。中身は `PeakAndIdle` なら (戻るまでの秒,
+    /// 吸い寄せの激しさ, 崩れていないのに誘う割合)、`Sum` なら (散らした場面で崩れていた秒, 散らした場面の吸い寄せの超過(秒),
+    /// 崩していない場面でまとまっているのに誘っていた秒)。
     fn evaluate(
         seed: u64,
         scenes: &[Scene],
         behaviours: &[Behaviour],
         intact_speed: f32,
+        form: RewardForm,
+        limits: SpeedLimits,
     ) -> Vec<(f32, f32, f32, f32)> {
         let mut all = vec![Behaviour::Nothing];
         all.extend_from_slice(behaviours);
@@ -2294,6 +2369,7 @@ fn learn_shaped(seeds: &[u64]) {
                 seed,
                 (trial, scatter_seed, scatter),
                 behaviour.radius(),
+                limits,
                 &|o| behaviour.strength(o),
                 None,
             )
@@ -2301,6 +2377,34 @@ fn learn_shaped(seeds: &[u64]) {
         let mut table = vec![vec![LureEpisode::default(); scenes.len()]; all.len()];
         for ((c, e), run) in jobs.into_iter().zip(runs) {
             table[c][e] = run;
+        }
+        if let RewardForm::Sum { measure, weight } = form {
+            return (1..all.len())
+                .map(|c| {
+                    let reward = mean(
+                        &table[c]
+                            .iter()
+                            .map(|run| sum_reward(run, intact_speed, measure, weight, IDLE_WEIGHT))
+                            .collect::<Vec<_>>(),
+                    );
+                    let of_scenes = |scattered: bool, pick: &dyn Fn(&LureEpisode) -> f32| {
+                        mean(
+                            &scenes
+                                .iter()
+                                .zip(&table[c])
+                                .filter(|(scene, _)| (scene.2 > 0.0) == scattered)
+                                .map(|(_, run)| pick(run))
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    (
+                        reward,
+                        of_scenes(true, &|r| r.broken_seconds),
+                        of_scenes(true, &|r| measure.seconds(r, intact_speed)),
+                        of_scenes(false, &|r| r.idle_seconds),
+                    )
+                })
+                .collect();
         }
         (1..all.len())
             .map(|c| {
@@ -2356,6 +2460,7 @@ fn learn_shaped(seeds: &[u64]) {
                 seed,
                 (trial, scatter_seed, scatter),
                 45.0,
+                SpeedLimits::NONE,
                 &|o| gated.strength(o),
                 None,
             );
@@ -2378,6 +2483,18 @@ fn learn_shaped(seeds: &[u64]) {
             )
             .mean_speed
         }));
+        let limits = match form {
+            RewardForm::PeakAndIdle => SpeedLimits::NONE,
+            RewardForm::Sum { .. } => normal_speed(seed).1,
+        };
+        match form {
+            RewardForm::PeakAndIdle => println!("報酬: 戻るまでの秒・吸い寄せの激しさ(窓の中の速さのピーク)・崩れていないのに誘う割合(`learn` と同じ)\n"),
+            RewardForm::Sum { measure, weight } => println!(
+                "報酬: 和の形 = −(崩れていた秒 + {weight} × 吸い寄せの超過({}) + 1 × まとまっているのに誘っていた秒) / 120。表の「戻るまで」は散らした場面で崩れていた秒、「吸い寄せ」は散らした場面の超過(秒)、「崩れていないのに誘う」は崩していない場面でまとまっているのに誘っていた秒\n",
+                measure.label()
+            ),
+        }
+
         let mut learned = Vec::new();
         for shape in [Shape::Gated, Shape::CohesionShaped] {
             let dimensions = shape.dimensions();
@@ -2424,7 +2541,7 @@ fn learn_shaped(seeds: &[u64]) {
                         .iter()
                         .map(|(child, _)| Behaviour::decode(shape, child)),
                 );
-                let results = evaluate(seed, &scenes, &behaviours, intact_speed);
+                let results = evaluate(seed, &scenes, &behaviours, intact_speed, form, limits);
                 if generation % 10 == 0 {
                     println!(
                         "| {generation} | {} | {sigma:.3} | {:.3} |",
@@ -2475,7 +2592,7 @@ fn learn_shaped(seeds: &[u64]) {
                         )
                     })
                     .collect();
-                evaluate(seed, &scenes, &behaviours, intact_speed)
+                evaluate(seed, &scenes, &behaviours, intact_speed, form, limits)
             })
             .collect();
         let standard_error = |values: &[f32]| {
@@ -2540,6 +2657,7 @@ fn learn_shaped(seeds: &[u64]) {
                     seed,
                     (trial, scatter_seed, scatter),
                     behaviour.radius(),
+                    limits,
                     &|o| behaviour.strength(o),
                     Some(&mut log),
                 );
@@ -2568,9 +2686,16 @@ fn learn_shaped(seeds: &[u64]) {
                     print!(" — |");
                 } else {
                     print!(
-                        " {:.2}(強さ {:.3}、はぐれた粒子 {:.1} セル、{} 回) |",
+                        " {:.2}(超過 {:.4} 秒、強さ {:.3}、はぐれた粒子 {:.1} セル、{} 回) |",
                         mean(&in_bin.iter().map(|t| t.next_peak_speed).collect::<Vec<_>>())
                             / intact_speed,
+                        mean(
+                            &in_bin
+                                .iter()
+                                .map(|t| t.next_excess_speed)
+                                .collect::<Vec<_>>()
+                        ) / intact_speed
+                            / 15.0,
                         mean(&in_bin.iter().map(|t| t.strength).collect::<Vec<_>>()),
                         mean(
                             &in_bin
@@ -2593,7 +2718,251 @@ fn learn_shaped(seeds: &[u64]) {
                 .collect();
             println!(" {:.2} |", mean(&peak_cohesions));
         }
-        println!("\n(速さは崩していない体の粒子の速さで割った値。「一番速かった判断のまとまり」は、1回の走らせの中で次の 1 秒の速さのピークが最大だった判断のときのまとまり)\n");
+        println!("\n(速さは崩していない体の粒子の速さで割った値。超過は、次の 1 秒の平均の速さの超過(誘っていたときだけ。和の形の報酬のときだけ測る)。「一番速かった判断のまとまり」は、1回の走らせの中で次の 1 秒の速さのピークが最大だった判断のときのまとまり)\n");
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
+/// 崩していない体を何もせずに動かしたときの、1 ステップごとの (粒子の速さの平均, 粒子1つずつの速さ)(出発点 0〜15)。
+fn intact_step_speeds(seed: u64) -> (Vec<f32>, Vec<f32>) {
+    let per_trial = parallel_map((0..16u64).collect(), |trial| {
+        let mut world = started_world(seed, trial);
+        let (mut means, mut each) = (Vec::new(), Vec::new());
+        for _ in 0..LURE_WINDOW {
+            world.step();
+            let speeds: Vec<f32> = world
+                .vx
+                .iter()
+                .zip(&world.vy)
+                .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+                .collect();
+            means.push(mean(&speeds));
+            each.extend(speeds);
+        }
+        (means, each)
+    });
+    let mut means = Vec::new();
+    let mut each = Vec::new();
+    for (m, e) in per_trial {
+        means.extend(m);
+        each.extend(e);
+    }
+    (means, each)
+}
+
+/// ふだんの揺らぎの上限とみなす百分位。
+const NORMAL_SPEED_PERCENTILE: f32 = 0.99;
+
+fn percentile(values: &mut [f32], fraction: f32) -> f32 {
+    values.sort_by(|a, b| a.total_cmp(b));
+    values[((values.len() as f32 - 1.0) * fraction) as usize]
+}
+
+/// 崩していない体の粒子の速さの平均と、ふだんの揺らぎの上限。
+fn normal_speed(seed: u64) -> (f32, SpeedLimits) {
+    let (mut means, mut each) = intact_step_speeds(seed);
+    let average = mean(&means);
+    let limits = SpeedLimits {
+        mean: percentile(&mut means, NORMAL_SPEED_PERCENTILE),
+        particle: percentile(&mut each, NORMAL_SPEED_PERCENTILE),
+    };
+    (average, limits)
+}
+
+/// 吸い寄せの超過をどう数えるか。
+#[derive(Clone, Copy, PartialEq)]
+enum ExcessMeasure {
+    /// 粒子の速さの平均の超過。
+    Mean,
+    /// 粒子1つずつの速さの超過(粒子の数で割る)。
+    Particle,
+}
+
+impl ExcessMeasure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mean => "平均の速さの超過",
+            Self::Particle => "粒子1つずつの速さの超過",
+        }
+    }
+
+    /// 吸い寄せの超過(秒)。超過の和を、ふだんの速さと 1 秒(15 ステップ)で割る(ふだんの速さ 1 つぶんを 1 秒超えたら 1)。
+    fn seconds(self, run: &LureEpisode, average_speed: f32) -> f32 {
+        let excess = match self {
+            Self::Mean => run.excess_speed,
+            Self::Particle => run.particle_excess_speed,
+        };
+        excess / average_speed / 15.0
+    }
+}
+
+/// 和の形の報酬。1 回の走らせについて、窓(120 秒)あたりの秒数で数える。どの項も 1 ステップごとの和に分けられる。
+/// 報酬 = −(まとまりが崩れていた秒 + 超過の重み × 吸い寄せの超過 + 誘いすぎの重み × まとまっているのに誘っていた秒) / 120。
+fn sum_reward(
+    run: &LureEpisode,
+    average_speed: f32,
+    measure: ExcessMeasure,
+    excess_weight: f32,
+    idle_weight: f32,
+) -> f32 {
+    -(run.broken_seconds
+        + excess_weight * measure.seconds(run, average_speed)
+        + idle_weight * run.idle_seconds)
+        / 120.0
+}
+
+/// 代償の測り方の見直し。誘っているあいだの速さの超過の和が、古い測り方(窓の中の速さのピーク)と違って、誘いの強さに
+/// 反応するかを確かめ、和の形の報酬で最良の行動が範囲の内側に来る重みを探す。
+fn excess_cost(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    const SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+    const EXCESS_WEIGHTS: [f32; 6] = [0.0, 1.0, 3.0, 10.0, 30.0, 100.0];
+    const IDLE_WEIGHT: f32 = 1.0;
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        let (average_speed, limits) = normal_speed(seed);
+        println!(
+            "崩していない体の粒子の速さ: 平均 {average_speed:.4}。ふだんの揺らぎの上限({:.0} パーセンタイル)は、平均の速さで {:.4}(平均の {:.2} 倍)、粒子1つずつの速さで {:.4}(平均の {:.2} 倍)\n",
+            NORMAL_SPEED_PERCENTILE * 100.0,
+            limits.mean,
+            limits.mean / average_speed,
+            limits.particle,
+            limits.particle / average_speed
+        );
+        // (ラベル, 強さ, 距離, しきい値)。しきい値 1.01 は「いつも誘う」
+        let mut behaviours: Vec<(String, f32, f32, f32)> =
+            vec![("何もしない".to_string(), 0.0, 45.0, 0.9)];
+        for strength in [0.005, 0.01, 0.02, 0.05, 0.1, 0.2] {
+            behaviours.push((
+                format!("強さ {strength}・距離 45・しきい値 0.9"),
+                strength,
+                45.0,
+                0.9,
+            ));
+        }
+        for strength in [0.02, 0.1] {
+            behaviours.push((
+                format!("強さ {strength}・距離 45・いつも誘う"),
+                strength,
+                45.0,
+                1.01,
+            ));
+        }
+        let jobs: Vec<(usize, usize, u64)> = (0..behaviours.len())
+            .flat_map(|b| {
+                (0..SCATTERS.len()).flat_map(move |s| (0..TRIALS).map(move |t| (b, s, t)))
+            })
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(b, s, trial)| {
+            let (_, strength, radius, threshold) = behaviours[b].clone();
+            policy_episode(
+                seed,
+                (trial, seed * 7919 + trial, SCATTERS[s]),
+                radius,
+                limits,
+                &|o| {
+                    if o.cohesion < threshold {
+                        strength
+                    } else {
+                        0.0
+                    }
+                },
+                None,
+            )
+        });
+        let mut table = vec![
+            vec![vec![LureEpisode::default(); TRIALS as usize]; SCATTERS.len()];
+            behaviours.len()
+        ];
+        for ((b, s, t), run) in jobs.into_iter().zip(runs) {
+            table[b][s][t as usize] = run;
+        }
+        let standard_error = |values: &[f32]| {
+            let m = mean(values);
+            (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                .sqrt()
+                / (values.len() as f32).sqrt()
+        };
+        // 3割・7割を散らした場面の、試行ごとの平均
+        let scattered = |pick: &dyn Fn(usize, usize) -> f32| -> Vec<f32> {
+            (0..TRIALS as usize)
+                .map(|t| (pick(1, t) + pick(2, t)) / 2.0)
+                .collect()
+        };
+
+        println!("### 古い測り方と新しい測り方(3割・7割を散らした場面の平均 ± 標準誤差、{TRIALS} 試行)\n");
+        println!("| 行動 | 古い: 速さのピークの増分(ふだんの速さで割る) | 新しい: 平均の速さの超過(秒) | 新しい: 粒子1つずつの速さの超過(秒) | まとまりが崩れていた秒 | まとまっているのに誘っていた秒(崩していない場面) |");
+        println!("|---|---|---|---|---|---|");
+        for (b, (label, ..)) in behaviours.iter().enumerate() {
+            let old = scattered(&|s, t| {
+                (table[b][s][t].peak_speed - table[0][s][t].peak_speed).max(0.0) / average_speed
+            });
+            let new =
+                scattered(&|s, t| ExcessMeasure::Mean.seconds(&table[b][s][t], average_speed));
+            let each =
+                scattered(&|s, t| ExcessMeasure::Particle.seconds(&table[b][s][t], average_speed));
+            let broken = scattered(&|s, t| table[b][s][t].broken_seconds);
+            let idle: Vec<f32> = table[b][0].iter().map(|r| r.idle_seconds).collect();
+            println!(
+                "| {label} | {:.2} ± {:.2} | {:.3} ± {:.3} | {:.3} ± {:.3} | {:.1} ± {:.1} | {:.1} |",
+                mean(&old),
+                standard_error(&old),
+                mean(&new),
+                standard_error(&new),
+                mean(&each),
+                standard_error(&each),
+                mean(&broken),
+                standard_error(&broken),
+                mean(&idle),
+            );
+        }
+
+        for measure in [ExcessMeasure::Mean, ExcessMeasure::Particle] {
+            println!("\n### 和の形の報酬({})で、超過の重みを変えたときの最良(誘いすぎの重み {IDLE_WEIGHT}、3 場面の平均)\n", measure.label());
+            println!("| 超過の重み | 最良の行動 | 報酬 | 次点との差 ± 標準誤差 |");
+            println!("|---|---|---|---|");
+            for weight in EXCESS_WEIGHTS {
+                let per_trial = |b: usize| -> Vec<f32> {
+                    (0..TRIALS as usize)
+                        .map(|t| {
+                            (0..SCATTERS.len())
+                                .map(|s| {
+                                    sum_reward(
+                                        &table[b][s][t],
+                                        average_speed,
+                                        measure,
+                                        weight,
+                                        IDLE_WEIGHT,
+                                    )
+                                })
+                                .sum::<f32>()
+                                / SCATTERS.len() as f32
+                        })
+                        .collect()
+                };
+                let mut ranked: Vec<(usize, f32)> = (0..behaviours.len())
+                    .map(|b| (b, mean(&per_trial(b))))
+                    .collect();
+                ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let (best, second) = (ranked[0].0, ranked[1].0);
+                let gap: Vec<f32> = per_trial(best)
+                    .iter()
+                    .zip(per_trial(second))
+                    .map(|(a, b)| a - b)
+                    .collect();
+                println!(
+                    "| {weight} | {} | {:.4} | {:+.4} ± {:.4}(次点: {}) |",
+                    behaviours[best].0,
+                    ranked[0].1,
+                    mean(&gap),
+                    standard_error(&gap),
+                    behaviours[second].0,
+                );
+            }
+        }
+        println!();
     }
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
@@ -2606,12 +2975,32 @@ fn main() {
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
         }
+        Some("excess") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            excess_cost(&seeds);
+        }
+        Some("shaped-sum") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            learn_shaped(
+                &seeds,
+                RewardForm::Sum {
+                    measure: ExcessMeasure::Mean,
+                    weight: 10.0,
+                },
+            );
+        }
         Some("shaped") => {
             let seeds: Vec<u64> = args[1..]
                 .iter()
                 .map(|s| s.parse().expect("候補の番号"))
                 .collect();
-            learn_shaped(&seeds);
+            learn_shaped(&seeds, RewardForm::PeakAndIdle);
         }
         Some("situational") => {
             let seeds: Vec<u64> = args[1..]
@@ -2663,7 +3052,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>..."
         ),
     }
 }
