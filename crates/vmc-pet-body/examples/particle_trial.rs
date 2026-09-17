@@ -20,6 +20,8 @@
 //!   重心の軌跡を PPM で書き出す(約30秒)
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- suite <候補の番号>...`:
 //!   候補を、突く・散らす/弱らせて戻す/誘いで導く/1ステップの重さ、の試験にかける(約20秒)
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- lure <候補の番号>...`:
+//!   誘いの強さを上げていったとき、導ける度合いと、誘っているあいだ・やめた後の姿を測る
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -658,6 +660,139 @@ fn suite(seeds: &[u64]) {
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+/// 誘いの強さを上げていったとき、導ける度合いと、誘っているあいだ・やめた後の姿を測る。
+///
+/// 誘いの点は場の中心から 10 セルの8方位。900 ステップ誘い、そのあいだの居場所と姿を測る。続けて誘いを
+/// やめ、`AFTER_LURE_STEPS` 待ってから姿を測る。姿の差は、誘いなしで同じ出発点から測った元の姿と比べる。
+/// 誘いが無くても時間が経つと止まることがあるので、誘いなしで同じ長さだけ動かしたときに止まった回数も数える。
+fn lure_strengths(seeds: &[u64]) {
+    const STRENGTHS: [f32; 6] = [0.02, 0.05, 0.1, 0.15, 0.2, 0.3];
+    const AFTER_LURE_STEPS: u32 = 3000;
+    /// これより遅ければ止まったとみなす(探索の合格の速さ 0.05 の半分未満)。
+    const STOPPED_SPEED: f32 = 0.02;
+    let started = Instant::now();
+    for &seed in seeds {
+        let params = ParticleParams::from_seed(seed);
+        println!(
+            "## 候補 {seed}(種類 {}×{}、力 {:.3})\n",
+            params.types, params.per_type, params.force
+        );
+        let baselines: Vec<Signature> = parallel_map((0..SUITE_STARTS).collect(), |start| {
+            let mut world = started_world(seed, start);
+            signature(&mut world, SIGNATURE_STEPS, |_, _| {})
+        });
+        let jobs: Vec<(u64, u32)> = (0..SUITE_STARTS)
+            .flat_map(|s| (0..8u32).map(move |d| (s, d)))
+            .collect();
+        let no_lure = parallel_map(jobs.clone(), |(start, direction)| {
+            let target = lure_target(direction);
+            let mut world = started_world(seed, start);
+            distance_to(&mut world, target, RECOVERY_STEPS).0
+        });
+        // 誘いなしで、誘う試行と同じ長さだけ動かしたとき(出発点ごとに1回)
+        let untouched = parallel_map((0..SUITE_STARTS).collect(), |start| {
+            let mut world = started_world(seed, start);
+            for _ in 0..RECOVERY_STEPS + AFTER_LURE_STEPS {
+                world.step();
+            }
+            signature(&mut world, SIGNATURE_STEPS, |_, _| {})
+        });
+        println!(
+            "誘いなしで同じ長さだけ動かしたとき、止まっていたのは {}/{SUITE_STARTS}\n",
+            untouched.iter().filter(|s| s.speed < STOPPED_SPEED).count()
+        );
+        println!("| 誘いの強さ | 誘いの点までの平均距離(なし → あり) | 5 セル以内にいた割合(なし → あり) | 誘っているあいだのまとまりの最小 | 誘っているあいだの形の差 | やめた後に戻った(まとまり 0.9 以上) | やめた後の形の差 | やめた後の速さ/元 | やめた後に止まっていた |");
+        println!("|---|---|---|---|---|---|---|---|---|");
+        let base_speed = mean(&baselines.iter().map(|b| b.speed).collect::<Vec<_>>());
+        for strength in STRENGTHS {
+            let outcomes = parallel_map(jobs.clone(), |(start, direction)| {
+                let target = lure_target(direction);
+                let mut world = started_world(seed, start);
+                world.lure = Some((target.0, target.1, strength));
+                let (near, lowest) =
+                    distance_to(&mut world, target, RECOVERY_STEPS - SIGNATURE_STEPS);
+                let during = signature(&mut world, SIGNATURE_STEPS, |_, _| {});
+                world.lure = None;
+                for _ in 0..AFTER_LURE_STEPS {
+                    world.step();
+                }
+                let after = signature(&mut world, SIGNATURE_STEPS, |_, _| {});
+                (near, lowest.min(during.min_cohesion), during, after, start)
+            });
+            let pick =
+                |f: &dyn Fn(&LureOutcome) -> f32| mean(&outcomes.iter().map(f).collect::<Vec<_>>());
+            let returned = outcomes
+                .iter()
+                .filter(|o| o.3.min_cohesion >= COHESION)
+                .count();
+            let stopped = outcomes
+                .iter()
+                .filter(|o| o.3.speed < STOPPED_SPEED)
+                .count();
+            println!(
+                "| {strength} | {:.1} → {:.1} | {:.2} → {:.2} | {:.2} | {:.2} | {returned}/{} | {:.2} | {:.2} | {stopped}/{} |",
+                mean(&no_lure.iter().map(|n| n.distance).collect::<Vec<_>>()),
+                pick(&|o| o.0.distance),
+                mean(&no_lure.iter().map(|n| n.near).collect::<Vec<_>>()),
+                pick(&|o| o.0.near),
+                outcomes.iter().map(|o| o.1).fold(1.0, f32::min),
+                pick(&|o| shape_difference(&o.2, &baselines[o.4 as usize])),
+                outcomes.len(),
+                pick(&|o| shape_difference(&o.3, &baselines[o.4 as usize])),
+                pick(&|o| o.3.speed) / base_speed.max(1e-6),
+                outcomes.len(),
+            );
+        }
+        println!();
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
+fn lure_target(direction: u32) -> (f32, f32) {
+    let angle = std::f32::consts::TAU * direction as f32 / 8.0;
+    (
+        FIELD / 2.0 + 10.0 * angle.cos(),
+        FIELD / 2.0 + 10.0 * angle.sin(),
+    )
+}
+
+/// 誘いの試行1回の結果: (誘っているあいだの居場所, まとまりの最小, 誘っているあいだの姿, やめた後の姿, 出発点)。
+type LureOutcome = (Nearness, f32, Signature, Signature, u64);
+
+/// 誘いの点までの距離の平均と、5 セル以内にいた割合。
+#[derive(Clone, Copy, Default)]
+struct Nearness {
+    distance: f32,
+    near: f32,
+}
+
+/// `steps` だけ進めながら、最大の塊の重心と点 `target` の距離を 1 秒ごとに測る。まとまりの最小も返す。
+fn distance_to(world: &mut ParticleWorld, target: (f32, f32), steps: u32) -> (Nearness, f32) {
+    let (mut distance, mut near, mut samples, mut lowest) = (0.0, 0, 0, 1.0f32);
+    for step in 1..=steps {
+        world.step();
+        if step % SAMPLE_EVERY == 0 {
+            let members = world.largest_cluster();
+            lowest = lowest.min(members.len() as f32 / world.x.len() as f32);
+            let ((cx, cy), _) = centroid_and_radius(world, &members);
+            let d = ((cx - target.0).powi(2) + (cy - target.1).powi(2)).sqrt();
+            distance += d;
+            if d < 5.0 {
+                near += 1;
+            }
+            samples += 1;
+        }
+    }
+    let samples = samples.max(1) as f32;
+    (
+        Nearness {
+            distance: distance / samples,
+            near: near as f32 / samples,
+        },
+        lowest,
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -666,6 +801,13 @@ fn main() {
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
         }
+        Some("lure") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            lure_strengths(&seeds);
+        }
         Some("suite") => {
             let seeds: Vec<u64> = args[1..]
                 .iter()
@@ -673,6 +815,8 @@ fn main() {
                 .collect();
             suite(&seeds);
         }
-        _ => eprintln!("使い方: particle_trial search <出力先> | suite <候補の番号>..."),
+        _ => eprintln!(
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>..."
+        ),
     }
 }
