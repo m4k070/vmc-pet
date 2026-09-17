@@ -32,6 +32,8 @@
 //!   エネルギー(力の倍率)によって、重心へ誘う行動の最良の組が変わるかを測る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- situational <候補の番号>...`:
 //!   エネルギーに応じて行動を変える学習を、定数の行動の学習と比べる
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- shaped <候補の番号>...`:
+//!   まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -2018,6 +2020,584 @@ fn learn_situational(seeds: &[u64]) {
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+/// 行動を決めるときに体から読む量(1 秒ごと)。
+#[derive(Clone, Copy, Debug, Default)]
+struct BodyObservation {
+    /// 最大の塊にいる粒子の割合。
+    cohesion: f32,
+    /// 最大の塊に入っていない粒子の、塊の重心からの距離の平均(セル)。はぐれた粒子が無ければ 0。
+    stray_distance: f32,
+    /// 最大の塊の重心。
+    center: (f32, f32),
+}
+
+/// 1 回の判断の記録。将来、1 ステップごとの状態と結果から学ぶ方式(強化学習など)に使える形にしてある。
+#[derive(Clone, Copy, Debug)]
+struct Transition {
+    observation: BodyObservation,
+    /// 選んだ誘いの強さ(0 なら誘わない)。
+    strength: f32,
+    /// この判断のあと 1 秒のあいだの、粒子の速さの平均のピーク。
+    next_peak_speed: f32,
+}
+
+/// 誘いの強さの上限(試験で崩れずに戻れた範囲)。学び方を変えても、行動はこの範囲に丸める。
+const MAX_LURE_STRENGTH: f32 = 0.2;
+
+fn observe_body(world: &ParticleWorld) -> BodyObservation {
+    let members = world.largest_cluster();
+    let cohesion = members.len() as f32 / world.x.len() as f32;
+    let (center, _) = centroid_and_radius(world, &members);
+    let mut in_cluster = vec![false; world.x.len()];
+    for &i in &members {
+        in_cluster[i] = true;
+    }
+    let strays: Vec<f32> = (0..world.x.len())
+        .filter(|&i| !in_cluster[i])
+        .map(|i| ((world.x[i] - center.0).powi(2) + (world.y[i] - center.1).powi(2)).sqrt())
+        .collect();
+    BodyObservation {
+        cohesion,
+        stray_distance: mean(&strays),
+        center,
+    }
+}
+
+/// 観測から誘いの強さを決める行動 `policy` を、`lure_episode` と同じ場面(出発点, 散らし方の乱数, 散らす割合)で1回走らせる。1 秒ごとに観測し、強さが
+/// 0 より大きければ最大の塊の重心へ誘う。`log` を渡すと、判断ごとの記録を足す。形の差は測らない(0)。
+fn policy_episode(
+    seed: u64,
+    (trial, scatter_seed, scatter): (u64, u64, f32),
+    radius: f32,
+    policy: &dyn Fn(&BodyObservation) -> f32,
+    mut log: Option<&mut Vec<Transition>>,
+) -> LureEpisode {
+    let mut world = started_world(seed, trial);
+    let mut rng = ParticleRng::new(scatter_seed);
+    for i in 0..world.x.len() {
+        if rng.unit() < scatter {
+            world.x[i] = rng.range(0.0, FIELD - 1e-3);
+            world.y[i] = rng.range(0.0, FIELD - 1e-3);
+        }
+    }
+    world.lure_radius = radius;
+    let mut run = LureEpisode {
+        seconds: LURE_WINDOW as f32 / 15.0,
+        ..Default::default()
+    };
+    let (mut active_steps, mut effort_total) = (0, 0.0);
+    let mut recovered = false;
+    let mut cohesion = 0.0;
+    for step in 1..=LURE_WINDOW {
+        if step % SAMPLE_EVERY == 1 {
+            let observation = observe_body(&world);
+            let strength = policy(&observation).clamp(0.0, MAX_LURE_STRENGTH);
+            world.lure = if strength > 0.0 {
+                Some((observation.center.0, observation.center.1, strength))
+            } else {
+                None
+            };
+            if let Some(log) = log.as_deref_mut() {
+                log.push(Transition {
+                    observation,
+                    strength,
+                    next_peak_speed: 0.0,
+                });
+            }
+        }
+        if let Some((_, _, applied)) = world.lure {
+            active_steps += 1;
+            effort_total += applied;
+        }
+        world.step();
+        let particle_speed = world
+            .vx
+            .iter()
+            .zip(&world.vy)
+            .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+            .sum::<f32>()
+            / world.x.len() as f32;
+        run.peak_speed = run.peak_speed.max(particle_speed);
+        run.mean_speed += particle_speed / LURE_WINDOW as f32;
+        if let Some(last) = log.as_deref_mut().and_then(|log| log.last_mut()) {
+            last.next_peak_speed = last.next_peak_speed.max(particle_speed);
+        }
+        if step % SAMPLE_EVERY != 0 {
+            continue;
+        }
+        cohesion = world.largest_cluster().len() as f32 / world.x.len() as f32;
+        if cohesion >= COHESION && !recovered {
+            run.seconds = if scatter == 0.0 {
+                0.0
+            } else {
+                step as f32 / 15.0
+            };
+            recovered = true;
+        }
+    }
+    run.broken = cohesion < COHESION;
+    run.effort = effort_total / LURE_WINDOW as f32;
+    run.active = active_steps as f32 / LURE_WINDOW as f32;
+    run
+}
+
+/// まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる。
+///
+/// - しきい値で切り替える一定の強さ(`learn` と同じ3つ): 強さ = s(まとまり < しきい値のとき)
+/// - まとまりに応じた強さ(5つ): 強さ = 最大の強さ × clamp((効き始め − まとまり) / 幅, 0, 1)^曲がり方。距離は共通
+///
+/// 報酬は `learn` と同じ(吸い寄せの重み 0.1、崩れていないのに誘う重み 1)、進化戦略も同じ (3/3, 10)-ES・30 世代・世代ごとに
+/// 5 場面。学習に使っていない場面で比べ、判断ごとの記録から、速さのピークがまとまりのどの段階で起きているかも集計する。
+fn learn_shaped(seeds: &[u64]) {
+    const PARENTS: usize = 3;
+    const OFFSPRING: usize = 10;
+    const GENERATIONS: usize = 30;
+    const SNAP_WEIGHT: f32 = 0.1;
+    const IDLE_WEIGHT: f32 = 1.0;
+    const EPISODE_SCATTERS: [f32; 5] = [0.0, 0.3, 0.3, 0.7, 0.7];
+    const INITIAL_SIGMA: f32 = 0.3;
+    const MIN_SIGMA: f32 = 0.02;
+    const SIGMA_LEARNING_RATE: f32 = 0.5;
+    const HELD_OUT_ROUNDS: u64 = 32;
+    const HELD_OUT_SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shape {
+        /// しきい値で切り替える一定の強さ。
+        Gated,
+        /// まとまりに応じた強さ。
+        CohesionShaped,
+    }
+    impl Shape {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Gated => "しきい値で切り替える一定の強さ",
+                Self::CohesionShaped => "まとまりに応じた強さ",
+            }
+        }
+        fn dimensions(self) -> usize {
+            match self {
+                Self::Gated => 3,
+                Self::CohesionShaped => 5,
+            }
+        }
+    }
+
+    /// 行動の中身。正規化したパラメータ(0〜1)から作る。
+    #[derive(Clone, Copy, Debug)]
+    enum Behaviour {
+        Nothing,
+        Gated {
+            strength: f32,
+            radius: f32,
+            threshold: f32,
+        },
+        Shaped {
+            max_strength: f32,
+            onset: f32,
+            width: f32,
+            curve: f32,
+            radius: f32,
+        },
+    }
+    impl Behaviour {
+        fn decode(shape: Shape, u: &[f32]) -> Self {
+            let strength_of = |v: f32| 0.005 * 40f32.powf(v);
+            match shape {
+                Shape::Gated => Self::Gated {
+                    strength: strength_of(u[0]),
+                    radius: 10.0 + 35.0 * u[1],
+                    threshold: 0.6 + 0.4 * u[2],
+                },
+                Shape::CohesionShaped => Self::Shaped {
+                    max_strength: strength_of(u[0]),
+                    onset: 0.6 + 0.4 * u[1],
+                    width: 0.02 + 0.58 * u[2],
+                    curve: 0.25 * 16f32.powf(u[3]),
+                    radius: 10.0 + 35.0 * u[4],
+                },
+            }
+        }
+        fn radius(self) -> f32 {
+            match self {
+                Self::Nothing => 45.0,
+                Self::Gated { radius, .. } | Self::Shaped { radius, .. } => radius,
+            }
+        }
+        fn strength(self, observation: &BodyObservation) -> f32 {
+            match self {
+                Self::Nothing => 0.0,
+                Self::Gated {
+                    strength,
+                    threshold,
+                    ..
+                } => {
+                    if observation.cohesion < threshold {
+                        strength
+                    } else {
+                        0.0
+                    }
+                }
+                Self::Shaped {
+                    max_strength,
+                    onset,
+                    width,
+                    curve,
+                    ..
+                } => {
+                    let level = ((onset - observation.cohesion) / width).clamp(0.0, 1.0);
+                    if level <= 0.0 {
+                        0.0
+                    } else {
+                        max_strength * level.powf(curve)
+                    }
+                }
+            }
+        }
+        fn describe(self) -> String {
+            match self {
+                Self::Nothing => "何もしない".to_string(),
+                Self::Gated { strength, radius, threshold } => {
+                    format!("強さ {strength:.3}・距離 {radius:.1}・しきい値 {threshold:.2}")
+                }
+                Self::Shaped { max_strength, onset, width, curve, radius } => format!(
+                    "最大の強さ {max_strength:.3}・効き始め {onset:.2}・幅 {width:.2}・曲がり方 {curve:.2}・距離 {radius:.1}"
+                ),
+            }
+        }
+    }
+
+    fn normal(rng: &mut ParticleRng) -> f32 {
+        let u1 = rng.unit().max(1e-7);
+        let u2 = rng.unit();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
+
+    type Scene = (u64, u64, f32);
+
+    /// 行動の組を場面の組で走らせ、行動ごとに (報酬, 戻るまでの秒, 吸い寄せの激しさ, 崩れていないのに誘う割合) を返す。
+    fn evaluate(
+        seed: u64,
+        scenes: &[Scene],
+        behaviours: &[Behaviour],
+        intact_speed: f32,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let mut all = vec![Behaviour::Nothing];
+        all.extend_from_slice(behaviours);
+        let jobs: Vec<(usize, usize)> = (0..all.len())
+            .flat_map(|c| (0..scenes.len()).map(move |e| (c, e)))
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(c, e)| {
+            let (trial, scatter_seed, scatter) = scenes[e];
+            let behaviour = all[c];
+            policy_episode(
+                seed,
+                (trial, scatter_seed, scatter),
+                behaviour.radius(),
+                &|o| behaviour.strength(o),
+                None,
+            )
+        });
+        let mut table = vec![vec![LureEpisode::default(); scenes.len()]; all.len()];
+        for ((c, e), run) in jobs.into_iter().zip(runs) {
+            table[c][e] = run;
+        }
+        (1..all.len())
+            .map(|c| {
+                let (mut seconds, mut snap, mut scattered, mut idle, mut intact) =
+                    (0.0, 0.0, 0, 0.0, 0);
+                for (e, scene) in scenes.iter().enumerate() {
+                    if scene.2 > 0.0 {
+                        seconds += table[c][e].seconds;
+                        snap += (table[c][e].peak_speed - table[0][e].peak_speed).max(0.0);
+                        scattered += 1;
+                    } else {
+                        idle += table[c][e].active;
+                        intact += 1;
+                    }
+                }
+                let seconds = seconds / scattered.max(1) as f32;
+                let snap = snap / scattered.max(1) as f32 / intact_speed;
+                let idle = idle / intact.max(1) as f32;
+                (
+                    -seconds / 120.0 - SNAP_WEIGHT * snap - IDLE_WEIGHT * idle,
+                    seconds,
+                    snap,
+                    idle,
+                )
+            })
+            .collect()
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+
+        // 検算: 観測を入力にした関数で、しきい値つきの一定の強さを動かすと、これまでの関数と同じ数字になるか
+        let check_scenes: Vec<Scene> = (0..6u64)
+            .map(|t| (t, seed * 7919 + t, [0.0, 0.3, 0.7][t as usize % 3]))
+            .collect();
+        let identical = check_scenes.iter().all(|&(trial, scatter_seed, scatter)| {
+            let old = lure_episode(
+                seed,
+                trial,
+                scatter_seed,
+                scatter,
+                1.0,
+                (0.1, 45.0, 0.9),
+                None,
+            );
+            let gated = Behaviour::Gated {
+                strength: 0.1,
+                radius: 45.0,
+                threshold: 0.9,
+            };
+            let new = policy_episode(
+                seed,
+                (trial, scatter_seed, scatter),
+                45.0,
+                &|o| gated.strength(o),
+                None,
+            );
+            old.seconds == new.seconds
+                && old.peak_speed == new.peak_speed
+                && old.active == new.active
+                && old.broken == new.broken
+        });
+        println!("検算(しきい値つきの一定の強さを、これまでの関数と新しい関数で走らせて一致するか): {}\n", if identical { "一致" } else { "不一致" });
+
+        let intact_speed = mean(&parallel_map((0..16u64).collect(), |trial| {
+            lure_episode(
+                seed,
+                trial,
+                seed * 7919 + trial,
+                0.0,
+                1.0,
+                (0.0, 10.0, 0.6),
+                None,
+            )
+            .mean_speed
+        }));
+        let mut learned = Vec::new();
+        for shape in [Shape::Gated, Shape::CohesionShaped] {
+            let dimensions = shape.dimensions();
+            let mut rng = ParticleRng::new(seed * 59 + dimensions as u64);
+            let mut center: Vec<f32> = vec![0.5; dimensions];
+            let mut sigma = INITIAL_SIGMA;
+            println!(
+                "### 学習: {}(出発点 {})\n",
+                shape.label(),
+                Behaviour::decode(shape, &center).describe()
+            );
+            println!("| 世代 | 平均の行動 | 突然変異の幅 | 平均の行動の報酬 |");
+            println!("|---|---|---|---|");
+            for generation in 0..=GENERATIONS {
+                let scenes: Vec<Scene> = EPISODE_SCATTERS
+                    .iter()
+                    .map(|&scatter| {
+                        (
+                            1_000 + (rng.unit() * 100_000.0) as u64,
+                            (rng.unit() * 1e9) as u64,
+                            scatter,
+                        )
+                    })
+                    .collect();
+                let children: Vec<(Vec<f32>, f32)> = if generation < GENERATIONS {
+                    (0..OFFSPRING)
+                        .map(|_| {
+                            let child_sigma = (sigma
+                                * (SIGMA_LEARNING_RATE * normal(&mut rng)).exp())
+                            .clamp(MIN_SIGMA, 1.0);
+                            let child = center
+                                .iter()
+                                .map(|&v| (v + child_sigma * normal(&mut rng)).clamp(0.0, 1.0))
+                                .collect();
+                            (child, child_sigma)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let mut behaviours = vec![Behaviour::decode(shape, &center)];
+                behaviours.extend(
+                    children
+                        .iter()
+                        .map(|(child, _)| Behaviour::decode(shape, child)),
+                );
+                let results = evaluate(seed, &scenes, &behaviours, intact_speed);
+                if generation % 10 == 0 {
+                    println!(
+                        "| {generation} | {} | {sigma:.3} | {:.3} |",
+                        behaviours[0].describe(),
+                        results[0].0
+                    );
+                }
+                if children.is_empty() {
+                    break;
+                }
+                let mut order: Vec<usize> = (0..children.len()).collect();
+                order.sort_by(|&a, &b| results[b + 1].0.total_cmp(&results[a + 1].0));
+                let chosen = &order[..PARENTS];
+                center = (0..dimensions)
+                    .map(|k| chosen.iter().map(|&i| children[i].0[k]).sum::<f32>() / PARENTS as f32)
+                    .collect();
+                sigma = chosen.iter().map(|&i| children[i].1).sum::<f32>() / PARENTS as f32;
+            }
+            let behaviour = Behaviour::decode(shape, &center);
+            println!("\n学んだ行動: {}\n", behaviour.describe());
+            learned.push((shape.label(), behaviour));
+        }
+
+        // 学習に使っていない場面で比べる
+        let mut contenders = vec![
+            ("何もしない", Behaviour::Nothing),
+            (
+                "格子の最良の組",
+                Behaviour::Gated {
+                    strength: 0.1,
+                    radius: 45.0,
+                    threshold: 0.9,
+                },
+            ),
+        ];
+        contenders.extend(learned.iter().copied());
+        let behaviours: Vec<Behaviour> = contenders.iter().map(|c| c.1).collect();
+        let per_round: Vec<Vec<(f32, f32, f32, f32)>> = (0..HELD_OUT_ROUNDS)
+            .map(|round| {
+                let mut rng = ParticleRng::new(seed * 104_729 + round + 29);
+                let scenes: Vec<Scene> = HELD_OUT_SCATTERS
+                    .iter()
+                    .map(|&scatter| {
+                        (
+                            500_000 + (rng.unit() * 100_000.0) as u64,
+                            (rng.unit() * 1e9) as u64,
+                            scatter,
+                        )
+                    })
+                    .collect();
+                evaluate(seed, &scenes, &behaviours, intact_speed)
+            })
+            .collect();
+        let standard_error = |values: &[f32]| {
+            let m = mean(values);
+            (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                .sqrt()
+                / (values.len() as f32).sqrt()
+        };
+        let gated_index = 2;
+        println!(
+            "### 学習に使っていない場面での比較({HELD_OUT_ROUNDS} 回 × 崩していない・3割・7割)\n"
+        );
+        println!("| 行動 | 中身 | 報酬 | 学んだ一定の強さとの差 ± 標準誤差 | 戻るまで(秒) | 吸い寄せ | 崩れていないのに誘う |");
+        println!("|---|---|---|---|---|---|---|");
+        for (c, (label, behaviour)) in contenders.iter().enumerate() {
+            let rewards: Vec<f32> = per_round.iter().map(|r| r[c].0).collect();
+            let versus: Vec<f32> = per_round
+                .iter()
+                .map(|r| r[c].0 - r[gated_index].0)
+                .collect();
+            println!(
+                "| {label} | {} | {:.3} ± {:.3} | {:+.3} ± {:.3} | {:.1} | {:.2} | {:.2} |",
+                behaviour.describe(),
+                mean(&rewards),
+                standard_error(&rewards),
+                mean(&versus),
+                standard_error(&versus),
+                mean(&per_round.iter().map(|r| r[c].1).collect::<Vec<_>>()),
+                mean(&per_round.iter().map(|r| r[c].2).collect::<Vec<_>>()),
+                mean(&per_round.iter().map(|r| r[c].3).collect::<Vec<_>>()),
+            );
+        }
+
+        // 判断ごとの記録から、速さのピークがまとまりのどの段階で起きているかを見る
+        println!("\n### 判断ごとの記録: まとまりの段階ごとの、次の 1 秒の速さのピーク(散らした場面、{HELD_OUT_ROUNDS} 回 × 3割・7割)\n");
+        const BINS: [(f32, f32); 5] = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01)];
+        let logged: Vec<(usize, Vec<Transition>)> = parallel_map(
+            (0..contenders.len())
+                .flat_map(|c| {
+                    (0..HELD_OUT_ROUNDS).flat_map(move |r| [(c, r, 0.3f32), (c, r, 0.7f32)])
+                })
+                .collect(),
+            |(c, round, scatter)| {
+                let mut rng = ParticleRng::new(seed * 104_729 + round + 29);
+                let _intact = (rng.unit(), rng.unit());
+                let (trial_30, seed_30) = (
+                    500_000 + (rng.unit() * 100_000.0) as u64,
+                    (rng.unit() * 1e9) as u64,
+                );
+                let (trial_70, seed_70) = (
+                    500_000 + (rng.unit() * 100_000.0) as u64,
+                    (rng.unit() * 1e9) as u64,
+                );
+                let (trial, scatter_seed) = if scatter == 0.3 {
+                    (trial_30, seed_30)
+                } else {
+                    (trial_70, seed_70)
+                };
+                let behaviour = contenders[c].1;
+                let mut log = Vec::new();
+                policy_episode(
+                    seed,
+                    (trial, scatter_seed, scatter),
+                    behaviour.radius(),
+                    &|o| behaviour.strength(o),
+                    Some(&mut log),
+                );
+                (c, log)
+            },
+        );
+        print!("| 行動 |");
+        for (low, high) in BINS {
+            print!(" まとまり {low}〜{} |", if high > 1.0 { 1.0 } else { high });
+        }
+        println!(" 窓の中で一番速かった判断のまとまり(平均) |");
+        println!("|---|---|---|---|---|---|---|");
+        for (c, (label, _)) in contenders.iter().enumerate() {
+            print!("| {label} |");
+            let transitions: Vec<&Transition> = logged
+                .iter()
+                .filter(|(i, _)| *i == c)
+                .flat_map(|(_, log)| log.iter())
+                .collect();
+            for (low, high) in BINS {
+                let in_bin: Vec<&&Transition> = transitions
+                    .iter()
+                    .filter(|t| t.observation.cohesion >= low && t.observation.cohesion < high)
+                    .collect();
+                if in_bin.is_empty() {
+                    print!(" — |");
+                } else {
+                    print!(
+                        " {:.2}(強さ {:.3}、はぐれた粒子 {:.1} セル、{} 回) |",
+                        mean(&in_bin.iter().map(|t| t.next_peak_speed).collect::<Vec<_>>())
+                            / intact_speed,
+                        mean(&in_bin.iter().map(|t| t.strength).collect::<Vec<_>>()),
+                        mean(
+                            &in_bin
+                                .iter()
+                                .map(|t| t.observation.stray_distance)
+                                .collect::<Vec<_>>()
+                        ),
+                        in_bin.len()
+                    );
+                }
+            }
+            let peak_cohesions: Vec<f32> = logged
+                .iter()
+                .filter(|(i, _)| *i == c)
+                .filter_map(|(_, log)| {
+                    log.iter()
+                        .max_by(|a, b| a.next_peak_speed.total_cmp(&b.next_peak_speed))
+                })
+                .map(|t| t.observation.cohesion)
+                .collect();
+            println!(" {:.2} |", mean(&peak_cohesions));
+        }
+        println!("\n(速さは崩していない体の粒子の速さで割った値。「一番速かった判断のまとまり」は、1回の走らせの中で次の 1 秒の速さのピークが最大だった判断のときのまとまり)\n");
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -2025,6 +2605,13 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("shaped") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            learn_shaped(&seeds);
         }
         Some("situational") => {
             let seeds: Vec<u64> = args[1..]
@@ -2076,7 +2663,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>..."
         ),
     }
 }
