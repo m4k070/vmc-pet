@@ -26,6 +26,8 @@
 //!   崩れた体を、手で書いた簡単な行動(塊の重心へ誘う・進む力を弱めて待つ)でまとめ直せるかを測る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- landscape <候補の番号>...`:
 //!   誘いの代償を入れた報酬の地形を、行動のパラメータの格子で測る
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- learn <候補の番号>...`:
+//!   その報酬で、行動のパラメータを小さな進化戦略に学ばせ、学習に使っていない場面で比べる
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -962,6 +964,125 @@ fn standard_deviation(values: &[f32]) -> f32 {
     (values.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / values.len().max(1) as f32).sqrt()
 }
 
+/// 重心へ誘う行動の1回分の長さ。
+const LURE_WINDOW: u32 = 1800;
+
+/// 重心へ誘う行動を1回走らせた結果。
+#[derive(Clone, Copy, Default)]
+struct LureEpisode {
+    /// まとまり 0.9 に戻るまでの秒(崩していない体では 0。戻らなければ窓の長さ)。
+    seconds: f32,
+    /// 窓の終わりに割れていた。
+    broken: bool,
+    /// まとまり 0.9 以上のときの形の差(元の姿と)の平均。元の姿を渡さなければ 0。
+    distortion: f32,
+    /// 1ステップあたりの誘いの強さの平均。
+    effort: f32,
+    /// 誘っていた時間の割合。
+    active: f32,
+    /// 粒子の速さの平均の、窓の中でのピーク。
+    peak_speed: f32,
+    /// 粒子の速さの平均の、窓全体での平均。
+    mean_speed: f32,
+}
+
+/// 出発点 `trial` の体を、乱数 `scatter_seed` で粒子の `scatter` の割合だけ散らし、行動 `config`
+/// (強さ, 届く距離, しきい値)を `LURE_WINDOW` ステップ効かせる。行動は 1 秒ごとにまとまりを測り、
+/// しきい値を下回っていれば最大の塊の重心へ誘う。
+fn lure_episode(
+    seed: u64,
+    trial: u64,
+    scatter_seed: u64,
+    scatter: f32,
+    config: (f32, f32, f32),
+    baseline: Option<&Signature>,
+) -> LureEpisode {
+    let (strength, radius, threshold) = config;
+    let mut world = started_world(seed, trial);
+    let mut rng = ParticleRng::new(scatter_seed);
+    for i in 0..world.x.len() {
+        if rng.unit() < scatter {
+            world.x[i] = rng.range(0.0, FIELD - 1e-3);
+            world.y[i] = rng.range(0.0, FIELD - 1e-3);
+        }
+    }
+    world.lure_radius = radius;
+    let mut run = LureEpisode {
+        seconds: LURE_WINDOW as f32 / 15.0,
+        ..Default::default()
+    };
+    let (mut distortion_total, mut intact_samples) = (0.0, 0);
+    let (mut active_steps, mut effort_total) = (0, 0.0);
+    let mut recovered = false;
+    let mut cohesion = 0.0;
+    for step in 1..=LURE_WINDOW {
+        if step % SAMPLE_EVERY == 1 {
+            let members = world.largest_cluster();
+            let current = members.len() as f32 / world.x.len() as f32;
+            world.lure = if strength > 0.0 && current < threshold {
+                let ((cx, cy), _) = centroid_and_radius(&world, &members);
+                Some((cx, cy, strength))
+            } else {
+                None
+            };
+        }
+        if let Some((_, _, applied)) = world.lure {
+            active_steps += 1;
+            effort_total += applied;
+        }
+        world.step();
+        let particle_speed = world
+            .vx
+            .iter()
+            .zip(&world.vy)
+            .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+            .sum::<f32>()
+            / world.x.len() as f32;
+        run.peak_speed = run.peak_speed.max(particle_speed);
+        run.mean_speed += particle_speed / LURE_WINDOW as f32;
+        if step % SAMPLE_EVERY != 0 {
+            continue;
+        }
+        let members = world.largest_cluster();
+        cohesion = members.len() as f32 / world.x.len() as f32;
+        if cohesion < COHESION {
+            continue;
+        }
+        if !recovered {
+            run.seconds = if scatter == 0.0 {
+                0.0
+            } else {
+                step as f32 / 15.0
+            };
+            recovered = true;
+        }
+        let ((cx, cy), spread) = centroid_and_radius(&world, &members);
+        let types = world.params.types;
+        let mut now = Signature {
+            radius: spread,
+            type_radii: vec![0.0; types],
+            ..Default::default()
+        };
+        for kind in 0..types {
+            let of_kind: Vec<f32> = members
+                .iter()
+                .filter(|&&i| world.kind[i] == kind)
+                .map(|&i| ((world.x[i] - cx).powi(2) + (world.y[i] - cy).powi(2)).sqrt())
+                .collect();
+            now.type_radii[kind] = of_kind.iter().sum::<f32>() / of_kind.len().max(1) as f32;
+        }
+        if let Some(base) = baseline {
+            distortion_total += shape_difference(&now, base);
+        }
+        intact_samples += 1;
+    }
+    run.broken = cohesion < COHESION;
+    run.distortion = distortion_total / intact_samples.max(1) as f32;
+    run.effort = effort_total / LURE_WINDOW as f32;
+    run.active = active_steps as f32 / LURE_WINDOW as f32;
+    run
+}
+
 /// 誘いの代償を入れた報酬の地形。行動のパラメータ(強さ・届く距離・誘いはじめるまとまりのしきい値)を格子で振り、
 /// 報酬の中身を測って、代償の重みを変えたときに報酬が最大になる組が範囲の内側に来るかを見る。
 ///
@@ -973,7 +1094,6 @@ fn standard_deviation(values: &[f32]) -> f32 {
 /// 代償が小さく出てしまう。見ている人にとっての代償は、散らばった粒子が一気に吸い寄せられる不自然な速さだと考えた。
 fn landscape(seeds: &[u64]) {
     const TRIALS: u64 = 16;
-    const WINDOW: u32 = 1800;
     const STRENGTHS: [f32; 7] = [0.0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2];
     const RADII: [f32; 3] = [10.0, 20.0, 45.0];
     /// 1.01 は「いつも誘う」。
@@ -985,25 +1105,6 @@ fn landscape(seeds: &[u64]) {
     /// 崩れていないのに誘う代償の重み(崩していない体で誘っていた時間の割合に掛ける)。いつも引き続けると、
     /// ユーザーが散らしても崩れて見えなくなる(放置で弱った様子を打ち消すのと同じ衝突)ため。
     const IDLE_WEIGHTS: [f32; 2] = [0.0, 1.0];
-
-    /// 1回の走らせの結果。
-    #[derive(Clone, Copy, Default)]
-    struct Run {
-        /// まとまり 0.9 に戻るまでの秒(崩していない体では 0。戻らなければ窓の長さ)。
-        seconds: f32,
-        /// 窓の終わりに割れていた。
-        broken: bool,
-        /// まとまり 0.9 以上のときの形の差(元の姿と)の平均。
-        distortion: f32,
-        /// 1ステップあたりの誘いの強さの平均。
-        effort: f32,
-        /// 誘っていた時間の割合。
-        active: f32,
-        /// 粒子の速さの平均の、窓の中でのピーク。
-        peak_speed: f32,
-        /// 粒子の速さの平均の、窓全体での平均。
-        mean_speed: f32,
-    }
 
     struct Summary {
         config: (f32, f32, f32),
@@ -1039,102 +1140,27 @@ fn landscape(seeds: &[u64]) {
             })
             .collect();
         let runs = parallel_map(jobs, |(c, s, trial)| {
-            let (strength, radius, threshold) = configs[c];
-            let base = &baselines[trial as usize];
-            let mut world = started_world(seed, trial);
-            let mut rng = ParticleRng::new(seed * 7919 + trial);
-            for i in 0..world.x.len() {
-                if rng.unit() < SCATTERS[s] {
-                    world.x[i] = rng.range(0.0, FIELD - 1e-3);
-                    world.y[i] = rng.range(0.0, FIELD - 1e-3);
-                }
-            }
-            world.lure_radius = radius;
-            let mut run = Run {
-                seconds: WINDOW as f32 / 15.0,
-                ..Default::default()
-            };
-            let (mut distortion_total, mut intact_samples) = (0.0, 0);
-            let (mut active_steps, mut effort_total) = (0, 0.0);
-            let mut recovered = false;
-            let mut cohesion = 0.0;
-            for step in 1..=WINDOW {
-                if step % SAMPLE_EVERY == 1 {
-                    let members = world.largest_cluster();
-                    let current = members.len() as f32 / world.x.len() as f32;
-                    world.lure = if strength > 0.0 && current < threshold {
-                        let ((cx, cy), _) = centroid_and_radius(&world, &members);
-                        Some((cx, cy, strength))
-                    } else {
-                        None
-                    };
-                }
-                if let Some((_, _, applied)) = world.lure {
-                    active_steps += 1;
-                    effort_total += applied;
-                }
-                world.step();
-                let particle_speed = world
-                    .vx
-                    .iter()
-                    .zip(&world.vy)
-                    .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
-                    .sum::<f32>()
-                    / world.x.len() as f32;
-                run.peak_speed = run.peak_speed.max(particle_speed);
-                run.mean_speed += particle_speed / WINDOW as f32;
-                if step % SAMPLE_EVERY != 0 {
-                    continue;
-                }
-                let members = world.largest_cluster();
-                cohesion = members.len() as f32 / world.x.len() as f32;
-                if cohesion < COHESION {
-                    continue;
-                }
-                if !recovered {
-                    run.seconds = if SCATTERS[s] == 0.0 {
-                        0.0
-                    } else {
-                        step as f32 / 15.0
-                    };
-                    recovered = true;
-                }
-                let ((cx, cy), spread) = centroid_and_radius(&world, &members);
-                let types = world.params.types;
-                let mut now = Signature {
-                    radius: spread,
-                    type_radii: vec![0.0; types],
-                    ..Default::default()
-                };
-                for kind in 0..types {
-                    let of_kind: Vec<f32> = members
-                        .iter()
-                        .filter(|&&i| world.kind[i] == kind)
-                        .map(|&i| ((world.x[i] - cx).powi(2) + (world.y[i] - cy).powi(2)).sqrt())
-                        .collect();
-                    now.type_radii[kind] =
-                        of_kind.iter().sum::<f32>() / of_kind.len().max(1) as f32;
-                }
-                distortion_total += shape_difference(&now, base);
-                intact_samples += 1;
-            }
-            run.broken = cohesion < COHESION;
-            run.distortion = distortion_total / intact_samples.max(1) as f32;
-            run.effort = effort_total / WINDOW as f32;
-            run.active = active_steps as f32 / WINDOW as f32;
+            let run = lure_episode(
+                seed,
+                trial,
+                seed * 7919 + trial,
+                SCATTERS[s],
+                configs[c],
+                Some(&baselines[trial as usize]),
+            );
             (c, s, trial, run)
         });
 
-        let find = |c: usize, s: usize| -> Vec<Run> {
+        let find = |c: usize, s: usize| -> Vec<LureEpisode> {
             let mut rows: Vec<_> = runs.iter().filter(|r| r.0 == c && r.1 == s).collect();
             rows.sort_by_key(|r| r.2);
             rows.into_iter().map(|r| r.3).collect()
         };
         // 行動なし(強さ 0)を、同じ場面・同じ試行の基準にする
-        let nothing: Vec<Vec<Run>> = (0..SCATTERS.len()).map(|s| find(0, s)).collect();
+        let nothing: Vec<Vec<LureEpisode>> = (0..SCATTERS.len()).map(|s| find(0, s)).collect();
         let intact_particle_speed =
             mean(&nothing[0].iter().map(|r| r.mean_speed).collect::<Vec<_>>());
-        let paired = |rows: &[Run], base: &[Run], pick: fn(&Run) -> f32| {
+        let paired = |rows: &[LureEpisode], base: &[LureEpisode], pick: fn(&LureEpisode) -> f32| {
             mean(
                 &rows
                     .iter()
@@ -1145,7 +1171,7 @@ fn landscape(seeds: &[u64]) {
         };
         // 吸い寄せの激しさは、何もしないより速さのピークが上がった分だけを数える。下がった分を得にすると、
         // 近くの塊だけを強く締めて粒子の動きを鈍らせる行動(まとまり直すのはかえって遅い)が選ばれてしまった
-        let snap_increase = |rows: &[Run], base: &[Run]| {
+        let snap_increase = |rows: &[LureEpisode], base: &[LureEpisode]| {
             mean(
                 &rows
                     .iter()
@@ -1156,7 +1182,8 @@ fn landscape(seeds: &[u64]) {
         };
         let summaries: Vec<Summary> = (0..configs.len())
             .map(|c| {
-                let scenes: Vec<Vec<Run>> = (0..SCATTERS.len()).map(|s| find(c, s)).collect();
+                let scenes: Vec<Vec<LureEpisode>> =
+                    (0..SCATTERS.len()).map(|s| find(c, s)).collect();
                 let seconds_of =
                     |s: usize| mean(&scenes[s].iter().map(|r| r.seconds).collect::<Vec<_>>());
                 Summary {
@@ -1249,6 +1276,261 @@ fn landscape(seeds: &[u64]) {
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+/// 小さな学習ループ。重心へ誘う行動のパラメータ(強さ・届く距離・しきい値)を、代償を入れた報酬で進化戦略に
+/// 学ばせ、学んだ値を学習に使っていない場面で、何もしない場合・格子の最良の組と比べる。
+///
+/// - 進化戦略: (μ/μ, λ)-ES(μ = 3、λ = 10)。親は残さない(非エリート)。評価に雑音があるので、運よく高く出た
+///   親がいつまでも残るのを避けるため。突然変異の幅はパラメータと一緒に変える(自己適応)
+/// - パラメータは 0〜1 に正規化して探す。強さは 0.005〜0.2 を対数で、届く距離は 10〜45 セル、しきい値は 0.6〜1.0
+/// - 評価: 世代ごとに新しい場面を5つ引き(崩していない体1つ、3割・7割を散らした体を2つずつ)、その世代の候補を
+///   全員同じ場面で比べる。何もしない場合もその場面で走らせ、吸い寄せの激しさの基準にする
+/// - 報酬: 格子の実験と同じ形(吸い寄せの重み 0.1、崩れていないのに誘う重み 1)
+fn learn(seeds: &[u64]) {
+    const PARENTS: usize = 3;
+    const OFFSPRING: usize = 10;
+    const GENERATIONS: usize = 30;
+    const SNAP_WEIGHT: f32 = 0.1;
+    const IDLE_WEIGHT: f32 = 1.0;
+    const EPISODE_SCATTERS: [f32; 5] = [0.0, 0.3, 0.3, 0.7, 0.7];
+    const INITIAL_SIGMA: f32 = 0.3;
+    const MIN_SIGMA: f32 = 0.02;
+    /// 突然変異の幅を変える速さ(対数の標準偏差)。
+    const SIGMA_LEARNING_RATE: f32 = 0.5;
+    /// 学習に使っていない場面での比べ方。1回 = 崩していない・3割・7割の3場面。
+    const HELD_OUT_ROUNDS: u64 = 32;
+    const HELD_OUT_SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+    /// 格子の実験で、この重みのときに最良だった組。
+    const GRID_BEST: (f32, f32, f32) = (0.1, 45.0, 0.9);
+
+    fn decode(u: [f32; 3]) -> (f32, f32, f32) {
+        (
+            0.005 * 40f32.powf(u[0]),
+            10.0 + 35.0 * u[1],
+            0.6 + 0.4 * u[2],
+        )
+    }
+
+    fn normal(rng: &mut ParticleRng) -> f32 {
+        let u1 = rng.unit().max(1e-7);
+        let u2 = rng.unit();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
+
+    /// 場面: (出発点, 散らし方の乱数, 散らす割合)。
+    type Scene = (u64, u64, f32);
+
+    /// 場面ごとの結果から、候補ごとの報酬と、その中身(戻るまでの秒, 吸い寄せの激しさ, 崩れていないのに誘う割合)を出す。
+    /// `outcomes[c][e]` は候補 c の場面 e の結果、`nothing[e]` は何もしない場合の場面 e の結果。
+    fn rewards(
+        scenes: &[Scene],
+        outcomes: &[Vec<LureEpisode>],
+        nothing: &[LureEpisode],
+        intact_speed: f32,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        outcomes
+            .iter()
+            .map(|runs| {
+                let (mut seconds, mut scattered, mut snap, mut idle, mut intact) =
+                    (0.0, 0, 0.0, 0.0, 0);
+                for (e, run) in runs.iter().enumerate() {
+                    if scenes[e].2 > 0.0 {
+                        seconds += run.seconds;
+                        snap += (run.peak_speed - nothing[e].peak_speed).max(0.0);
+                        scattered += 1;
+                    } else {
+                        idle += run.active;
+                        intact += 1;
+                    }
+                }
+                let seconds = seconds / scattered.max(1) as f32;
+                let snap = snap / scattered.max(1) as f32 / intact_speed;
+                let idle = idle / intact.max(1) as f32;
+                (
+                    -seconds / 120.0 - SNAP_WEIGHT * snap - IDLE_WEIGHT * idle,
+                    seconds,
+                    snap,
+                    idle,
+                )
+            })
+            .collect()
+    }
+
+    /// 候補の組を、場面の組で走らせる(何もしない場合も一緒に)。
+    fn evaluate(
+        seed: u64,
+        scenes: &[Scene],
+        configs: &[(f32, f32, f32)],
+        intact_speed: f32,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let mut all = vec![(0.0, GRID_BEST.1, 1.0)];
+        all.extend_from_slice(configs);
+        let jobs: Vec<(usize, usize)> = (0..all.len())
+            .flat_map(|c| (0..scenes.len()).map(move |e| (c, e)))
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(c, e)| {
+            let (trial, scatter_seed, scatter) = scenes[e];
+            lure_episode(seed, trial, scatter_seed, scatter, all[c], None)
+        });
+        let mut table = vec![vec![LureEpisode::default(); scenes.len()]; all.len()];
+        for ((c, e), run) in jobs.into_iter().zip(runs) {
+            table[c][e] = run;
+        }
+        rewards(scenes, &table[1..], &table[0], intact_speed)
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        // 崩していない体の粒子の速さ(格子の実験と同じく、出発点 0〜15 の何もしない場合の平均)
+        let intact_speed = mean(&parallel_map((0..16u64).collect(), |trial| {
+            lure_episode(
+                seed,
+                trial,
+                seed * 7919 + trial,
+                0.0,
+                (0.0, 10.0, 0.6),
+                None,
+            )
+            .mean_speed
+        }));
+        println!(
+            "報酬 = −(戻るまでの秒/120) − {SNAP_WEIGHT} × 吸い寄せの激しさ − {IDLE_WEIGHT} × 崩れていないのに誘う割合。(μ/μ, λ) = ({PARENTS}/{PARENTS}, {OFFSPRING})、{GENERATIONS} 世代、世代ごとに場面 {} つ\n",
+            EPISODE_SCATTERS.len()
+        );
+
+        let starts: [(&str, [f32; 3]); 3] = [
+            (
+                "ほぼ何もしない(強さ 0.005・距離 10・しきい値 0.6)",
+                [0.0, 0.0, 0.0],
+            ),
+            (
+                "いつも強く引く(強さ 0.2・距離 45・しきい値 1.0)",
+                [1.0, 1.0, 1.0],
+            ),
+            ("乱数", {
+                let mut rng = ParticleRng::new(seed ^ 0x1EA2);
+                [rng.unit(), rng.unit(), rng.unit()]
+            }),
+        ];
+        let mut learned = Vec::new();
+        for (run_index, (label, start)) in starts.iter().enumerate() {
+            let (s0, r0, t0) = decode(*start);
+            println!("### 出発点: {label} → 強さ {s0:.3}・距離 {r0:.1}・しきい値 {t0:.2}\n");
+            println!("| 世代 | 平均の強さ | 距離 | しきい値 | 突然変異の幅 | 平均の報酬 | 戻るまで(秒) | 吸い寄せ | 崩れていないのに誘う | 子の最良の報酬 |");
+            println!("|---|---|---|---|---|---|---|---|---|---|");
+            let mut rng = ParticleRng::new(seed * 31 + run_index as u64);
+            let mut center = *start;
+            let mut sigma = INITIAL_SIGMA;
+            for generation in 0..=GENERATIONS {
+                let scenes: Vec<Scene> = EPISODE_SCATTERS
+                    .iter()
+                    .map(|&scatter| {
+                        let trial = 1_000 + (rng.unit() * 100_000.0) as u64;
+                        let scatter_seed = (rng.unit() * 1e9) as u64;
+                        (trial, scatter_seed, scatter)
+                    })
+                    .collect();
+                // 子を作る(最後の世代は平均だけを評価する)
+                let children: Vec<([f32; 3], f32)> = if generation < GENERATIONS {
+                    (0..OFFSPRING)
+                        .map(|_| {
+                            let child_sigma = (sigma
+                                * (SIGMA_LEARNING_RATE * normal(&mut rng)).exp())
+                            .clamp(MIN_SIGMA, 1.0);
+                            let child = [0, 1, 2].map(|k| {
+                                (center[k] + child_sigma * normal(&mut rng)).clamp(0.0, 1.0)
+                            });
+                            (child, child_sigma)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let mut configs = vec![decode(center)];
+                configs.extend(children.iter().map(|(child, _)| decode(*child)));
+                let results = evaluate(seed, &scenes, &configs, intact_speed);
+                let (mean_reward, seconds, snap, idle) = results[0];
+                let best_child = results[1..]
+                    .iter()
+                    .map(|r| r.0)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                if generation % 5 == 0 || generation == GENERATIONS {
+                    let (strength, radius, threshold) = decode(center);
+                    println!(
+                        "| {generation} | {strength:.3} | {radius:.1} | {threshold:.2} | {sigma:.3} | {mean_reward:.3} | {seconds:.1} | {snap:.2} | {idle:.2} | {} |",
+                        if children.is_empty() { "—".to_string() } else { format!("{best_child:.3}") }
+                    );
+                }
+                if children.is_empty() {
+                    break;
+                }
+                // 上位 μ の子の平均へ移る
+                let mut order: Vec<usize> = (0..children.len()).collect();
+                order.sort_by(|&a, &b| results[b + 1].0.total_cmp(&results[a + 1].0));
+                let chosen = &order[..PARENTS];
+                center = [0, 1, 2].map(|k| {
+                    chosen.iter().map(|&i| children[i].0[k]).sum::<f32>() / PARENTS as f32
+                });
+                sigma = chosen.iter().map(|&i| children[i].1).sum::<f32>() / PARENTS as f32;
+            }
+            learned.push((format!("学んだ値({label} から)"), decode(center)));
+            println!();
+        }
+
+        // 学習に使っていない場面で比べる
+        println!(
+            "### 学習に使っていない場面での比較({HELD_OUT_ROUNDS} 回 × 崩していない・3割・7割)\n"
+        );
+        let mut contenders = vec![
+            ("何もしない".to_string(), (0.0, GRID_BEST.1, 1.0)),
+            ("格子の最良の組".to_string(), GRID_BEST),
+        ];
+        contenders.extend(learned);
+        let configs: Vec<(f32, f32, f32)> = contenders.iter().map(|c| c.1).collect();
+        // 回ごとに報酬を出し、回のあいだのばらつきから標準誤差を出す
+        let per_round: Vec<Vec<(f32, f32, f32, f32)>> = (0..HELD_OUT_ROUNDS)
+            .map(|round| {
+                let mut rng = ParticleRng::new(seed * 104_729 + round);
+                let scenes: Vec<Scene> = HELD_OUT_SCATTERS
+                    .iter()
+                    .map(|&scatter| {
+                        (
+                            500_000 + round * 7 + (rng.unit() * 1000.0) as u64,
+                            (rng.unit() * 1e9) as u64,
+                            scatter,
+                        )
+                    })
+                    .collect();
+                evaluate(seed, &scenes, &configs, intact_speed)
+            })
+            .collect();
+        println!("| 行動 | 強さ | 距離 | しきい値 | 報酬 平均 ± 標準誤差 | 格子の最良との差 ± 標準誤差 | 戻るまで(秒) | 吸い寄せ | 崩れていないのに誘う |");
+        println!("|---|---|---|---|---|---|---|---|---|");
+        let standard_error = |values: &[f32]| {
+            let m = mean(values);
+            (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                .sqrt()
+                / (values.len() as f32).sqrt()
+        };
+        for (c, (label, (strength, radius, threshold))) in contenders.iter().enumerate() {
+            let rewards_c: Vec<f32> = per_round.iter().map(|r| r[c].0).collect();
+            let versus_grid: Vec<f32> = per_round.iter().map(|r| r[c].0 - r[1].0).collect();
+            println!(
+                "| {label} | {strength:.3} | {radius:.1} | {threshold:.2} | {:.3} ± {:.3} | {:+.3} ± {:.3} | {:.1} | {:.2} | {:.2} |",
+                mean(&rewards_c),
+                standard_error(&rewards_c),
+                mean(&versus_grid),
+                standard_error(&versus_grid),
+                mean(&per_round.iter().map(|r| r[c].1).collect::<Vec<_>>()),
+                mean(&per_round.iter().map(|r| r[c].2).collect::<Vec<_>>()),
+                mean(&per_round.iter().map(|r| r[c].3).collect::<Vec<_>>()),
+            );
+        }
+        println!();
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1256,6 +1538,13 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("learn") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            learn(&seeds);
         }
         Some("landscape") => {
             let seeds: Vec<u64> = args[1..]
@@ -1286,7 +1575,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>..."
         ),
     }
 }
