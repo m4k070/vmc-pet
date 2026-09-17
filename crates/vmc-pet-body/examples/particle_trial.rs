@@ -28,6 +28,10 @@
 //!   誘いの代償を入れた報酬の地形を、行動のパラメータの格子で測る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- learn <候補の番号>...`:
 //!   その報酬で、行動のパラメータを小さな進化戦略に学ばせ、学習に使っていない場面で比べる
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- energy <候補の番号>...`:
+//!   エネルギー(力の倍率)によって、重心へ誘う行動の最良の組が変わるかを測る
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- situational <候補の番号>...`:
+//!   エネルギーに応じて行動を変える学習を、定数の行動の学習と比べる
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -986,7 +990,12 @@ struct LureEpisode {
     mean_speed: f32,
 }
 
-/// 出発点 `trial` の体を、乱数 `scatter_seed` で粒子の `scatter` の割合だけ散らし、行動 `config`
+/// エネルギーが尽きたときの力の倍率(試験で崩れずに戻れた ×0.6)。
+const ENERGY_FORCE_FLOOR: f32 = 0.6;
+/// 力の倍率を変えてから崩すまで待つステップ。
+const ENERGY_SETTLE_STEPS: u32 = 450;
+
+/// 出発点 `trial` の体を、力の倍率 `force_scale` にして落ち着かせ、乱数 `scatter_seed` で粒子の `scatter` の割合だけ散らし、行動 `config`
 /// (強さ, 届く距離, しきい値)を `LURE_WINDOW` ステップ効かせる。行動は 1 秒ごとにまとまりを測り、
 /// しきい値を下回っていれば最大の塊の重心へ誘う。
 fn lure_episode(
@@ -994,11 +1003,19 @@ fn lure_episode(
     trial: u64,
     scatter_seed: u64,
     scatter: f32,
+    force_scale: f32,
     config: (f32, f32, f32),
     baseline: Option<&Signature>,
 ) -> LureEpisode {
     let (strength, radius, threshold) = config;
     let mut world = started_world(seed, trial);
+    // 弱った体(力の倍率が 1 未満)は、その力で落ち着くまで待ってから崩す
+    if force_scale != 1.0 {
+        world.force_scale = force_scale;
+        for _ in 0..ENERGY_SETTLE_STEPS {
+            world.step();
+        }
+    }
     let mut rng = ParticleRng::new(scatter_seed);
     for i in 0..world.x.len() {
         if rng.unit() < scatter {
@@ -1145,6 +1162,7 @@ fn landscape(seeds: &[u64]) {
                 trial,
                 seed * 7919 + trial,
                 SCATTERS[s],
+                1.0,
                 configs[c],
                 Some(&baselines[trial as usize]),
             );
@@ -1369,7 +1387,7 @@ fn learn(seeds: &[u64]) {
             .collect();
         let runs = parallel_map(jobs.clone(), |(c, e)| {
             let (trial, scatter_seed, scatter) = scenes[e];
-            lure_episode(seed, trial, scatter_seed, scatter, all[c], None)
+            lure_episode(seed, trial, scatter_seed, scatter, 1.0, all[c], None)
         });
         let mut table = vec![vec![LureEpisode::default(); scenes.len()]; all.len()];
         for ((c, e), run) in jobs.into_iter().zip(runs) {
@@ -1388,6 +1406,7 @@ fn learn(seeds: &[u64]) {
                 trial,
                 seed * 7919 + trial,
                 0.0,
+                1.0,
                 (0.0, 10.0, 0.6),
                 None,
             )
@@ -1531,6 +1550,474 @@ fn learn(seeds: &[u64]) {
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+/// エネルギー(体の力の強さ)によって、重心へ誘う行動の最良の組が変わるかを測る。
+///
+/// 状況に応じて行動を変える学習に進む前に、状況によって最良が本当に変わるのかを確かめる。変わらなければ、状況を
+/// 入力に持つ式を学ばせても、定数の行動と同じになる。エネルギーは、崩れずに戻れると分かっている「力全体の倍率」で
+/// 表す(エネルギー 1.0 / 0.5 / 0.0 → 力 ×1.0 / ×0.8 / ×0.6)。報酬は `landscape` と同じ形で重みを1つに決め、
+/// エネルギーごとに格子の最良を求め、あるエネルギーの最良を別のエネルギーで使ったときの損を、試行ごとに対にして測る。
+fn energy_landscape(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    const STRENGTHS: [f32; 7] = [0.0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2];
+    const RADII: [f32; 2] = [20.0, 45.0];
+    const THRESHOLDS: [f32; 2] = [0.9, 0.95];
+    const ENERGIES: [f32; 3] = [1.0, 0.5, 0.0];
+    const SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+    const SNAP_WEIGHT: f32 = 0.1;
+    const IDLE_WEIGHT: f32 = 1.0;
+
+    fn force_scale(energy: f32) -> f32 {
+        ENERGY_FORCE_FLOOR + (1.0 - ENERGY_FORCE_FLOOR) * energy
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        println!(
+            "報酬 = −(3割・7割の戻るまでの秒の平均/120) − {SNAP_WEIGHT} × 吸い寄せの激しさ − {IDLE_WEIGHT} × 崩れていないのに誘う割合。吸い寄せの激しさの基準は、同じエネルギーで何もしない場合\n"
+        );
+        let mut configs = vec![(0.0, RADII[0], THRESHOLDS[0])];
+        for &strength in &STRENGTHS[1..] {
+            for &radius in &RADII {
+                for &threshold in &THRESHOLDS {
+                    configs.push((strength, radius, threshold));
+                }
+            }
+        }
+        let jobs: Vec<(usize, usize, usize, u64)> = (0..ENERGIES.len())
+            .flat_map(|e| {
+                (0..configs.len()).flat_map(move |c| {
+                    (0..SCATTERS.len()).flat_map(move |s| (0..TRIALS).map(move |t| (e, c, s, t)))
+                })
+            })
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(e, c, s, trial)| {
+            lure_episode(
+                seed,
+                trial,
+                seed * 7919 + trial,
+                SCATTERS[s],
+                force_scale(ENERGIES[e]),
+                configs[c],
+                None,
+            )
+        });
+        let mut table = vec![
+            vec![
+                vec![vec![LureEpisode::default(); TRIALS as usize]; SCATTERS.len()];
+                configs.len()
+            ];
+            ENERGIES.len()
+        ];
+        for ((e, c, s, t), run) in jobs.into_iter().zip(runs) {
+            table[e][c][s][t as usize] = run;
+        }
+        // 崩していない体の粒子の速さ(満タンのエネルギー、何もしない場合)で、吸い寄せの激しさを割る
+        let intact_speed = mean(
+            &table[0][0][0]
+                .iter()
+                .map(|r| r.mean_speed)
+                .collect::<Vec<_>>(),
+        );
+        // 試行ごとの報酬(その試行の3場面から)
+        let trial_rewards = |e: usize, c: usize| -> Vec<f32> {
+            (0..TRIALS as usize)
+                .map(|t| {
+                    let seconds = (table[e][c][1][t].seconds + table[e][c][2][t].seconds) / 2.0;
+                    let snap = ((table[e][c][1][t].peak_speed - table[e][0][1][t].peak_speed)
+                        .max(0.0)
+                        + (table[e][c][2][t].peak_speed - table[e][0][2][t].peak_speed).max(0.0))
+                        / 2.0
+                        / intact_speed;
+                    -seconds / 120.0 - SNAP_WEIGHT * snap - IDLE_WEIGHT * table[e][c][0][t].active
+                })
+                .collect()
+        };
+        let standard_error = |values: &[f32]| {
+            let m = mean(values);
+            (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                .sqrt()
+                / (values.len() as f32).sqrt()
+        };
+        let label = |(strength, radius, threshold): (f32, f32, f32)| {
+            if strength == 0.0 {
+                "何もしない".to_string()
+            } else {
+                format!("強さ {strength}・距離 {radius}・しきい値 {threshold}")
+            }
+        };
+
+        let mut best_per_energy = Vec::new();
+        for (e, energy) in ENERGIES.iter().enumerate() {
+            println!("### エネルギー {energy}(力 ×{})\n", force_scale(*energy));
+            println!("| 行動 | 報酬 平均 ± 標準誤差 | 戻るまで(秒): 3割 / 7割 | 割れたまま | 吸い寄せ | 崩れていないのに誘う |");
+            println!("|---|---|---|---|---|---|");
+            let mut best = (0, f32::NEG_INFINITY);
+            for c in 0..configs.len() {
+                let rewards = trial_rewards(e, c);
+                let reward = mean(&rewards);
+                if reward > best.1 {
+                    best = (c, reward);
+                }
+                let scene_mean = |s: usize, pick: fn(&LureEpisode) -> f32| {
+                    mean(&table[e][c][s].iter().map(pick).collect::<Vec<_>>())
+                };
+                let snap = (1..3)
+                    .map(|s| {
+                        mean(
+                            &table[e][c][s]
+                                .iter()
+                                .zip(&table[e][0][s])
+                                .map(|(r, n)| (r.peak_speed - n.peak_speed).max(0.0))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .sum::<f32>()
+                    / 2.0
+                    / intact_speed;
+                let broken = (0..3)
+                    .map(|s| table[e][c][s].iter().filter(|r| r.broken).count())
+                    .sum::<usize>();
+                println!(
+                    "| {} | {reward:.3} ± {:.3} | {:.1} / {:.1} | {broken} | {snap:.2} | {:.2} |",
+                    label(configs[c]),
+                    standard_error(&rewards),
+                    scene_mean(1, |r| r.seconds),
+                    scene_mean(2, |r| r.seconds),
+                    scene_mean(0, |r| r.active),
+                );
+            }
+            println!("\n最良: {}(報酬 {:.3})\n", label(configs[best.0]), best.1);
+            best_per_energy.push(best.0);
+        }
+
+        println!("### あるエネルギーの最良を、別のエネルギーで使ったときの損(試行ごとに対にした平均 ± 標準誤差)\n");
+        print!("| 使う場面のエネルギー |");
+        for energy in ENERGIES {
+            print!(" エネルギー {energy} の最良 |");
+        }
+        println!("\n|---|---|---|---|");
+        for (e, energy) in ENERGIES.iter().enumerate() {
+            print!("| {energy} |");
+            let own = trial_rewards(e, best_per_energy[e]);
+            for &other in &best_per_energy {
+                let loss: Vec<f32> = trial_rewards(e, other)
+                    .iter()
+                    .zip(&own)
+                    .map(|(o, b)| o - b)
+                    .collect();
+                print!(
+                    " {:+.3} ± {:.3}({}) |",
+                    mean(&loss),
+                    standard_error(&loss),
+                    label(configs[other])
+                );
+            }
+            println!();
+        }
+        println!();
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
+/// 状況(エネルギー)に応じて行動を変える学習。
+///
+/// `energy` で、報酬の重みが一定のままだと、エネルギーごとの最良の違いは小さく、定数の行動との差が報酬で 0.01 ほど
+/// しかないと分かった。そこで報酬を2通り用意し、それぞれで「定数の行動」と「エネルギーに応じた行動」を同じ回数だけ
+/// 学ばせ、学習に使っていない場面でエネルギーごとに比べる。
+///
+/// - 報酬「重みが一定」: 吸い寄せの重み 0.1(`energy` と同じ)
+/// - 報酬「弱るほど吸い寄せを嫌う」: 吸い寄せの重みを 0.1(エネルギー 1)から 0.5(エネルギー 0)まで上げる。弱った体が
+///   激しく吸い寄せられて元気そうに見えるのを避けたい、という見た目のねらいを式にしたもの
+/// - 定数の行動: 強さ・届く距離・しきい値(`learn` と同じ3つ)
+/// - エネルギーに応じた行動: 強さを「エネルギー 1 のときの強さ」と「エネルギー 0 のときの強さ」の2つにし、そのあいだを
+///   対数でつなぐ(強さ = 満タンの強さ^エネルギー × 尽きたときの強さ^(1 − エネルギー))。届く距離・しきい値は共通の4つ
+/// - 場面は、エネルギー 1・0.5・0 のそれぞれで、崩していない体・3割・7割を散らした体(世代ごとに9場面)
+fn learn_situational(seeds: &[u64]) {
+    const PARENTS: usize = 3;
+    const OFFSPRING: usize = 10;
+    const GENERATIONS: usize = 30;
+    const IDLE_WEIGHT: f32 = 1.0;
+    const ENERGIES: [f32; 3] = [1.0, 0.5, 0.0];
+    const SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+    const INITIAL_SIGMA: f32 = 0.3;
+    const MIN_SIGMA: f32 = 0.02;
+    const SIGMA_LEARNING_RATE: f32 = 0.5;
+    const HELD_OUT_ROUNDS: u64 = 32;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Reward {
+        Constant,
+        WeakerDislikesSnap,
+    }
+    impl Reward {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Constant => "重みが一定",
+                Self::WeakerDislikesSnap => "弱るほど吸い寄せを嫌う",
+            }
+        }
+        fn snap_weight(self, energy: f32) -> f32 {
+            match self {
+                Self::Constant => 0.1,
+                Self::WeakerDislikesSnap => 0.1 + 0.4 * (1.0 - energy),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Policy {
+        Constant,
+        EnergyAware,
+    }
+    impl Policy {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Constant => "定数の行動",
+                Self::EnergyAware => "エネルギーに応じた行動",
+            }
+        }
+        fn dimensions(self) -> usize {
+            match self {
+                Self::Constant => 3,
+                Self::EnergyAware => 4,
+            }
+        }
+        /// 正規化したパラメータ(0〜1)を、エネルギー `energy` のときの (強さ, 距離, しきい値) にする。
+        fn decode(self, u: &[f32], energy: f32) -> (f32, f32, f32) {
+            let strength_of = |v: f32| 0.005 * 40f32.powf(v);
+            match self {
+                Self::Constant => (strength_of(u[0]), 10.0 + 35.0 * u[1], 0.6 + 0.4 * u[2]),
+                Self::EnergyAware => {
+                    let (full, depleted) = (strength_of(u[0]), strength_of(u[1]));
+                    (
+                        full.powf(energy) * depleted.powf(1.0 - energy),
+                        10.0 + 35.0 * u[2],
+                        0.6 + 0.4 * u[3],
+                    )
+                }
+            }
+        }
+    }
+
+    fn normal(rng: &mut ParticleRng) -> f32 {
+        let u1 = rng.unit().max(1e-7);
+        let u2 = rng.unit();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
+
+    /// 場面: (出発点, 散らし方の乱数, 散らす割合, エネルギー)。
+    type Scene = (u64, u64, f32, f32);
+
+    /// 候補(正規化したパラメータ)の組を場面の組で走らせ、候補ごとに、エネルギーごとの報酬を返す(`[エネルギー 1, 0.5, 0]`)。
+    /// 報酬は、エネルギーごとに「3割・7割の戻るまでの秒の平均/120 + 吸い寄せの重み × 吸い寄せの激しさ + 崩れていないのに
+    /// 誘う割合」を引いたもの。その場面の組にそのエネルギーの場面が無ければ 0。
+    fn evaluate(
+        seed: u64,
+        scenes: &[Scene],
+        policy: Policy,
+        candidates: &[Vec<f32>],
+        reward: Reward,
+        intact_speed: f32,
+    ) -> Vec<[f32; 3]> {
+        // 候補 0 は何もしない(吸い寄せの激しさの基準)
+        let jobs: Vec<(usize, usize)> = (0..=candidates.len())
+            .flat_map(|c| (0..scenes.len()).map(move |e| (c, e)))
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(c, e)| {
+            let (trial, scatter_seed, scatter, energy) = scenes[e];
+            let config = if c == 0 {
+                (0.0, 45.0, 1.0)
+            } else {
+                policy.decode(&candidates[c - 1], energy)
+            };
+            let force = ENERGY_FORCE_FLOOR + (1.0 - ENERGY_FORCE_FLOOR) * energy;
+            lure_episode(seed, trial, scatter_seed, scatter, force, config, None)
+        });
+        let mut table = vec![vec![LureEpisode::default(); scenes.len()]; candidates.len() + 1];
+        for ((c, e), run) in jobs.into_iter().zip(runs) {
+            table[c][e] = run;
+        }
+        (1..=candidates.len())
+            .map(|c| {
+                ENERGIES.map(|energy| {
+                    let (mut seconds, mut snap, mut scattered, mut idle, mut intact) =
+                        (0.0, 0.0, 0, 0.0, 0);
+                    for (e, scene) in scenes.iter().enumerate() {
+                        if scene.3 != energy {
+                            continue;
+                        }
+                        if scene.2 > 0.0 {
+                            seconds += table[c][e].seconds;
+                            snap += (table[c][e].peak_speed - table[0][e].peak_speed).max(0.0);
+                            scattered += 1;
+                        } else {
+                            idle += table[c][e].active;
+                            intact += 1;
+                        }
+                    }
+                    if scattered + intact == 0 {
+                        return 0.0;
+                    }
+                    -(seconds / scattered.max(1) as f32) / 120.0
+                        - reward.snap_weight(energy) * snap / scattered.max(1) as f32 / intact_speed
+                        - IDLE_WEIGHT * idle / intact.max(1) as f32
+                })
+            })
+            .collect()
+    }
+
+    fn scenes_for(rng: &mut ParticleRng, trial_base: u64) -> Vec<Scene> {
+        ENERGIES
+            .iter()
+            .flat_map(|&energy| SCATTERS.iter().map(move |&scatter| (energy, scatter)))
+            .map(|(energy, scatter)| {
+                let trial = trial_base + (rng.unit() * 100_000.0) as u64;
+                let scatter_seed = (rng.unit() * 1e9) as u64;
+                (trial, scatter_seed, scatter, energy)
+            })
+            .collect()
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        let intact_speed = mean(&parallel_map((0..16u64).collect(), |trial| {
+            lure_episode(
+                seed,
+                trial,
+                seed * 7919 + trial,
+                0.0,
+                1.0,
+                (0.0, 10.0, 0.6),
+                None,
+            )
+            .mean_speed
+        }));
+        println!(
+            "(μ/μ, λ) = ({PARENTS}/{PARENTS}, {OFFSPRING})、{GENERATIONS} 世代、世代ごとに場面 9 つ(エネルギー 1・0.5・0 × 崩していない・3割・7割)。出発点はどれも、強さ 0.01・距離 27.5・しきい値 0.8(正規化して 0.19・0.5・0.5)\n"
+        );
+
+        for reward in [Reward::Constant, Reward::WeakerDislikesSnap] {
+            println!("### 報酬: {}\n", reward.label());
+            let mut learned: Vec<(Policy, Vec<f32>)> = Vec::new();
+            for policy in [Policy::Constant, Policy::EnergyAware] {
+                let dimensions = policy.dimensions();
+                let mut rng = ParticleRng::new(seed * 53 + dimensions as u64 * 7 + reward as u64);
+                // 強さ 0.01 に当たる正規化の値
+                let start_strength = (0.01f32 / 0.005).ln() / 40f32.ln();
+                let mut center: Vec<f32> = match policy {
+                    Policy::Constant => vec![start_strength, 0.5, 0.5],
+                    Policy::EnergyAware => vec![start_strength, start_strength, 0.5, 0.5],
+                };
+                let mut sigma = INITIAL_SIGMA;
+                for _ in 0..GENERATIONS {
+                    let scenes = scenes_for(&mut rng, 1_000);
+                    let children: Vec<(Vec<f32>, f32)> = (0..OFFSPRING)
+                        .map(|_| {
+                            let child_sigma = (sigma
+                                * (SIGMA_LEARNING_RATE * normal(&mut rng)).exp())
+                            .clamp(MIN_SIGMA, 1.0);
+                            let child = center
+                                .iter()
+                                .map(|&value| {
+                                    (value + child_sigma * normal(&mut rng)).clamp(0.0, 1.0)
+                                })
+                                .collect();
+                            (child, child_sigma)
+                        })
+                        .collect();
+                    let candidates: Vec<Vec<f32>> =
+                        children.iter().map(|(child, _)| child.clone()).collect();
+                    let results =
+                        evaluate(seed, &scenes, policy, &candidates, reward, intact_speed);
+                    let total = |r: &[f32; 3]| r.iter().sum::<f32>() / 3.0;
+                    let mut order: Vec<usize> = (0..children.len()).collect();
+                    order.sort_by(|&a, &b| total(&results[b]).total_cmp(&total(&results[a])));
+                    let chosen = &order[..PARENTS];
+                    center = (0..dimensions)
+                        .map(|k| {
+                            chosen.iter().map(|&i| children[i].0[k]).sum::<f32>() / PARENTS as f32
+                        })
+                        .collect();
+                    sigma = chosen.iter().map(|&i| children[i].1).sum::<f32>() / PARENTS as f32;
+                }
+                let describe = |energy: f32| {
+                    let (strength, radius, threshold) = policy.decode(&center, energy);
+                    format!("エネルギー {energy}: 強さ {strength:.3}・距離 {radius:.1}・しきい値 {threshold:.2}")
+                };
+                println!(
+                    "- {}: {} / {} / {}",
+                    policy.label(),
+                    describe(1.0),
+                    describe(0.5),
+                    describe(0.0)
+                );
+                learned.push((policy, center));
+            }
+
+            // 学習に使っていない場面で、エネルギーごとに比べる
+            // 回ごとの (定数の行動の報酬, エネルギーに応じた行動の報酬)。どちらも候補1つぶんの [エネルギー 1, 0.5, 0]
+            type RoundRewards = (Vec<[f32; 3]>, Vec<[f32; 3]>);
+            let per_round: Vec<RoundRewards> = (0..HELD_OUT_ROUNDS)
+                .map(|round| {
+                    let mut rng = ParticleRng::new(seed * 104_729 + round + 17);
+                    let scenes = scenes_for(&mut rng, 500_000);
+                    let constant = evaluate(
+                        seed,
+                        &scenes,
+                        learned[0].0,
+                        &[learned[0].1.clone()],
+                        reward,
+                        intact_speed,
+                    );
+                    let aware = evaluate(
+                        seed,
+                        &scenes,
+                        learned[1].0,
+                        &[learned[1].1.clone()],
+                        reward,
+                        intact_speed,
+                    );
+                    (constant, aware)
+                })
+                .collect();
+            let standard_error = |values: &[f32]| {
+                let m = mean(values);
+                (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                    .sqrt()
+                    / (values.len() as f32).sqrt()
+            };
+            println!("\n学習に使っていない場面({HELD_OUT_ROUNDS} 回 × 9 場面)での報酬:\n");
+            println!("| エネルギー | 定数の行動 | エネルギーに応じた行動 | 差(応じた − 定数)± 標準誤差 |");
+            println!("|---|---|---|---|");
+            for (index, energy) in ENERGIES.iter().enumerate() {
+                let constant: Vec<f32> = per_round.iter().map(|r| r.0[0][index]).collect();
+                let aware: Vec<f32> = per_round.iter().map(|r| r.1[0][index]).collect();
+                let difference: Vec<f32> =
+                    aware.iter().zip(&constant).map(|(a, c)| a - c).collect();
+                println!(
+                    "| {energy} | {:.3} | {:.3} | {:+.3} ± {:.3} |",
+                    mean(&constant),
+                    mean(&aware),
+                    mean(&difference),
+                    standard_error(&difference)
+                );
+            }
+            let overall: Vec<f32> = per_round
+                .iter()
+                .map(|r| r.1[0].iter().sum::<f32>() / 3.0 - r.0[0].iter().sum::<f32>() / 3.0)
+                .collect();
+            println!(
+                "| 平均 | | | {:+.3} ± {:.3} |\n",
+                mean(&overall),
+                standard_error(&overall)
+            );
+        }
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1538,6 +2025,20 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("situational") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            learn_situational(&seeds);
+        }
+        Some("energy") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            energy_landscape(&seeds);
         }
         Some("learn") => {
             let seeds: Vec<u64> = args[1..]
@@ -1575,7 +2076,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>..."
         ),
     }
 }
