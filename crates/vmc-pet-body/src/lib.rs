@@ -34,6 +34,7 @@ pub mod lenia_body;
 pub mod memory;
 pub mod mood;
 pub mod multichannel;
+pub mod particles;
 pub mod perturbation;
 pub mod pet;
 pub mod pigment;
