@@ -71,6 +71,14 @@ cargo run --release -- --multichannel 231-04          # 元気・テンポ・ク
 cargo run --release -- --multichannel 231-04 --preview-mood disappointed  # がっかりのテンポで動かす
 ```
 
+【実験】閉じた場を動き回る粒子の体([docs/experiments/body-candidates.md](docs/experiments/body-candidates.md))を、
+探索の候補番号で表示することもできる。ポインタを乗せるとその点へ誘い、クリックすると弾く。
+
+```sh
+cargo run --release -- --preview-particles 1091                     # 32x32 の箱で表示する
+cargo run --release -- --preview-particles 1091 --particle-zoom 2   # 16x16 の箱を2倍に拡大して表示する
+```
+
 `--multichannel` では、放っておくと約150秒でエネルギーが尽きて体が弱り、クリックすると回復する。
 慣れ・色素・生活リズムの学習・自律コントローラ・記憶はまだつないでいない。
 

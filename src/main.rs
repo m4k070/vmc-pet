@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod interface;
 mod multichannel_preview;
+mod particle_preview;
 mod persistence;
 mod render;
 mod shell;
@@ -38,6 +39,14 @@ fn main() {
                     eprintln!("vmc-pet: {error}");
                     std::process::exit(1);
                 }
+            }
+            return;
+        }
+        Ok(cli::Action::PreviewParticles { seed, zoom }) => {
+            let preview = particle_preview::ParticlePreview::new(seed, zoom);
+            if let Err(error) = LayerWindow::run(LayerWindowConfig::default(), Box::new(preview)) {
+                eprintln!("vmc-pet: {error}");
+                std::process::exit(1);
             }
             return;
         }

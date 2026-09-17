@@ -24,6 +24,8 @@ pub enum Action {
         id: String,
         preview: Option<MoodState>,
     },
+    /// 【実験】粒子の体(探索の候補番号 `seed`)を、`zoom` 倍に拡大して表示する。
+    PreviewParticles { seed: u64, zoom: u32 },
     /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
     ListMultichannel,
     /// 使い方を表示して終了する。
@@ -36,6 +38,8 @@ pub enum ArgsError {
     UnknownFlag(String),
     MissingValue(&'static str),
     UnknownMood(String),
+    /// 数を取るオプションに、受け付けない値が渡された(候補番号は 0 以上、倍率は 1 以上の整数)。
+    InvalidNumber(&'static str, String),
 }
 
 impl std::fmt::Display for ArgsError {
@@ -43,6 +47,12 @@ impl std::fmt::Display for ArgsError {
         match self {
             Self::UnknownFlag(flag) => write!(f, "unknown option: {flag}"),
             Self::MissingValue(flag) => write!(f, "{flag} requires a value"),
+            Self::InvalidNumber(flag, value) => {
+                write!(
+                    f,
+                    "{flag} expects a non-negative integer (zoom: 1 or more), got: {value}"
+                )
+            }
             Self::UnknownMood(value) => {
                 let names: Vec<&str> = MoodState::ALL.iter().map(|state| state.name()).collect();
                 write!(
@@ -52,6 +62,14 @@ impl std::fmt::Display for ArgsError {
                 )
             }
         }
+    }
+}
+
+/// `minimum` 以上の整数を読む。
+fn parse_at_least(flag: &'static str, value: &str, minimum: u64) -> Result<u64, ArgsError> {
+    match value.parse::<u64>() {
+        Ok(number) if number >= minimum => Ok(number),
+        _ => Err(ArgsError::InvalidNumber(flag, value.to_string())),
     }
 }
 
@@ -67,6 +85,8 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
     let mut animal_code = default_animal_code.to_string();
     let mut preview = None;
     let mut multichannel: Option<String> = None;
+    let mut particles: Option<u64> = None;
+    let mut particle_zoom: u32 = 1;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -101,6 +121,14 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             multichannel = Some(value.to_string());
             continue;
         }
+        if let Some((flag, value)) = split_flag(arg, &mut iter, "--preview-particles")? {
+            particles = Some(parse_at_least(flag, &value, 0)?);
+            continue;
+        }
+        if let Some((flag, value)) = split_flag(arg, &mut iter, "--particle-zoom")? {
+            particle_zoom = parse_at_least(flag, &value, 1)?.min(8) as u32;
+            continue;
+        }
         if arg == "--animal" {
             let value = iter.next().ok_or(ArgsError::MissingValue("--animal"))?;
             animal_code = value.clone();
@@ -124,6 +152,12 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         return Err(ArgsError::UnknownFlag(arg.clone()));
     }
 
+    if let Some(seed) = particles {
+        return Ok(Action::PreviewParticles {
+            seed,
+            zoom: particle_zoom,
+        });
+    }
     if let Some(id) = multichannel {
         return Ok(Action::RunMultichannel { id, preview });
     }
@@ -131,6 +165,22 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         animal_code,
         preview,
     })
+}
+
+/// `flag <値>` と `flag=<値>` のどちらでも値を取り出す。`arg` が `flag` でなければ `None`。
+fn split_flag<'a>(
+    arg: &str,
+    iter: &mut impl Iterator<Item = &'a String>,
+    flag: &'static str,
+) -> Result<Option<(&'static str, String)>, ArgsError> {
+    if arg == flag {
+        let value = iter.next().ok_or(ArgsError::MissingValue(flag))?;
+        return Ok(Some((flag, value.clone())));
+    }
+    Ok(arg
+        .strip_prefix(flag)
+        .and_then(|rest| rest.strip_prefix('='))
+        .map(|value| (flag, value.to_string())))
 }
 
 /// `--help` で表示する使い方。
@@ -150,6 +200,9 @@ vmc-pet [オプション]
   --multichannel <id>
                      【実験】多チャンネル Lenia の生物を、元気・テンポ・クリックだけつないで動かす
                      (--preview-mood と組み合わせると、その気分のテンポになる)
+  --preview-particles <番号> [--particle-zoom <倍率>]
+                     【実験】粒子の体(探索の候補番号、例 1091)を表示する。倍率を上げると体は大きく
+                     見えるが、動き回れる箱は狭くなる(ポインタで誘い、クリックで弾く)
   -h, --help         このメッセージを表示して終了する
 ";
 
@@ -313,6 +366,48 @@ mod tests {
         assert_eq!(
             parse(&args(&["--multichannel"]), "O2u"),
             Err(ArgsError::MissingValue("--multichannel"))
+        );
+    }
+
+    #[test]
+    fn preview_particles_takes_a_seed_and_an_optional_zoom() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(&args(&["--preview-particles", "1091"]), "O2u").unwrap(),
+            Action::PreviewParticles {
+                seed: 1091,
+                zoom: 1
+            }
+        );
+        assert_eq!(
+            parse(
+                &args(&["--particle-zoom=2", "--preview-particles=1937"]),
+                "O2u"
+            )
+            .unwrap(),
+            Action::PreviewParticles {
+                seed: 1937,
+                zoom: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_numeric_particle_option_is_reported() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(&args(&["--preview-particles", "abc"]), "O2u"),
+            Err(ArgsError::InvalidNumber(
+                "--preview-particles",
+                "abc".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(
+                &args(&["--preview-particles", "1091", "--particle-zoom", "0"]),
+                "O2u"
+            ),
+            Err(ArgsError::InvalidNumber("--particle-zoom", "0".to_string()))
         );
     }
 
