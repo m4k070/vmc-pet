@@ -36,6 +36,8 @@
 //!   まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- excess <候補の番号>...`:
 //!   代償を「誘っているあいだの速さの超過の和」に直し、古い測り方と比べ、和の形の報酬の重みを探す
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- log <記録のファイル>...`:
+//!   PC 版の `--particle-log` が書いた記録を集計し、ユーザーの操作が報酬の中身をどれだけ動かすかを見る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- shaped-sum <候補の番号>...`:
 //!   `shaped` を、和の形の報酬(平均の速さの超過、重み 10)でやり直す
 //!
@@ -2080,21 +2082,11 @@ impl SpeedLimits {
 const MAX_LURE_STRENGTH: f32 = 0.2;
 
 fn observe_body(world: &ParticleWorld) -> BodyObservation {
-    let members = world.largest_cluster();
-    let cohesion = members.len() as f32 / world.x.len() as f32;
-    let (center, _) = centroid_and_radius(world, &members);
-    let mut in_cluster = vec![false; world.x.len()];
-    for &i in &members {
-        in_cluster[i] = true;
-    }
-    let strays: Vec<f32> = (0..world.x.len())
-        .filter(|&i| !in_cluster[i])
-        .map(|i| ((world.x[i] - center.0).powi(2) + (world.y[i] - center.1).powi(2)).sqrt())
-        .collect();
+    let observed = world.observe();
     BodyObservation {
-        cohesion,
-        stray_distance: mean(&strays),
-        center,
+        cohesion: observed.cohesion,
+        stray_distance: observed.stray_distance,
+        center: observed.center,
     }
 }
 
@@ -2967,6 +2959,182 @@ fn excess_cost(seeds: &[u64]) {
     println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
 
+/// PC 版の `--particle-log` が書いた記録の1行(1 秒ぶん)。
+#[derive(Clone, Copy, Debug, Default)]
+struct LogRow {
+    time_s: f32,
+    cohesion: f32,
+    strays: f32,
+    stray_distance: f32,
+    spread: f32,
+    mean_speed: f32,
+    max_speed: f32,
+    lure_steps: f32,
+    clicks: f32,
+    click_distance: f32,
+}
+
+/// 記録を読む。列の順は `src/particle_preview.rs` の `LogWriter` が書くもの。
+fn read_log(path: &Path) -> Vec<LogRow> {
+    let text = fs::read_to_string(path).expect("記録のファイルを読めない");
+    text.lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let values: Vec<f32> = line
+                .split(',')
+                .map(|value| value.trim().parse::<f32>().expect("数でない値がある"))
+                .collect();
+            assert_eq!(values.len(), 13, "列の数が合わない: {line}");
+            LogRow {
+                time_s: values[0],
+                cohesion: values[1],
+                strays: values[2],
+                stray_distance: values[3],
+                spread: values[6],
+                mean_speed: values[7],
+                max_speed: values[8],
+                lure_steps: values[9],
+                clicks: values[11],
+                click_distance: values[12],
+            }
+        })
+        .collect()
+}
+
+/// ユーザー操作を含む記録を集計する。オンライン学習に進む前に、ユーザーの操作が報酬の中身(まとまりの崩れ・
+/// 速さ)をどれだけ動かしているかを見る(docs/experiments/controller-learning.md
+/// 「ユーザー操作を含む記録をためる」)。
+fn log_summary(paths: &[String]) {
+    /// クリックの後、影響を見る窓(秒)。
+    const AFTER_CLICK: usize = 5;
+
+    for path in paths {
+        let rows = read_log(Path::new(path));
+        if rows.len() < 2 {
+            println!("## {path}: 行が足りない\n");
+            continue;
+        }
+        println!("## {path}(1 秒ごとの記録 {} 行)\n", rows.len());
+        let share = |count: usize| count as f32 / rows.len() as f32 * 100.0;
+        let clicks: f32 = rows.iter().map(|row| row.clicks).sum();
+        let lure_seconds = rows.iter().filter(|row| row.lure_steps > 0.0).count();
+        let broken_seconds = rows.iter().filter(|row| row.cohesion < 0.9).count();
+        let click_distances: Vec<f32> = rows
+            .iter()
+            .filter(|row| row.clicks > 0.0)
+            .map(|row| row.click_distance)
+            .collect();
+
+        println!("| 項目 | 値 |");
+        println!("|---|---|");
+        println!("| 記録した長さ | {:.0} 秒 |", rows.last().unwrap().time_s);
+        println!(
+            "| クリック | {clicks:.0} 回({:.1} 回/分) |",
+            clicks * 60.0 / rows.len() as f32
+        );
+        println!(
+            "| クリックした点の、塊の重心からの距離 | 平均 {:.1} セル(塊の広がりの平均 {:.1} セル) |",
+            mean(&click_distances),
+            mean(&rows.iter().map(|row| row.spread).collect::<Vec<_>>())
+        );
+        println!(
+            "| ポインタを乗せて誘っていた秒 | {lure_seconds} 秒({:.0}%) |",
+            share(lure_seconds)
+        );
+        println!(
+            "| まとまりが 0.9 未満だった秒 | {broken_seconds} 秒({:.0}%) |",
+            share(broken_seconds)
+        );
+        println!(
+            "| はぐれた粒子 | 平均 {:.1} 個・重心から平均 {:.1} セル |",
+            mean(&rows.iter().map(|row| row.strays).collect::<Vec<_>>()),
+            mean(
+                &rows
+                    .iter()
+                    .filter(|row| row.strays > 0.0)
+                    .map(|row| row.stray_distance)
+                    .collect::<Vec<_>>()
+            )
+        );
+
+        // 秒ごとに、直前 AFTER_CLICK 秒のうちにクリックがあったか、誘っていたかで分ける
+        let recently_clicked: Vec<bool> = (0..rows.len())
+            .map(|i| {
+                rows[i.saturating_sub(AFTER_CLICK)..=i]
+                    .iter()
+                    .any(|row| row.clicks > 0.0)
+            })
+            .collect();
+        let group = |clicked: bool, lured: bool| -> Vec<usize> {
+            (0..rows.len())
+                .filter(|&i| recently_clicked[i] == clicked && (rows[i].lure_steps > 0.0) == lured)
+                .collect()
+        };
+        println!("\n### ユーザーの操作で、報酬の中身がどれだけ変わるか\n");
+        println!("| 直前 {AFTER_CLICK} 秒のクリック | 誘い | 秒数 | まとまりが 0.9 未満 | まとまりの平均 | 速さの最大の平均 | 速さの平均 |");
+        println!("|---|---|---|---|---|---|---|");
+        for (clicked, lured) in [(false, false), (false, true), (true, false), (true, true)] {
+            let indices = group(clicked, lured);
+            if indices.is_empty() {
+                continue;
+            }
+            let broken = indices.iter().filter(|&&i| rows[i].cohesion < 0.9).count();
+            println!(
+                "| {} | {} | {} | {:.0}% | {:.3} | {:.3} | {:.3} |",
+                if clicked { "あり" } else { "なし" },
+                if lured { "あり" } else { "なし" },
+                indices.len(),
+                broken as f32 / indices.len() as f32 * 100.0,
+                mean(
+                    &indices
+                        .iter()
+                        .map(|&i| rows[i].cohesion)
+                        .collect::<Vec<_>>()
+                ),
+                mean(
+                    &indices
+                        .iter()
+                        .map(|&i| rows[i].max_speed)
+                        .collect::<Vec<_>>()
+                ),
+                mean(
+                    &indices
+                        .iter()
+                        .map(|&i| rows[i].mean_speed)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+
+        // 触られず誘われていない秒を「ふだん」として、上限(99 パーセンタイル)を出す
+        let mut quiet: Vec<f32> = group(false, false)
+            .iter()
+            .map(|&i| rows[i].max_speed)
+            .collect();
+        if quiet.len() >= 10 {
+            let limit = percentile(&mut quiet, NORMAL_SPEED_PERCENTILE);
+            let over: Vec<usize> = (0..rows.len())
+                .filter(|&i| rows[i].max_speed > limit)
+                .collect();
+            let over_with_click = over.iter().filter(|&&i| recently_clicked[i]).count();
+            println!(
+                "\nふだん(クリックも誘いも無い {} 秒)の速さの最大の上限は {limit:.3}。これを超えた {} 秒のうち、\
+                 直前 {AFTER_CLICK} 秒にクリックがあったのは {over_with_click} 秒({:.0}%)\n",
+                quiet.len(),
+                over.len(),
+                if over.is_empty() {
+                    0.0
+                } else {
+                    over_with_click as f32 / over.len() as f32 * 100.0
+                }
+            );
+        } else {
+            println!("\nクリックも誘いも無い秒が少なく、ふだんの上限を出せない\n");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -2974,6 +3142,9 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("log") => {
+            log_summary(&args[1..]);
         }
         Some("excess") => {
             let seeds: Vec<u64> = args[1..]
@@ -3052,7 +3223,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>... | log <記録のファイル>..."
         ),
     }
 }

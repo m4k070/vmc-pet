@@ -25,7 +25,12 @@ pub enum Action {
         preview: Option<MoodState>,
     },
     /// 【実験】粒子の体(探索の候補番号 `seed`)を、`zoom` 倍に拡大して表示する。
-    PreviewParticles { seed: u64, zoom: u32 },
+    /// `log` があれば、1 秒ごとの体の状態とユーザーの操作をそのファイルへ書き出す。
+    PreviewParticles {
+        seed: u64,
+        zoom: u32,
+        log: Option<String>,
+    },
     /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
     ListMultichannel,
     /// 使い方を表示して終了する。
@@ -87,6 +92,7 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
     let mut multichannel: Option<String> = None;
     let mut particles: Option<u64> = None;
     let mut particle_zoom: u32 = 1;
+    let mut particle_log: Option<String> = None;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -129,6 +135,10 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             particle_zoom = parse_at_least(flag, &value, 1)?.min(8) as u32;
             continue;
         }
+        if let Some((_, value)) = split_flag(arg, &mut iter, "--particle-log")? {
+            particle_log = Some(value);
+            continue;
+        }
         if arg == "--animal" {
             let value = iter.next().ok_or(ArgsError::MissingValue("--animal"))?;
             animal_code = value.clone();
@@ -156,6 +166,7 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         return Ok(Action::PreviewParticles {
             seed,
             zoom: particle_zoom,
+            log: particle_log,
         });
     }
     if let Some(id) = multichannel {
@@ -200,9 +211,10 @@ vmc-pet [オプション]
   --multichannel <id>
                      【実験】多チャンネル Lenia の生物を、元気・テンポ・クリックだけつないで動かす
                      (--preview-mood と組み合わせると、その気分のテンポになる)
-  --preview-particles <番号> [--particle-zoom <倍率>]
+  --preview-particles <番号> [--particle-zoom <倍率>] [--particle-log <ファイル>]
                      【実験】粒子の体(探索の候補番号、例 1091)を表示する。倍率を上げると体は大きく
-                     見えるが、動き回れる箱は狭くなる(ポインタで誘い、クリックで弾く)
+                     見えるが、動き回れる箱は狭くなる(ポインタで誘い、クリックで弾く)。
+                     --particle-log を渡すと、1 秒ごとの体の状態と操作を CSV で書き出す
   -h, --help         このメッセージを表示して終了する
 ";
 
@@ -376,7 +388,8 @@ mod tests {
             parse(&args(&["--preview-particles", "1091"]), "O2u").unwrap(),
             Action::PreviewParticles {
                 seed: 1091,
-                zoom: 1
+                zoom: 1,
+                log: None
             }
         );
         assert_eq!(
@@ -387,7 +400,30 @@ mod tests {
             .unwrap(),
             Action::PreviewParticles {
                 seed: 1937,
-                zoom: 2
+                zoom: 2,
+                log: None
+            }
+        );
+    }
+
+    #[test]
+    fn particle_log_takes_a_path() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(
+                &args(&[
+                    "--preview-particles",
+                    "1091",
+                    "--particle-log",
+                    "/tmp/a.csv"
+                ]),
+                "O2u"
+            )
+            .unwrap(),
+            Action::PreviewParticles {
+                seed: 1091,
+                zoom: 1,
+                log: Some("/tmp/a.csv".to_string()),
             }
         );
     }

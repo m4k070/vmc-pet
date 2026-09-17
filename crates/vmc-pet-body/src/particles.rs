@@ -103,6 +103,25 @@ impl ParticleParams {
     }
 }
 
+/// 体から読める量。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParticleObservation {
+    /// 最大の塊にいる粒子の割合。
+    pub cohesion: f32,
+    /// 最大の塊の重心。
+    pub center: (f32, f32),
+    /// 最大の塊の広がり(重心からの距離の二乗平均の平方根)。
+    pub spread: f32,
+    /// 最大の塊に入っていない粒子の、塊の重心からの距離の平均(セル)。はぐれた粒子が無ければ 0。
+    pub stray_distance: f32,
+    /// 最大の塊に入っていない粒子の数。
+    pub strays: usize,
+}
+
+fn squared_distance(dx: f32, dy: f32) -> f32 {
+    dx * dx + dy * dy
+}
+
 fn absolute(value: f32) -> f32 {
     if value < 0.0 {
         -value
@@ -266,6 +285,48 @@ impl ParticleWorld {
                 self.vy[i] += uy * impulse;
             }
         }
+    }
+
+    /// 体から読める量。行動を決めるときと、記録を残すときに使う(`examples/particle_trial.rs` と
+    /// PC 版の `--particle-log`)。
+    pub fn observe(&self) -> ParticleObservation {
+        let members = self.largest_cluster();
+        let cohesion = members.len() as f32 / self.x.len() as f32;
+        let count = members.len() as f32;
+        let cx = members.iter().map(|&i| self.x[i]).sum::<f32>() / count;
+        let cy = members.iter().map(|&i| self.y[i]).sum::<f32>() / count;
+        let spread = sqrtf(
+            members
+                .iter()
+                .map(|&i| squared_distance(self.x[i] - cx, self.y[i] - cy))
+                .sum::<f32>()
+                / count,
+        );
+        let mut in_cluster = vec![false; self.x.len()];
+        for &i in &members {
+            in_cluster[i] = true;
+        }
+        let strays: Vec<f32> = (0..self.x.len())
+            .filter(|&i| !in_cluster[i])
+            .map(|i| sqrtf(squared_distance(self.x[i] - cx, self.y[i] - cy)))
+            .collect();
+        ParticleObservation {
+            cohesion,
+            center: (cx, cy),
+            spread,
+            stray_distance: strays.iter().sum::<f32>() / (strays.len().max(1) as f32),
+            strays: strays.len(),
+        }
+    }
+
+    /// 粒子の速さ(セル/ステップ)の平均。
+    pub fn mean_speed(&self) -> f32 {
+        self.vx
+            .iter()
+            .zip(&self.vy)
+            .map(|(vx, vy)| sqrtf(vx * vx + vy * vy))
+            .sum::<f32>()
+            / self.x.len() as f32
     }
 
     /// 最大の塊(`r_max` 以内でつながった粒子の集まり)の添字。

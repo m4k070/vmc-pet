@@ -10,7 +10,12 @@
 //! - ポインタを乗せると、その点へ粒子を誘う(強さ 0.02。1937 は強く誘うと止まったままになるため)。クリックすると、その点から
 //!   半径 4.5 ドット(クリックの半径)の粒子を外向きに弾く(試験で戻れた強さ 1.0)
 //! - 場の端は描かない。体は窓の端で跳ね返る
+//! - `--particle-log <ファイル>` を渡すと、1 秒ごとに体の状態とユーザーの操作を CSV で追記する
+//!   (`LogWriter` 参照)。ここでは学習せず、後から `particle_trial -- log <ファイル>` で集計する
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::render::DotGrid;
@@ -32,6 +37,106 @@ const POKE_IMPULSE: f32 = 1.0;
 /// 粒子1個が配る値。塊の中心が濃く、ばらけた粒子は薄く見える程度。
 const PARTICLE_WEIGHT: f32 = 0.35;
 
+/// 記録を書き出す間隔(ステップ)。1 秒ごと。
+const LOG_EVERY_STEPS: u32 = STEPS_PER_SECOND;
+
+/// 1 秒ごとの記録。ユーザーの操作を含めた状況を後から集計するためのもので、ここでは学習しない
+/// (docs/experiments/controller-learning.md「ユーザー操作を含む記録をためる」)。
+///
+/// 列は CSV で、`particle_trial -- log <ファイル>` が読む:
+///
+/// - `time_s`: 起動からの秒数
+/// - `cohesion`: 最大の塊にいる粒子の割合
+/// - `strays` / `stray_distance`: 最大の塊に入っていない粒子の数と、塊の重心からの距離の平均
+/// - `center_x` / `center_y` / `spread`: 最大の塊の重心と広がり
+/// - `mean_speed` / `max_speed`: この 1 秒の、粒子の速さの平均の平均と最大
+/// - `lure_steps` / `lure_strength`: この 1 秒のうち誘っていたステップ数と、そのときの強さ
+/// - `clicks` / `click_distance`: この 1 秒のクリックの回数と、クリックした点の塊の重心からの距離の平均
+struct LogWriter {
+    file: BufWriter<File>,
+    started: Instant,
+    steps: u32,
+    speed_total: f32,
+    speed_max: f32,
+    lure_steps: u32,
+    lure_strength: f32,
+    clicks: u32,
+    click_distance_total: f32,
+}
+
+impl LogWriter {
+    fn create(path: &Path) -> std::io::Result<Self> {
+        let mut file = BufWriter::new(File::create(path)?);
+        writeln!(
+            file,
+            "time_s,cohesion,strays,stray_distance,center_x,center_y,spread,mean_speed,max_speed,lure_steps,lure_strength,clicks,click_distance"
+        )?;
+        Ok(Self {
+            file,
+            started: Instant::now(),
+            steps: 0,
+            speed_total: 0.0,
+            speed_max: 0.0,
+            lure_steps: 0,
+            lure_strength: 0.0,
+            clicks: 0,
+            click_distance_total: 0.0,
+        })
+    }
+
+    /// 1ステップ進んだ後に呼ぶ。1 秒ぶんたまったら1行書く。
+    fn after_step(&mut self, world: &ParticleWorld) {
+        let speed = world.mean_speed();
+        self.speed_total += speed;
+        self.speed_max = self.speed_max.max(speed);
+        if let Some((_, _, strength)) = world.lure {
+            self.lure_steps += 1;
+            self.lure_strength = strength;
+        }
+        self.steps += 1;
+        if self.steps < LOG_EVERY_STEPS {
+            return;
+        }
+        let observed = world.observe();
+        let row = format!(
+            "{:.1},{:.4},{},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{},{:.4},{},{:.2}",
+            self.started.elapsed().as_secs_f32(),
+            observed.cohesion,
+            observed.strays,
+            observed.stray_distance,
+            observed.center.0,
+            observed.center.1,
+            observed.spread,
+            self.speed_total / self.steps as f32,
+            self.speed_max,
+            self.lure_steps,
+            self.lure_strength,
+            self.clicks,
+            if self.clicks == 0 {
+                0.0
+            } else {
+                self.click_distance_total / self.clicks as f32
+            }
+        );
+        if let Err(error) = writeln!(self.file, "{row}").and_then(|()| self.file.flush()) {
+            eprintln!("vmc-pet: could not write the particle log: {error}");
+        }
+        self.steps = 0;
+        self.speed_total = 0.0;
+        self.speed_max = 0.0;
+        self.lure_steps = 0;
+        self.lure_strength = 0.0;
+        self.clicks = 0;
+        self.click_distance_total = 0.0;
+    }
+
+    /// クリックを1回数える。`distance` はクリックした点の、最大の塊の重心からの距離(セル)。
+    fn record_click(&mut self, distance: f32) {
+        self.clicks += 1;
+        self.click_distance_total += distance;
+    }
+}
+
 /// 粒子の体を動かすサーフェス。
 pub struct ParticlePreview {
     world: ParticleWorld,
@@ -41,10 +146,11 @@ pub struct ParticlePreview {
     step_interval: Duration,
     last_step: Instant,
     surface_size: (u32, u32),
+    log: Option<LogWriter>,
 }
 
 impl ParticlePreview {
-    pub fn new(seed: u64, zoom: u32) -> Self {
+    pub fn new(seed: u64, zoom: u32, log_path: Option<&Path>) -> Self {
         let zoom = zoom.max(1) as f32;
         let params = ParticleParams::from_seed(seed);
         eprintln!(
@@ -56,6 +162,16 @@ impl ParticlePreview {
             params.friction,
             DEFAULT_FIELD_SIZE / zoom
         );
+        let log = log_path.and_then(|path| match LogWriter::create(path) {
+            Ok(writer) => {
+                eprintln!("vmc-pet: writing one row per second to {}", path.display());
+                Some(writer)
+            }
+            Err(error) => {
+                eprintln!("vmc-pet: could not create {}: {error}", path.display());
+                None
+            }
+        });
         let types = params.types;
         Self {
             world: ParticleWorld::new(params, DEFAULT_FIELD_SIZE / zoom, 1),
@@ -65,6 +181,7 @@ impl ParticlePreview {
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
             surface_size: (0, 0),
+            log,
         }
     }
 
@@ -73,6 +190,9 @@ impl ParticlePreview {
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
             self.world.step();
+            if let Some(log) = self.log.as_mut() {
+                log.after_step(&self.world);
+            }
             self.last_step += self.step_interval;
             steps += 1;
         }
@@ -149,6 +269,11 @@ impl Surface for ParticlePreview {
             }
             PointerInput::Pressed { x, y } => {
                 if let Some((px, py)) = self.to_world(x, y) {
+                    if let Some(log) = self.log.as_mut() {
+                        let center = self.world.observe().center;
+                        let (dx, dy) = (px - center.0, py - center.1);
+                        log.record_click((dx * dx + dy * dy).sqrt());
+                    }
                     self.world
                         .poke(px, py, POKE_RADIUS_DOTS / self.zoom, POKE_IMPULSE);
                 }
