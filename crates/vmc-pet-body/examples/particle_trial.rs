@@ -24,6 +24,8 @@
 //!   誘いの強さを上げていったとき、導ける度合いと、誘っているあいだ・やめた後の姿を測る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- regroup <候補の番号>...`:
 //!   崩れた体を、手で書いた簡単な行動(塊の重心へ誘う・進む力を弱めて待つ)でまとめ直せるかを測る
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- landscape <候補の番号>...`:
+//!   誘いの代償を入れた報酬の地形を、行動のパラメータの格子で測る
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -960,6 +962,293 @@ fn standard_deviation(values: &[f32]) -> f32 {
     (values.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / values.len().max(1) as f32).sqrt()
 }
 
+/// 誘いの代償を入れた報酬の地形。行動のパラメータ(強さ・届く距離・誘いはじめるまとまりのしきい値)を格子で振り、
+/// 報酬の中身を測って、代償の重みを変えたときに報酬が最大になる組が範囲の内側に来るかを見る。
+///
+/// 場面は、崩していない体・3割を散らした体・7割を散らした体の3つ。どの行動も同じ出発点と散らし方の乱数で走らせる。
+/// 行動は 1 秒ごとにまとまりを測り、しきい値を下回っていれば最大の塊の重心へ誘い、そうでなければ誘わない。
+///
+/// 代償は「吸い寄せの激しさ」: 粒子の速さの平均が窓の中でどこまで上がったか(ピーク)を、何もしない場合と対にした
+/// 増分で測る。加えて、崩れていないのに誘っていた時間も代償にする。しきい値つきで強く引くと、1秒ほどで戻って誘いが止まるので、誘いの量やまとまっているときの形の差では
+/// 代償が小さく出てしまう。見ている人にとっての代償は、散らばった粒子が一気に吸い寄せられる不自然な速さだと考えた。
+fn landscape(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    const WINDOW: u32 = 1800;
+    const STRENGTHS: [f32; 7] = [0.0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2];
+    const RADII: [f32; 3] = [10.0, 20.0, 45.0];
+    /// 1.01 は「いつも誘う」。
+    const THRESHOLDS: [f32; 5] = [0.6, 0.8, 0.9, 0.95, 1.01];
+    const SCATTERS: [f32; 3] = [0.0, 0.3, 0.7];
+    /// 吸い寄せの激しさの重み。
+    /// 報酬 = −(3割・7割の戻るまでの秒の平均 / 120) − 重み × (粒子の速さのピークの増分 / 崩していない体の粒子の速さ)。
+    const SNAP_WEIGHTS: [f32; 8] = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 2.0];
+    /// 崩れていないのに誘う代償の重み(崩していない体で誘っていた時間の割合に掛ける)。いつも引き続けると、
+    /// ユーザーが散らしても崩れて見えなくなる(放置で弱った様子を打ち消すのと同じ衝突)ため。
+    const IDLE_WEIGHTS: [f32; 2] = [0.0, 1.0];
+
+    /// 1回の走らせの結果。
+    #[derive(Clone, Copy, Default)]
+    struct Run {
+        /// まとまり 0.9 に戻るまでの秒(崩していない体では 0。戻らなければ窓の長さ)。
+        seconds: f32,
+        /// 窓の終わりに割れていた。
+        broken: bool,
+        /// まとまり 0.9 以上のときの形の差(元の姿と)の平均。
+        distortion: f32,
+        /// 1ステップあたりの誘いの強さの平均。
+        effort: f32,
+        /// 誘っていた時間の割合。
+        active: f32,
+        /// 粒子の速さの平均の、窓の中でのピーク。
+        peak_speed: f32,
+        /// 粒子の速さの平均の、窓全体での平均。
+        mean_speed: f32,
+    }
+
+    struct Summary {
+        config: (f32, f32, f32),
+        /// 3割・7割を散らしたときの戻るまでの秒。
+        seconds: [f32; 2],
+        broken: usize,
+        /// まとまっているときの形の差の増分(何もしないと対にした平均、3場面)。
+        distortion: f32,
+        effort: f32,
+        active_intact: f32,
+        /// 散らした2場面での、粒子の速さのピークの増分(何もしないと対にし、下がった分は 0 とした平均)。
+        snap: f32,
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        let baselines: Vec<Signature> = parallel_map((0..TRIALS).collect(), |trial| {
+            let mut world = started_world(seed, trial);
+            signature(&mut world, SIGNATURE_STEPS, |_, _| {})
+        });
+        let mut configs = vec![(0.0, RADII[0], THRESHOLDS[0])];
+        for &strength in &STRENGTHS[1..] {
+            for &radius in &RADII {
+                for &threshold in &THRESHOLDS {
+                    configs.push((strength, radius, threshold));
+                }
+            }
+        }
+        let jobs: Vec<(usize, usize, u64)> = (0..configs.len())
+            .flat_map(|c| {
+                (0..SCATTERS.len()).flat_map(move |s| (0..TRIALS).map(move |t| (c, s, t)))
+            })
+            .collect();
+        let runs = parallel_map(jobs, |(c, s, trial)| {
+            let (strength, radius, threshold) = configs[c];
+            let base = &baselines[trial as usize];
+            let mut world = started_world(seed, trial);
+            let mut rng = ParticleRng::new(seed * 7919 + trial);
+            for i in 0..world.x.len() {
+                if rng.unit() < SCATTERS[s] {
+                    world.x[i] = rng.range(0.0, FIELD - 1e-3);
+                    world.y[i] = rng.range(0.0, FIELD - 1e-3);
+                }
+            }
+            world.lure_radius = radius;
+            let mut run = Run {
+                seconds: WINDOW as f32 / 15.0,
+                ..Default::default()
+            };
+            let (mut distortion_total, mut intact_samples) = (0.0, 0);
+            let (mut active_steps, mut effort_total) = (0, 0.0);
+            let mut recovered = false;
+            let mut cohesion = 0.0;
+            for step in 1..=WINDOW {
+                if step % SAMPLE_EVERY == 1 {
+                    let members = world.largest_cluster();
+                    let current = members.len() as f32 / world.x.len() as f32;
+                    world.lure = if strength > 0.0 && current < threshold {
+                        let ((cx, cy), _) = centroid_and_radius(&world, &members);
+                        Some((cx, cy, strength))
+                    } else {
+                        None
+                    };
+                }
+                if let Some((_, _, applied)) = world.lure {
+                    active_steps += 1;
+                    effort_total += applied;
+                }
+                world.step();
+                let particle_speed = world
+                    .vx
+                    .iter()
+                    .zip(&world.vy)
+                    .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+                    .sum::<f32>()
+                    / world.x.len() as f32;
+                run.peak_speed = run.peak_speed.max(particle_speed);
+                run.mean_speed += particle_speed / WINDOW as f32;
+                if step % SAMPLE_EVERY != 0 {
+                    continue;
+                }
+                let members = world.largest_cluster();
+                cohesion = members.len() as f32 / world.x.len() as f32;
+                if cohesion < COHESION {
+                    continue;
+                }
+                if !recovered {
+                    run.seconds = if SCATTERS[s] == 0.0 {
+                        0.0
+                    } else {
+                        step as f32 / 15.0
+                    };
+                    recovered = true;
+                }
+                let ((cx, cy), spread) = centroid_and_radius(&world, &members);
+                let types = world.params.types;
+                let mut now = Signature {
+                    radius: spread,
+                    type_radii: vec![0.0; types],
+                    ..Default::default()
+                };
+                for kind in 0..types {
+                    let of_kind: Vec<f32> = members
+                        .iter()
+                        .filter(|&&i| world.kind[i] == kind)
+                        .map(|&i| ((world.x[i] - cx).powi(2) + (world.y[i] - cy).powi(2)).sqrt())
+                        .collect();
+                    now.type_radii[kind] =
+                        of_kind.iter().sum::<f32>() / of_kind.len().max(1) as f32;
+                }
+                distortion_total += shape_difference(&now, base);
+                intact_samples += 1;
+            }
+            run.broken = cohesion < COHESION;
+            run.distortion = distortion_total / intact_samples.max(1) as f32;
+            run.effort = effort_total / WINDOW as f32;
+            run.active = active_steps as f32 / WINDOW as f32;
+            (c, s, trial, run)
+        });
+
+        let find = |c: usize, s: usize| -> Vec<Run> {
+            let mut rows: Vec<_> = runs.iter().filter(|r| r.0 == c && r.1 == s).collect();
+            rows.sort_by_key(|r| r.2);
+            rows.into_iter().map(|r| r.3).collect()
+        };
+        // 行動なし(強さ 0)を、同じ場面・同じ試行の基準にする
+        let nothing: Vec<Vec<Run>> = (0..SCATTERS.len()).map(|s| find(0, s)).collect();
+        let intact_particle_speed =
+            mean(&nothing[0].iter().map(|r| r.mean_speed).collect::<Vec<_>>());
+        let paired = |rows: &[Run], base: &[Run], pick: fn(&Run) -> f32| {
+            mean(
+                &rows
+                    .iter()
+                    .zip(base)
+                    .map(|(r, n)| pick(r) - pick(n))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // 吸い寄せの激しさは、何もしないより速さのピークが上がった分だけを数える。下がった分を得にすると、
+        // 近くの塊だけを強く締めて粒子の動きを鈍らせる行動(まとまり直すのはかえって遅い)が選ばれてしまった
+        let snap_increase = |rows: &[Run], base: &[Run]| {
+            mean(
+                &rows
+                    .iter()
+                    .zip(base)
+                    .map(|(r, n)| (r.peak_speed - n.peak_speed).max(0.0))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let summaries: Vec<Summary> = (0..configs.len())
+            .map(|c| {
+                let scenes: Vec<Vec<Run>> = (0..SCATTERS.len()).map(|s| find(c, s)).collect();
+                let seconds_of =
+                    |s: usize| mean(&scenes[s].iter().map(|r| r.seconds).collect::<Vec<_>>());
+                Summary {
+                    config: configs[c],
+                    seconds: [seconds_of(1), seconds_of(2)],
+                    broken: scenes.iter().flatten().filter(|r| r.broken).count(),
+                    distortion: (0..SCATTERS.len())
+                        .map(|s| paired(&scenes[s], &nothing[s], |r| r.distortion))
+                        .sum::<f32>()
+                        / SCATTERS.len() as f32,
+                    effort: mean(
+                        &scenes
+                            .iter()
+                            .flatten()
+                            .map(|r| r.effort)
+                            .collect::<Vec<_>>(),
+                    ),
+                    active_intact: mean(&scenes[0].iter().map(|r| r.active).collect::<Vec<_>>()),
+                    snap: (snap_increase(&scenes[1], &nothing[1])
+                        + snap_increase(&scenes[2], &nothing[2]))
+                        / 2.0,
+                }
+            })
+            .collect();
+
+        println!("崩していない体の粒子の速さの平均: {intact_particle_speed:.4} セル/ステップ\n");
+        println!("| 強さ | 距離 | しきい値 | 戻るまで(秒): 3割 / 7割 | 割れたまま(3場面×{TRIALS}) | 吸い寄せの激しさ(速さのピークの増分/崩していない体の速さ) | まとまっているときの形の差の増分 | 誘いの量 | 崩していない体で誘っていた割合 |");
+        println!("|---|---|---|---|---|---|---|---|---|");
+        let threshold_label = |threshold: f32| {
+            if threshold > 1.0 {
+                "いつも".to_string()
+            } else {
+                format!("{threshold}")
+            }
+        };
+        for summary in &summaries {
+            let (strength, radius, threshold) = summary.config;
+            println!(
+                "| {strength} | {radius} | {} | {:.1} / {:.1} | {} | {:.2} | {:+.3} | {:.4} | {:.2} |",
+                threshold_label(threshold),
+                summary.seconds[0],
+                summary.seconds[1],
+                summary.broken,
+                summary.snap / intact_particle_speed,
+                summary.distortion,
+                summary.effort,
+                summary.active_intact,
+            );
+        }
+
+        for idle_weight in IDLE_WEIGHTS {
+            println!(
+                "\n### 崩れていないのに誘う代償の重み {idle_weight} で、吸い寄せの激しさの重みを変えたときの最良の組\n"
+            );
+            println!("報酬 = −(3割・7割の戻るまでの秒の平均 / 120) − 重み × 吸い寄せの激しさ − {idle_weight} × 崩していない体で誘っていた割合\n");
+            println!("| 吸い寄せの重み | 最良の強さ | 距離 | しきい値 | 戻るまで(秒) | 吸い寄せの激しさ | 崩していない体で誘っていた割合 | 報酬 | 強さは格子の端か |");
+            println!("|---|---|---|---|---|---|---|---|---|");
+            for weight in SNAP_WEIGHTS {
+                let reward = |s: &Summary| {
+                    -((s.seconds[0] + s.seconds[1]) / 2.0) / 120.0
+                        - weight * s.snap / intact_particle_speed
+                        - idle_weight * s.active_intact
+                };
+                let best = summaries
+                    .iter()
+                    .max_by(|a, b| reward(a).total_cmp(&reward(b)))
+                    .unwrap();
+                let (strength, radius, threshold) = best.config;
+                let edge = if strength == STRENGTHS[STRENGTHS.len() - 1] {
+                    "上端"
+                } else if strength == 0.0 {
+                    "何もしない"
+                } else if strength == STRENGTHS[1] {
+                    "下端"
+                } else {
+                    "内側"
+                };
+                println!(
+                    "| {weight} | {strength} | {radius} | {} | {:.1} | {:.2} | {:.2} | {:.3} | {edge} |",
+                    threshold_label(threshold),
+                    (best.seconds[0] + best.seconds[1]) / 2.0,
+                    best.snap / intact_particle_speed,
+                    best.active_intact,
+                    reward(best),
+                );
+            }
+        }
+        println!();
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -967,6 +1256,13 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("landscape") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            landscape(&seeds);
         }
         Some("regroup") => {
             let seeds: Vec<u64> = args[1..]
@@ -990,7 +1286,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>..."
         ),
     }
 }
