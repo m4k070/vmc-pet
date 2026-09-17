@@ -22,6 +22,8 @@
 //!   候補を、突く・散らす/弱らせて戻す/誘いで導く/1ステップの重さ、の試験にかける(約20秒)
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- lure <候補の番号>...`:
 //!   誘いの強さを上げていったとき、導ける度合いと、誘っているあいだ・やめた後の姿を測る
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- regroup <候補の番号>...`:
+//!   崩れた体を、手で書いた簡単な行動(塊の重心へ誘う・進む力を弱めて待つ)でまとめ直せるかを測る
 //!
 //! ペット本体の振る舞いには触れない。
 
@@ -793,6 +795,171 @@ fn distance_to(world: &mut ParticleWorld, target: (f32, f32), steps: u32) -> (Ne
     )
 }
 
+/// 崩れた体を、手で書いた簡単な行動でまとめ直せるか(学習ループの前に、行動で報酬が変わるかを測る)。
+///
+/// 崩し方ごとに `REGROUP_TRIALS` 回、出発点と崩し方の乱数をそろえて、行動なしと各行動を対にして比べる。
+/// 行動は `REGROUP_WINDOW` ステップのあいだだけ効かせ、そのあと止めて姿を測る(行動をやめても保たれるか)。
+fn regroup(seeds: &[u64]) {
+    const REGROUP_TRIALS: u64 = 16;
+    const REGROUP_WINDOW: u32 = 1800;
+
+    #[derive(Clone, Copy)]
+    enum Breakage {
+        Scatter(f32),
+        PokeSpree,
+    }
+    #[derive(Clone, Copy)]
+    enum Action {
+        Nothing,
+        /// 最大の塊の重心へ誘う(強さ, 届く距離)。重心は 1 秒ごとに測り直す。
+        LureToCluster(f32, f32),
+        /// 自分で進む力を `vigour` 倍にして `steps` ステップ待ち、元に戻す。
+        Calm(f32, u32),
+    }
+    impl Action {
+        fn label(self) -> String {
+            match self {
+                Self::Nothing => "何もしない".to_string(),
+                Self::LureToCluster(strength, radius) => {
+                    format!("塊の重心へ誘う(強さ {strength}、距離 {radius})")
+                }
+                Self::Calm(vigour, steps) => {
+                    format!("進む力を ×{vigour} にして {steps} ステップ待つ")
+                }
+            }
+        }
+    }
+    let breakages = [
+        ("粒子の3割を散らす", Breakage::Scatter(0.3)),
+        ("粒子の7割を散らす", Breakage::Scatter(0.7)),
+        ("2秒ごとに30回弾く(1.0)", Breakage::PokeSpree),
+    ];
+    let actions = [
+        Action::Nothing,
+        Action::LureToCluster(0.005, 10.0),
+        Action::LureToCluster(0.02, 10.0),
+        Action::LureToCluster(0.005, 45.0),
+        Action::LureToCluster(0.02, 45.0),
+        Action::LureToCluster(0.05, 45.0),
+        Action::Calm(0.3, 300),
+        Action::Calm(0.3, 900),
+    ];
+
+    let started = Instant::now();
+    for &seed in seeds {
+        let params = ParticleParams::from_seed(seed);
+        println!(
+            "## 候補 {seed}(種類 {}×{})\n",
+            params.types, params.per_type
+        );
+        let baselines: Vec<Signature> = parallel_map((0..REGROUP_TRIALS).collect(), |trial| {
+            let mut world = started_world(seed, trial);
+            signature(&mut world, SIGNATURE_STEPS, |_, _| {})
+        });
+        let base_speed = mean(&baselines.iter().map(|b| b.speed).collect::<Vec<_>>());
+        for (label, breakage) in breakages {
+            println!(
+                "### {label}(対にした試行 {REGROUP_TRIALS} 回、行動は {REGROUP_WINDOW} ステップ)\n"
+            );
+            println!("| 行動 | まとまり 0.9 に戻るまで(秒。戻らなければ窓の長さ) | 何もしないより早かった/遅かった | 窓の終わりに割れたまま | 行動をやめた後に割れていた | やめた後の形の差 | やめた後の速さ/元 |");
+            println!("|---|---|---|---|---|---|---|");
+            let jobs: Vec<(usize, u64)> = (0..actions.len())
+                .flat_map(|a| (0..REGROUP_TRIALS).map(move |t| (a, t)))
+                .collect();
+            // (行動, 試行, 戻るまでのステップ, 窓の終わりに割れていた, やめた後の姿)
+            let results = parallel_map(jobs, |(a, trial)| {
+                let mut world = started_world(seed, trial);
+                let mut rng = ParticleRng::new(seed * 7919 + trial);
+                match breakage {
+                    Breakage::Scatter(share) => {
+                        for i in 0..world.x.len() {
+                            if rng.unit() < share {
+                                world.x[i] = rng.range(0.0, FIELD - 1e-3);
+                                world.y[i] = rng.range(0.0, FIELD - 1e-3);
+                            }
+                        }
+                    }
+                    Breakage::PokeSpree => {
+                        for _ in 0..30 {
+                            let (cx, cy) = cluster_center(&world);
+                            let angle = rng.range(0.0, std::f32::consts::TAU);
+                            world.poke(cx + 2.0 * angle.cos(), cy + 2.0 * angle.sin(), 4.5, 1.0);
+                            for _ in 0..30 {
+                                world.step();
+                            }
+                        }
+                    }
+                }
+                let mut recovered_at = REGROUP_WINDOW;
+                let mut broken_at_end = false;
+                for step in 1..=REGROUP_WINDOW {
+                    match actions[a] {
+                        Action::Nothing => {}
+                        Action::LureToCluster(strength, radius) => {
+                            if step % SAMPLE_EVERY == 1 {
+                                let (cx, cy) = cluster_center(&world);
+                                world.lure = Some((cx, cy, strength));
+                                world.lure_radius = radius;
+                            }
+                        }
+                        Action::Calm(vigour, steps) => {
+                            world.set_vigour(if step <= steps { vigour } else { 1.0 });
+                        }
+                    }
+                    world.step();
+                    if step % SAMPLE_EVERY == 0 {
+                        let cohesion = world.largest_cluster().len() as f32 / world.x.len() as f32;
+                        if cohesion >= COHESION && recovered_at == REGROUP_WINDOW {
+                            recovered_at = step;
+                        }
+                        if step == REGROUP_WINDOW {
+                            broken_at_end = cohesion < COHESION;
+                        }
+                    }
+                }
+                world.lure = None;
+                world.set_vigour(1.0);
+                let after = signature(&mut world, SIGNATURE_STEPS, |_, _| {});
+                (a, trial, recovered_at, broken_at_end, after)
+            });
+            let of = |a: usize| {
+                let mut rows: Vec<_> = results.iter().filter(|r| r.0 == a).collect();
+                rows.sort_by_key(|r| r.1);
+                rows
+            };
+            let nothing = of(0);
+            for (a, action) in actions.iter().enumerate() {
+                let rows = of(a);
+                let seconds: Vec<f32> = rows.iter().map(|r| r.2 as f32 / 15.0).collect();
+                let faster = rows.iter().zip(&nothing).filter(|(r, n)| r.2 < n.2).count();
+                let slower = rows.iter().zip(&nothing).filter(|(r, n)| r.2 > n.2).count();
+                let broken_end = rows.iter().filter(|r| r.3).count();
+                let broken_after = rows.iter().filter(|r| r.4.min_cohesion < COHESION).count();
+                let shape: Vec<f32> = rows
+                    .iter()
+                    .map(|r| shape_difference(&r.4, &baselines[r.1 as usize]))
+                    .collect();
+                let speed = mean(&rows.iter().map(|r| r.4.speed).collect::<Vec<_>>());
+                println!(
+                    "| {} | {:.1} ± {:.1} | {faster}/{slower} | {broken_end}/{REGROUP_TRIALS} | {broken_after}/{REGROUP_TRIALS} | {:.2} | {:.2} |",
+                    action.label(),
+                    mean(&seconds),
+                    standard_deviation(&seconds),
+                    mean(&shape),
+                    speed / base_speed.max(1e-6),
+                );
+            }
+            println!();
+        }
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
+fn standard_deviation(values: &[f32]) -> f32 {
+    let m = mean(values);
+    (values.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / values.len().max(1) as f32).sqrt()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -800,6 +967,13 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("regroup") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            regroup(&seeds);
         }
         Some("lure") => {
             let seeds: Vec<u64> = args[1..]
@@ -816,7 +990,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>..."
         ),
     }
 }

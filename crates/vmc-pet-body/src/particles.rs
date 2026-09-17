@@ -29,7 +29,7 @@ const WALL_MARGIN: f32 = 1.5;
 const WALL_FORCE: f32 = 0.3;
 /// 1ステップで動ける上限(セル)。数値が発散しないための安全弁。
 const MAX_SPEED: f32 = 1.0;
-/// 誘いが届く距離(セル)。
+/// 誘いが届く距離(セル)の既定値。
 pub const LURE_RADIUS: f32 = 10.0;
 /// 置きはじめの円盤の半径(セル)。
 const INITIAL_RADIUS: f32 = 4.0;
@@ -137,8 +137,10 @@ pub struct ParticleWorld {
     base_matrix: Vec<f32>,
     /// 力の強さに掛ける倍率(弱らせるときに使う。1.0 がそのまま)。
     pub force_scale: f32,
-    /// 誘い: (x, y, 強さ)。`LURE_RADIUS` 以内の粒子をその点へ引く。
+    /// 誘い: (x, y, 強さ)。`lure_radius` 以内の粒子をその点へ引く。
     pub lure: Option<(f32, f32, f32)>,
+    /// 誘いが届く距離(セル)。既定は `LURE_RADIUS`。
+    pub lure_radius: f32,
 }
 
 impl ParticleWorld {
@@ -158,6 +160,7 @@ impl ParticleWorld {
             base_matrix: params.matrix.clone(),
             force_scale: 1.0,
             lure: None,
+            lure_radius: LURE_RADIUS,
             params,
             size,
             x,
@@ -202,7 +205,7 @@ impl ParticleWorld {
             if let Some((lx, ly, strength)) = self.lure {
                 let (dx, dy) = (lx - self.x[i], ly - self.y[i]);
                 let distance = sqrtf(dx * dx + dy * dy);
-                if distance < LURE_RADIUS && distance > 1e-3 {
+                if distance < self.lure_radius && distance > 1e-3 {
                     ax += strength * dx / distance;
                     ay += strength * dy / distance;
                 }
