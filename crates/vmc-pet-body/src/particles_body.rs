@@ -25,8 +25,9 @@
 //! - **クリック → 突き**: `Pet::click` の摂動(セル座標・強さ)を、箱の座標への
 //!   `poke` に翻訳する。強さは preview の実験と同じく、クリック(body側)の既定
 //!   amount 0.20 が poke の速さ 1.0 になる倍率。慣れで弱まったぶんも同じ係数で弱まる
-//! - **気分 → テンポ**: 粒子の体にはテンポ(体の時間の進み方)の実測が無い。
-//!   初回は繋がない(`set_tempo` で丸めだけする)。気分は色素とエネルギーだけで見せる
+//! - **気分 → テンポ**: 1 ステップで位置へ反映する割合として効く
+//!   (`ParticleWorld::step_at_tempo`)。安全な範囲は Lenia と同じ ×0.5〜×1.6
+//!   (`Vitality`)で、実測は issue #6 のコメント(`examples/tempo_trial.rs`)
 
 use alloc::vec;
 
@@ -82,17 +83,20 @@ impl ParticleBody {
     ///
     /// エネルギーは力全体の倍率に効く。`LeniaBody::step` と同じ順序で、倍率はこの
     /// ステップの前のエネルギーで決め、エネルギーはステップの後に減らす。
+    /// テンポ(気分 → 体の時間の進み方)は 1 ステップで位置へ反映する割合として
+    /// 効く(`ParticleWorld::step_at_tempo`)。安全な範囲(×0.5〜×1.6。Lenia と同じ
+    /// `Vitality` の値)は実測で確かめてある(issue #6: 塊は全域で保ち、
+    /// ×0.5〜×1.6 で連打崩し+誘いも通る。×0.25 以下では塊は保つが動きが停止する)
     pub fn step(&mut self) -> bool {
         self.set_vigour(self.vitality.growth_scale());
         self.controller_act();
-        self.world.step();
+        self.world.step_at_tempo(self.vitality.tempo());
         self.vitality.decay_step();
         self.rasterize();
         false
     }
 
-    /// 体の時間の進み方を変える。粒子の体にはテンポの実測が無いため、値は覚えるだけで
-    /// 挙動は変わらない(気分 → テンポは次の実験まで繋がない)。範囲への丸めは
+    /// 体の時間の進み方を変える(1.0 がいつもどおり)。範囲への丸めは
     /// `Vitality::set_tempo` が行う(Lenia の体と同じ)。
     pub fn set_tempo(&mut self, tempo: f32) {
         self.vitality.set_tempo(tempo);
@@ -287,6 +291,33 @@ mod tests {
 
         // Act / Assert: ひとりで歩いているうちは誘わない
         assert!(body.self_action_echo().is_none());
+    }
+
+    #[test]
+    fn a_disappointed_tempo_slows_the_body_without_losing_it() {
+        // Arrange: 気分がっかり最大のテンポ(Lenia と同じ Vitality の式)。
+        // 実測で ×0.6 は塊を保つことが確かめてある(issue #6)。ここでは
+        // 「テンポが効いている」こと(×1.0 より動きが遅い)を、テンポごとの
+        // 重心移動で確認する。場の大きさ制約を避けるため短い窓で比べる
+        let walk = |tempo: f32| {
+            let mut body = ParticleBody::new(1091);
+            body.set_tempo(tempo);
+            let start = body.field.view().toroidal_centroid().unwrap_or((16.0, 16.0));
+            for _ in 0..3000 {
+                body.step();
+            }
+            let end = body.field.view().toroidal_centroid().unwrap_or((16.0, 16.0));
+            ((end.0 - start.0).powi(2) + (end.1 - start.1).powi(2)).sqrt()
+        };
+
+        // Act / Assert: 慢いテンポの体は、いつものテンポの体より移動しない。
+        // 塊の軌跡は方向が変わるので、動いた総量で比べる
+        let slow = walk(0.6);
+        let usual = walk(1.0);
+        assert!(
+            slow < usual,
+            "a disappointed tempo must slow the body; slow={slow} usual={usual}"
+        );
     }
 
     /// 連打を再現して、はぐれた粒子がコントローラで戻ることを確かめる。
