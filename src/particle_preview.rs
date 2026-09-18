@@ -12,9 +12,9 @@
 //!   時間引っぱられていた(docs/experiments/controller-learning.md「ユーザー操作を含む記録をためる」)。
 //!   撫でること(ユーザー)と誘うこと(コントローラの行動)を分けた
 //! - クリックすると、その点から半径 4.5 ドット(クリックの半径)の粒子を外向きに弾く(試験で戻れた強さ 1.0)
-//! - 誘いはコントローラが行う。まとまりが 0.9 を下回ったら、最大の塊の重心へ誘う(学習で得た強さ 0.1・
-//!   届く距離 45 セル。docs/experiments/controller-learning.md「代償の測り方を直す」)。`--particle-controller off`
-//!   で止められる
+//! - 誘いはコントローラが行う。はぐれた粒子が1個でもあれば、最大の塊の重心へ誘う(実際の連打で学ばせ直した
+//!   強さ 0.13・届く距離 39 セル。docs/experiments/controller-learning.md「実際の連打で学ばせ直す」)。
+//!   `--particle-controller off` で止められる
 //! - 場の端は描かない。体は窓の端で跳ね返る
 //! - `--particle-log <ファイル>` を渡すと、1 秒ごとに体の状態・ユーザーの操作・コントローラの誘いを CSV で
 //!   追記する(`LogWriter` 参照)。ここでは学習せず、後から `particle_trial -- log <ファイル>` で集計する
@@ -35,11 +35,13 @@ const GRID_SIZE: usize = 32;
 const STEPS_PER_SECOND: u32 = 15;
 const MAX_CATCH_UP_STEPS: u32 = 4;
 
-/// コントローラが誘うときの強さ・届く距離・誘いはじめるまとまり。和の形の報酬(超過の重み 10)での格子の
-/// 最良で、学習もこの近くへ収束した(docs/experiments/controller-learning.md「代償の測り方を直す」)。
-const CONTROLLER_STRENGTH: f32 = 0.1;
-const CONTROLLER_RADIUS: f32 = 45.0;
-const CONTROLLER_THRESHOLD: f32 = 0.9;
+/// コントローラが誘うときの強さ・届く距離と、誘いはじめる「はぐれた粒子の数」。実機の記録から、連打で
+/// はぐれるのは1割ほど(60 個のうち 6〜9 個)で、以前のしきい値(まとまり 0.9 未満)ではほとんど拾えなかった。
+/// 連打を崩し方にして学ばせ直した値で、書き下す精度でも確かめてある
+/// (docs/experiments/controller-learning.md「実際の連打で学ばせ直す」)。
+const CONTROLLER_STRENGTH: f32 = 0.13;
+const CONTROLLER_RADIUS: f32 = 39.0;
+const CONTROLLER_STRAYS: usize = 1;
 /// ホバーの光の強さ(見た目だけ。体には触れない)。
 const HOVER_GLOW: f32 = 0.3;
 /// クリックで弾く半径(ドット)と速さ。半径はクリックの摂動と同じ、速さは試験で戻れた強さ。
@@ -216,11 +218,11 @@ impl ParticlePreview {
         let mut steps = 0;
         while now.duration_since(self.last_step) >= self.step_interval && steps < MAX_CATCH_UP_STEPS
         {
-            // まとまりが崩れたら、最大の塊の重心へ誘う(1 秒ごとに測り直す)
+            // はぐれた粒子がいたら、最大の塊の重心へ誘う(1 秒ごとに測り直す)
             if self.controller {
                 let observed = self.world.observe();
                 self.world.lure_radius = CONTROLLER_RADIUS;
-                self.world.lure = (observed.cohesion < CONTROLLER_THRESHOLD).then_some((
+                self.world.lure = (observed.strays >= CONTROLLER_STRAYS).then_some((
                     observed.center.0,
                     observed.center.1,
                     CONTROLLER_STRENGTH,

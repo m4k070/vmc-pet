@@ -73,8 +73,8 @@ cargo run --release -- --multichannel 231-04 --preview-mood disappointed  # が�
 
 【実験】閉じた場を動き回る粒子の体([docs/experiments/body-candidates.md](docs/experiments/body-candidates.md))を、
 探索の候補番号で表示することもできる。ポインタを乗せると撫でている扱いで、その場所がほんのり光るだけ
-(体には触れない)。クリックするとその点から粒子を弾く。誘いはコントローラが行い、まとまりが崩れたときだけ
-最大の塊の重心へ引き寄せる(学習で得た値。`--particle-controller off` で止められる)。
+(体には触れない)。クリックするとその点から粒子を弾く。誘いはコントローラが行い、はぐれた粒子が1個でもあれば
+最大の塊の重心へ引き寄せる(実際の連打で学ばせ直した値。`--particle-controller off` で止められる)。
 
 ```sh
 cargo run --release -- --preview-particles 1091                     # 32x32 の箱で表示する

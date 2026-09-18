@@ -36,6 +36,8 @@
 //!   まとまりの低さに応じて誘いを強める行動を学ばせ、しきい値で切り替える一定の強さと比べる
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- excess <候補の番号>...`:
 //!   代償を「誘っているあいだの速さの超過の和」に直し、古い測り方と比べ、和の形の報酬の重みを探す
+//! - `cargo run --release -p vmc-pet-body --example particle_trial -- realistic <候補の番号>...`:
+//!   実際の連打を崩し方にして、はぐれた粒子の数を入力にした行動を学ばせ直す
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- log <記録のファイル>...`:
 //!   PC 版の `--particle-log` が書いた記録を集計し、ユーザーの操作が報酬の中身をどれだけ動かすかを見る
 //! - `cargo run --release -p vmc-pet-body --example particle_trial -- shaped-sum <候補の番号>...`:
@@ -1005,7 +1007,10 @@ struct LureEpisode {
     /// 散らばった粒子だけが速く吸い寄せられる動きは、平均の速さでは薄まるため。`policy_episode` だけが測る。
     particle_excess_speed: f32,
     /// まとまりが 0.9 以上なのに誘っていた秒数(判断のときに見る)。`policy_episode` だけが測る。
+    /// `burst_episode` では「はぐれた粒子がいないのに誘っていた秒数」。
     idle_seconds: f32,
+    /// はぐれた粒子がいた秒数。`burst_episode` だけが測る。
+    stray_seconds: f32,
 }
 
 /// エネルギーが尽きたときの力の倍率(試験で崩れずに戻れた ×0.6)。
@@ -2045,6 +2050,8 @@ struct BodyObservation {
     stray_distance: f32,
     /// 最大の塊の重心。
     center: (f32, f32),
+    /// 最大の塊に入っていない粒子の数。
+    strays: usize,
 }
 
 /// 1 回の判断の記録。将来、1 ステップごとの状態と結果から学ぶ方式(強化学習など)に使える形にしてある。
@@ -2087,6 +2094,7 @@ fn observe_body(world: &ParticleWorld) -> BodyObservation {
         cohesion: observed.cohesion,
         stray_distance: observed.stray_distance,
         center: observed.center,
+        strays: observed.strays,
     }
 }
 
@@ -3149,6 +3157,406 @@ fn log_summary(paths: &[String]) {
     }
 }
 
+/// 実際の連打を再現した崩し方と、その後の窓。記録(docs/experiments/controller-learning.md
+/// 「ホバーを切り離してもう一度記録した」)から、1 秒に 1〜4 回・1〜4 秒続く連打で、クリックする点は塊の重心から
+/// 3.2 セル以内だった。崩れは 68 秒続いたので、窓は 200 秒とる。
+const BURST_SECONDS: (u32, u32) = (1, 4);
+const BURST_CLICKS_PER_SECOND: (u32, u32) = (1, 4);
+const BURST_RADIUS_CELLS: f32 = 3.2;
+const REALISTIC_WINDOW: u32 = 3000;
+
+/// 実際の連打で崩し、行動 `policy` を効かせて 200 秒ぶん動かす。`policy` は 1 秒ごとの観測から誘いの強さを返す。
+fn burst_episode(
+    seed: u64,
+    trial: u64,
+    burst_seed: u64,
+    radius: f32,
+    limits: SpeedLimits,
+    policy: &dyn Fn(&BodyObservation) -> f32,
+) -> LureEpisode {
+    let mut world = started_world(seed, trial);
+    let mut rng = ParticleRng::new(burst_seed);
+    world.lure_radius = radius;
+    // 連打: 1 秒ごとに数回、塊の重心の近くを弾く
+    let seconds = rng.range(BURST_SECONDS.0 as f32, BURST_SECONDS.1 as f32 + 0.99) as u32;
+    for _ in 0..seconds {
+        let clicks = rng.range(
+            BURST_CLICKS_PER_SECOND.0 as f32,
+            BURST_CLICKS_PER_SECOND.1 as f32 + 0.99,
+        ) as u32;
+        for _ in 0..clicks {
+            let observed = world.observe();
+            let angle = rng.range(0.0, std::f32::consts::TAU);
+            let distance = BURST_RADIUS_CELLS * rng.unit().sqrt();
+            world.poke(
+                observed.center.0 + distance * angle.cos(),
+                observed.center.1 + distance * angle.sin(),
+                4.5,
+                1.0,
+            );
+            for _ in 0..(SAMPLE_EVERY / clicks.max(1)) {
+                world.step();
+            }
+        }
+    }
+
+    let mut run = LureEpisode::default();
+    let mut recovered = false;
+    for step in 1..=REALISTIC_WINDOW {
+        if step % SAMPLE_EVERY == 1 {
+            let observed = observe_body(&world);
+            let strength = policy(&observed).clamp(0.0, MAX_LURE_STRENGTH);
+            world.lure = if strength > 0.0 {
+                Some((observed.center.0, observed.center.1, strength))
+            } else {
+                None
+            };
+            if strength > 0.0 && observed.strays == 0 {
+                run.idle_seconds += 1.0;
+            }
+        }
+        if let Some((_, _, applied)) = world.lure {
+            run.effort += applied / REALISTIC_WINDOW as f32;
+        }
+        world.step();
+        if world.lure.is_some() {
+            run.excess_speed += (world.mean_speed() - limits.mean).max(0.0);
+        }
+        if step % SAMPLE_EVERY != 0 {
+            continue;
+        }
+        let observed = world.observe();
+        if observed.strays > 0 {
+            run.stray_seconds += 1.0;
+        } else if !recovered {
+            run.seconds = step as f32 / 15.0;
+            recovered = true;
+        }
+        run.broken = observed.strays > 0;
+    }
+    if !recovered {
+        run.seconds = REALISTIC_WINDOW as f32 / 15.0;
+    }
+    run
+}
+
+/// 実際の連打で崩したときの報酬。窓(200 秒)あたりの秒数で数える。
+/// 報酬 = −(はぐれた粒子がいた秒 + 超過の重み × 吸い寄せの超過 + はぐれていないのに誘っていた秒) / 200。
+fn realistic_reward(run: &LureEpisode, average_speed: f32, excess_weight: f32) -> f32 {
+    let excess = run.excess_speed / average_speed / 15.0;
+    -(run.stray_seconds + excess_weight * excess + run.idle_seconds)
+        / (REALISTIC_WINDOW as f32 / 15.0)
+}
+
+/// 実際の連打を崩し方にして、はぐれた粒子の数を入力にした行動を学ばせ直す。
+///
+/// 実機の記録では、まとまりが 0.9 を下回ることはほとんど無く(289 秒中 1 秒)、学習で得たしきい値 0.9 の
+/// コントローラは 5 秒しか働かなかった。崩れ方を実際のものに合わせ、報酬も「はぐれた粒子がいた秒」に変える。
+fn realistic(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    const EXCESS_WEIGHT: f32 = 10.0;
+    const PARENTS: usize = 3;
+    const OFFSPRING: usize = 10;
+    const GENERATIONS: usize = 30;
+    const INITIAL_SIGMA: f32 = 0.3;
+    const MIN_SIGMA: f32 = 0.02;
+    const SIGMA_LEARNING_RATE: f32 = 0.5;
+    const HELD_OUT: u64 = 32;
+
+    /// 行動。学ぶのは「はぐれた粒子が何個以上なら誘うか」「強さ」「届く距離」の3つ。
+    #[derive(Clone, Copy, Debug)]
+    enum Behaviour {
+        Nothing,
+        /// いまのコントローラ(まとまり < 0.9 なら強さ 0.1・距離 45)。
+        CohesionGated,
+        StrayGated {
+            strays: usize,
+            strength: f32,
+            radius: f32,
+        },
+    }
+
+    impl Behaviour {
+        fn decode(u: &[f32]) -> Self {
+            Self::StrayGated {
+                // はぐれた粒子 1〜6 個
+                strays: (1.0 + 5.0 * u[0]).round() as usize,
+                strength: 0.005 * 40f32.powf(u[1]),
+                radius: 10.0 + 35.0 * u[2],
+            }
+        }
+
+        fn radius(self) -> f32 {
+            match self {
+                Self::Nothing => 45.0,
+                Self::CohesionGated => 45.0,
+                Self::StrayGated { radius, .. } => radius,
+            }
+        }
+
+        fn strength(self, observed: &BodyObservation) -> f32 {
+            match self {
+                Self::Nothing => 0.0,
+                Self::CohesionGated => {
+                    if observed.cohesion < 0.9 {
+                        0.1
+                    } else {
+                        0.0
+                    }
+                }
+                Self::StrayGated {
+                    strays, strength, ..
+                } => {
+                    if observed.strays >= strays {
+                        strength
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        }
+
+        fn describe(self) -> String {
+            match self {
+                Self::Nothing => "何もしない".to_string(),
+                Self::CohesionGated => {
+                    "いまのコントローラ(まとまり<0.9 で強さ 0.1・距離 45)".to_string()
+                }
+                Self::StrayGated {
+                    strays,
+                    strength,
+                    radius,
+                } => format!(
+                    "はぐれた粒子 {strays} 個以上で誘う・強さ {strength:.3}・距離 {radius:.1}"
+                ),
+            }
+        }
+    }
+
+    fn normal(rng: &mut ParticleRng) -> f32 {
+        let u1 = rng.unit().max(1e-7);
+        let u2 = rng.unit();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
+
+    /// 行動の組を、同じ崩し方の組で走らせる。
+    fn evaluate(
+        seed: u64,
+        scenes: &[(u64, u64)],
+        behaviours: &[Behaviour],
+        average_speed: f32,
+        limits: SpeedLimits,
+    ) -> Vec<Vec<LureEpisode>> {
+        let jobs: Vec<(usize, usize)> = (0..behaviours.len())
+            .flat_map(|b| (0..scenes.len()).map(move |e| (b, e)))
+            .collect();
+        let runs = parallel_map(jobs.clone(), |(b, e)| {
+            let (trial, burst_seed) = scenes[e];
+            let behaviour = behaviours[b];
+            burst_episode(seed, trial, burst_seed, behaviour.radius(), limits, &|o| {
+                behaviour.strength(o)
+            })
+        });
+        let _ = average_speed;
+        let mut table = vec![vec![LureEpisode::default(); scenes.len()]; behaviours.len()];
+        for ((b, e), run) in jobs.into_iter().zip(runs) {
+            table[b][e] = run;
+        }
+        table
+    }
+
+    let started = Instant::now();
+    for &seed in seeds {
+        println!("## 候補 {seed}\n");
+        let (average_speed, limits) = normal_speed(seed);
+        println!(
+            "崩し方: 1 秒に {}〜{} 回・{}〜{} 秒の連打(重心から {BURST_RADIUS_CELLS} セル以内)。窓 {:.0} 秒。\
+             報酬 = −(はぐれた粒子がいた秒 + {EXCESS_WEIGHT} × 吸い寄せの超過 + はぐれていないのに誘っていた秒) / {:.0}\n",
+            BURST_CLICKS_PER_SECOND.0,
+            BURST_CLICKS_PER_SECOND.1,
+            BURST_SECONDS.0,
+            BURST_SECONDS.1,
+            REALISTIC_WINDOW as f32 / 15.0,
+            REALISTIC_WINDOW as f32 / 15.0,
+        );
+
+        // 格子: はぐれた粒子のしきい値 × 強さ × 距離
+        let mut behaviours = vec![Behaviour::Nothing, Behaviour::CohesionGated];
+        for strays in [1usize, 2, 4] {
+            for strength in [0.02f32, 0.05, 0.1] {
+                for radius in [20.0f32, 45.0] {
+                    behaviours.push(Behaviour::StrayGated {
+                        strays,
+                        strength,
+                        radius,
+                    });
+                }
+            }
+        }
+        let scenes: Vec<(u64, u64)> = (0..TRIALS).map(|t| (t, seed * 7919 + t)).collect();
+        let table = evaluate(seed, &scenes, &behaviours, average_speed, limits);
+        let standard_error = |values: &[f32]| {
+            let m = mean(values);
+            (values.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (values.len() as f32 - 1.0))
+                .sqrt()
+                / (values.len() as f32).sqrt()
+        };
+        println!("| 行動 | 報酬 平均 ± 標準誤差 | はぐれていた秒 | はぐれが消えるまで(秒) | 吸い寄せの超過(秒) | はぐれていないのに誘っていた秒 |");
+        println!("|---|---|---|---|---|---|");
+        let mut ranked: Vec<(usize, f32)> = Vec::new();
+        for (b, behaviour) in behaviours.iter().enumerate() {
+            let rewards: Vec<f32> = table[b]
+                .iter()
+                .map(|run| realistic_reward(run, average_speed, EXCESS_WEIGHT))
+                .collect();
+            ranked.push((b, mean(&rewards)));
+            println!(
+                "| {} | {:.3} ± {:.3} | {:.0} | {:.0} | {:.3} | {:.0} |",
+                behaviour.describe(),
+                mean(&rewards),
+                standard_error(&rewards),
+                mean(&table[b].iter().map(|r| r.stray_seconds).collect::<Vec<_>>()),
+                mean(&table[b].iter().map(|r| r.seconds).collect::<Vec<_>>()),
+                mean(
+                    &table[b]
+                        .iter()
+                        .map(|r| r.excess_speed / average_speed / 15.0)
+                        .collect::<Vec<_>>()
+                ),
+                mean(&table[b].iter().map(|r| r.idle_seconds).collect::<Vec<_>>()),
+            );
+        }
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        println!(
+            "\n格子の最良: {}(報酬 {:.3})\n",
+            behaviours[ranked[0].0].describe(),
+            ranked[0].1
+        );
+
+        // 学習: はぐれた粒子のしきい値・強さ・距離の3つ
+        println!("### 学習((3/3, 10)-ES・{GENERATIONS} 世代・世代ごとに崩し方 5 通り)\n");
+        println!("| 世代 | 平均の行動 | 突然変異の幅 | 平均の行動の報酬 |");
+        println!("|---|---|---|---|");
+        let mut rng = ParticleRng::new(seed * 67);
+        let mut center = vec![0.5, 0.5, 0.5];
+        let mut sigma = INITIAL_SIGMA;
+        for generation in 0..=GENERATIONS {
+            let scenes: Vec<(u64, u64)> = (0..5)
+                .map(|_| {
+                    (
+                        1_000 + (rng.unit() * 100_000.0) as u64,
+                        (rng.unit() * 1e9) as u64,
+                    )
+                })
+                .collect();
+            let children: Vec<(Vec<f32>, f32)> = if generation < GENERATIONS {
+                (0..OFFSPRING)
+                    .map(|_| {
+                        let child_sigma = (sigma * (SIGMA_LEARNING_RATE * normal(&mut rng)).exp())
+                            .clamp(MIN_SIGMA, 1.0);
+                        let child = center
+                            .iter()
+                            .map(|&v| (v + child_sigma * normal(&mut rng)).clamp(0.0, 1.0))
+                            .collect();
+                        (child, child_sigma)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut candidates = vec![Behaviour::decode(&center)];
+            candidates.extend(children.iter().map(|(child, _)| Behaviour::decode(child)));
+            let table = evaluate(seed, &scenes, &candidates, average_speed, limits);
+            let reward = |b: usize| {
+                mean(
+                    &table[b]
+                        .iter()
+                        .map(|run| realistic_reward(run, average_speed, EXCESS_WEIGHT))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            if generation % 10 == 0 {
+                println!(
+                    "| {generation} | {} | {sigma:.3} | {:.3} |",
+                    candidates[0].describe(),
+                    reward(0)
+                );
+            }
+            if children.is_empty() {
+                break;
+            }
+            let mut order: Vec<usize> = (1..candidates.len()).collect();
+            order.sort_by(|&a, &b| reward(b).total_cmp(&reward(a)));
+            let chosen = &order[..PARENTS];
+            center = (0..3)
+                .map(|k| chosen.iter().map(|&i| children[i - 1].0[k]).sum::<f32>() / PARENTS as f32)
+                .collect();
+            sigma = chosen.iter().map(|&i| children[i - 1].1).sum::<f32>() / PARENTS as f32;
+        }
+        let learned = Behaviour::decode(&center);
+        println!("\n学んだ行動: {}\n", learned.describe());
+
+        // 学習に使っていない崩し方で比べる
+        println!("### 学習に使っていない崩し方での比較({HELD_OUT} 通り)\n");
+        let held_out: Vec<(u64, u64)> = (0..HELD_OUT)
+            .map(|round| (500_000 + round, seed * 104_729 + round + 41))
+            .collect();
+        // 書き下す値(丸めた後)も確かめる。Lenia では丸めただけで振る舞いが変わった例がある
+        // (docs/DESIGN.md「丸めで崩壊が反転した」)
+        let rounded = match learned {
+            Behaviour::StrayGated {
+                strays,
+                strength,
+                radius,
+            } => Behaviour::StrayGated {
+                strays,
+                strength: (strength * 100.0).round() / 100.0,
+                radius: radius.round(),
+            },
+            other => other,
+        };
+        let contenders = vec![
+            Behaviour::Nothing,
+            Behaviour::CohesionGated,
+            behaviours[ranked[0].0],
+            learned,
+            rounded,
+        ];
+        let table = evaluate(seed, &held_out, &contenders, average_speed, limits);
+        println!("| 行動 | 報酬 平均 ± 標準誤差 | 何もしないとの差 ± 標準誤差 | はぐれていた秒 | 吸い寄せの超過(秒) | はぐれていないのに誘っていた秒 |");
+        println!("|---|---|---|---|---|---|");
+        let rewards_of = |b: usize| -> Vec<f32> {
+            table[b]
+                .iter()
+                .map(|run| realistic_reward(run, average_speed, EXCESS_WEIGHT))
+                .collect()
+        };
+        let nothing = rewards_of(0);
+        for (b, behaviour) in contenders.iter().enumerate() {
+            let rewards = rewards_of(b);
+            let versus: Vec<f32> = rewards.iter().zip(&nothing).map(|(a, n)| a - n).collect();
+            println!(
+                "| {} | {:.3} ± {:.3} | {:+.3} ± {:.3} | {:.0} | {:.3} | {:.0} |",
+                behaviour.describe(),
+                mean(&rewards),
+                standard_error(&rewards),
+                mean(&versus),
+                standard_error(&versus),
+                mean(&table[b].iter().map(|r| r.stray_seconds).collect::<Vec<_>>()),
+                mean(
+                    &table[b]
+                        .iter()
+                        .map(|r| r.excess_speed / average_speed / 15.0)
+                        .collect::<Vec<_>>()
+                ),
+                mean(&table[b].iter().map(|r| r.idle_seconds).collect::<Vec<_>>()),
+            );
+        }
+        println!();
+    }
+    println!("所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -3156,6 +3564,13 @@ fn main() {
             let output = PathBuf::from(args.get(1).expect("出力先のディレクトリを渡す"));
             fs::create_dir_all(&output).expect("出力先を作れない");
             search(&output);
+        }
+        Some("realistic") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            realistic(&seeds);
         }
         Some("log") => {
             log_summary(&args[1..]);
@@ -3237,7 +3652,7 @@ fn main() {
             suite(&seeds);
         }
         _ => eprintln!(
-            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>... | log <記録のファイル>..."
+            "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>... | realistic <候補の番号>... | log <記録のファイル>..."
         ),
     }
 }
