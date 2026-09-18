@@ -192,7 +192,19 @@ impl ParticleWorld {
         }
     }
 
+    /// 体を1ステップ進める(テンポ 1.0)。
     pub fn step(&mut self) {
+        self.step_at_tempo(1.0);
+    }
+
+    /// テンポ(1 ステップで位置へ反映する割合)を指定して1ステップ進める。
+    ///
+    /// 速度の更新はそのまま(v ← v × friction + a)、位置への反映だけテンポ倍
+    /// (x ← x + v × tempo)。Lenia の「1 ステップで進む時間」(`Lenia::step_at_tempo`)
+    /// と同じ意味で、力・摩擦・誘い・壁はすべてそのまま効く。MAX_SPEED は速度
+    /// そのものの上限なので、テンポを遅くしても巻き込まれない。速いテンポでは
+    /// 1 ステップの移動が上限の tempo 倍まで伸びうる点に注意
+    pub fn step_at_tempo(&mut self, tempo: f32) {
         let n = self.x.len();
         let (r_max, types) = (self.params.r_max, self.params.types);
         let r_max_squared = r_max * r_max;
@@ -240,8 +252,8 @@ impl ParticleWorld {
             }
             self.vx[i] = vx;
             self.vy[i] = vy;
-            self.x[i] = (self.x[i] + vx).clamp(0.0, self.size - 1e-3);
-            self.y[i] = (self.y[i] + vy).clamp(0.0, self.size - 1e-3);
+            self.x[i] = (self.x[i] + vx * tempo).clamp(0.0, self.size - 1e-3);
+            self.y[i] = (self.y[i] + vy * tempo).clamp(0.0, self.size - 1e-3);
         }
     }
 
