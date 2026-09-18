@@ -30,6 +30,8 @@ pub enum Action {
         seed: u64,
         zoom: u32,
         log: Option<String>,
+        /// コントローラ(まとまりが崩れたら誘う)を働かせるか。
+        controller: bool,
     },
     /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
     ListMultichannel,
@@ -45,6 +47,8 @@ pub enum ArgsError {
     UnknownMood(String),
     /// 数を取るオプションに、受け付けない値が渡された(候補番号は 0 以上、倍率は 1 以上の整数)。
     InvalidNumber(&'static str, String),
+    /// 決まった語を取るオプションに、知らない値が渡された。
+    UnknownValue(&'static str, String),
 }
 
 impl std::fmt::Display for ArgsError {
@@ -57,6 +61,9 @@ impl std::fmt::Display for ArgsError {
                     f,
                     "{flag} expects a non-negative integer (zoom: 1 or more), got: {value}"
                 )
+            }
+            Self::UnknownValue(flag, value) => {
+                write!(f, "{flag} expects on or off, got: {value}")
             }
             Self::UnknownMood(value) => {
                 let names: Vec<&str> = MoodState::ALL.iter().map(|state| state.name()).collect();
@@ -93,6 +100,7 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
     let mut particles: Option<u64> = None;
     let mut particle_zoom: u32 = 1;
     let mut particle_log: Option<String> = None;
+    let mut particle_controller = true;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -139,6 +147,14 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             particle_log = Some(value);
             continue;
         }
+        if let Some((flag, value)) = split_flag(arg, &mut iter, "--particle-controller")? {
+            particle_controller = match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(ArgsError::UnknownValue(flag, value)),
+            };
+            continue;
+        }
         if arg == "--animal" {
             let value = iter.next().ok_or(ArgsError::MissingValue("--animal"))?;
             animal_code = value.clone();
@@ -167,6 +183,7 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             seed,
             zoom: particle_zoom,
             log: particle_log,
+            controller: particle_controller,
         });
     }
     if let Some(id) = multichannel {
@@ -212,8 +229,10 @@ vmc-pet [オプション]
                      【実験】多チャンネル Lenia の生物を、元気・テンポ・クリックだけつないで動かす
                      (--preview-mood と組み合わせると、その気分のテンポになる)
   --preview-particles <番号> [--particle-zoom <倍率>] [--particle-log <ファイル>]
+                     [--particle-controller <on|off>]
                      【実験】粒子の体(探索の候補番号、例 1091)を表示する。倍率を上げると体は大きく
-                     見えるが、動き回れる箱は狭くなる(ポインタで誘い、クリックで弾く)。
+                     見えるが、動き回れる箱は狭くなる(ポインタは撫でるだけ、クリックで弾く)。
+                     誘いはコントローラが行い、--particle-controller off で止められる。
                      --particle-log を渡すと、1 秒ごとの体の状態と操作を CSV で書き出す
   -h, --help         このメッセージを表示して終了する
 ";
@@ -389,7 +408,8 @@ mod tests {
             Action::PreviewParticles {
                 seed: 1091,
                 zoom: 1,
-                log: None
+                log: None,
+                controller: true
             }
         );
         assert_eq!(
@@ -401,7 +421,8 @@ mod tests {
             Action::PreviewParticles {
                 seed: 1937,
                 zoom: 2,
-                log: None
+                log: None,
+                controller: true
             }
         );
     }
@@ -424,7 +445,36 @@ mod tests {
                 seed: 1091,
                 zoom: 1,
                 log: Some("/tmp/a.csv".to_string()),
+                controller: true,
             }
+        );
+    }
+
+    #[test]
+    fn the_particle_controller_can_be_turned_off() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(
+                &args(&["--preview-particles=1091", "--particle-controller=off"]),
+                "O2u"
+            )
+            .unwrap(),
+            Action::PreviewParticles {
+                seed: 1091,
+                zoom: 1,
+                log: None,
+                controller: false,
+            }
+        );
+        assert_eq!(
+            parse(
+                &args(&["--preview-particles=1091", "--particle-controller", "yes"]),
+                "O2u"
+            ),
+            Err(ArgsError::UnknownValue(
+                "--particle-controller",
+                "yes".to_string()
+            ))
         );
     }
 

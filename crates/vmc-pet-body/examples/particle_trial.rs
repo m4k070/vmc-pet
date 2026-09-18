@@ -2969,7 +2969,10 @@ struct LogRow {
     spread: f32,
     mean_speed: f32,
     max_speed: f32,
+    /// コントローラが誘っていたステップ数。
     lure_steps: f32,
+    /// ユーザーがポインタを乗せていたステップ数(体には触れない)。
+    hover_steps: f32,
     clicks: f32,
     click_distance: f32,
 }
@@ -2985,7 +2988,12 @@ fn read_log(path: &Path) -> Vec<LogRow> {
                 .split(',')
                 .map(|value| value.trim().parse::<f32>().expect("数でない値がある"))
                 .collect();
-            assert_eq!(values.len(), 13, "列の数が合わない: {line}");
+            // 14 列が今の形。13 列は、ホバーがそのまま誘いだった頃の記録(ホバーの列が無い)
+            assert!(
+                values.len() == 14 || values.len() == 13,
+                "列の数が合わない: {line}"
+            );
+            let old_format = values.len() == 13;
             LogRow {
                 time_s: values[0],
                 cohesion: values[1],
@@ -2994,9 +3002,10 @@ fn read_log(path: &Path) -> Vec<LogRow> {
                 spread: values[6],
                 mean_speed: values[7],
                 max_speed: values[8],
-                lure_steps: values[9],
-                clicks: values[11],
-                click_distance: values[12],
+                lure_steps: if old_format { 0.0 } else { values[9] },
+                hover_steps: if old_format { values[9] } else { values[11] },
+                clicks: values[values.len() - 2],
+                click_distance: values[values.len() - 1],
             }
         })
         .collect()
@@ -3019,6 +3028,7 @@ fn log_summary(paths: &[String]) {
         let share = |count: usize| count as f32 / rows.len() as f32 * 100.0;
         let clicks: f32 = rows.iter().map(|row| row.clicks).sum();
         let lure_seconds = rows.iter().filter(|row| row.lure_steps > 0.0).count();
+        let hover_seconds = rows.iter().filter(|row| row.hover_steps > 0.0).count();
         let broken_seconds = rows.iter().filter(|row| row.cohesion < 0.9).count();
         let click_distances: Vec<f32> = rows
             .iter()
@@ -3039,7 +3049,11 @@ fn log_summary(paths: &[String]) {
             mean(&rows.iter().map(|row| row.spread).collect::<Vec<_>>())
         );
         println!(
-            "| ポインタを乗せて誘っていた秒 | {lure_seconds} 秒({:.0}%) |",
+            "| ユーザーがポインタを乗せていた秒 | {hover_seconds} 秒({:.0}%) |",
+            share(hover_seconds)
+        );
+        println!(
+            "| コントローラが誘っていた秒 | {lure_seconds} 秒({:.0}%) |",
             share(lure_seconds)
         );
         println!(
@@ -3072,7 +3086,7 @@ fn log_summary(paths: &[String]) {
                 .collect()
         };
         println!("\n### ユーザーの操作で、報酬の中身がどれだけ変わるか\n");
-        println!("| 直前 {AFTER_CLICK} 秒のクリック | 誘い | 秒数 | まとまりが 0.9 未満 | まとまりの平均 | 速さの最大の平均 | 速さの平均 |");
+        println!("| 直前 {AFTER_CLICK} 秒のクリック | コントローラの誘い | 秒数 | まとまりが 0.9 未満 | まとまりの平均 | 速さの最大の平均 | 速さの平均 |");
         println!("|---|---|---|---|---|---|---|");
         for (clicked, lured) in [(false, false), (false, true), (true, false), (true, true)] {
             let indices = group(clicked, lured);

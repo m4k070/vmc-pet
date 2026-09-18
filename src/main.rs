@@ -42,11 +42,17 @@ fn main() {
             }
             return;
         }
-        Ok(cli::Action::PreviewParticles { seed, zoom, log }) => {
+        Ok(cli::Action::PreviewParticles {
+            seed,
+            zoom,
+            log,
+            controller,
+        }) => {
             let preview = particle_preview::ParticlePreview::new(
                 seed,
                 zoom,
                 log.as_deref().map(std::path::Path::new),
+                controller,
             );
             if let Err(error) = LayerWindow::run(LayerWindowConfig::default(), Box::new(preview)) {
                 eprintln!("vmc-pet: {error}");
