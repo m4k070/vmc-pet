@@ -11,7 +11,13 @@ use crate::interface::MachineLoad;
 use crate::persistence::{now_unix_seconds, MemoryStore};
 use crate::render::{Camera, DotGrid};
 use crate::shell::{InputRegion, PointerInput, Surface};
+use vmc_pet_body::particles_body::{BOX_SIZE, ZOOM};
 use vmc_pet_body::Pet as PetCore;
+
+/// `code` が粒子の体の選択(`particles:<番号>`)か。
+fn code_starts_with_particles(code: &str) -> bool {
+    code.starts_with("particles:")
+}
 
 /// 場の解像度。表示と 1:1 にしてある。Orbium は 20x20 なので画面の 6 割強を占める。
 /// この大きさでも生物の挙動が変わらないことは実測で確かめた(docs/DESIGN.md 参照)。
@@ -54,6 +60,11 @@ pub struct Pet {
     core: PetCore,
     grid: DotGrid,
     camera: Camera,
+    /// 粒子の体のとき、表示は箱の全体をそのまま映す(原点固定)。カメラは
+    /// 「体が場の端で分断されないよう重心へ寄せる」ためのものだが、粒子の体は
+    /// 壁で跳ね返る箱の中を動き回る体で、分断が起きない。重心を追うと、トーラス
+    /// 重心の乱れ(壁際での実害は未検証)がそのまま表示の揺れになる
+    fixed_origin: bool,
     step_interval: Duration,
     last_step: Instant,
     /// 直近のサーフェスの大きさ。ポインタ座標を場のセルへ写すのに要る。
@@ -92,13 +103,30 @@ impl Pet {
     /// `MemoryStore::disabled()` を渡し、実行環境に既にある保存ファイルに
     /// 左右されないようにする。
     pub fn with_memory_store(code: &str, memory_store: MemoryStore) -> Result<Self, PetError> {
-        let animal = vmc_pet_body::load_animal(code).map_err(PetError::Animal)?;
-        eprintln!(
-            "vmc-pet: loaded {} ({}) R={} T={}",
-            animal.name, animal.code, animal.params.radius, animal.params.time_divisor
-        );
-
-        let mut core = PetCore::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+        // `particles:<番号>` のときは、Lenia の代わりに粒子の体で立てる。
+        // エネルギー・気分・echo・色素・慣れ・記憶は Lenia のペットと同じ仕組みに繋がる。
+        // 表示は箱の全体をそのまま映す(原点固定。カメラを使わない)
+        let fixed_origin = code_starts_with_particles(code);
+        let core = match code.strip_prefix("particles:") {
+            Some(seed_text) => {
+                let seed = seed_text
+                    .parse::<u64>()
+                    .map_err(|_| PetError::UnknownParticleSeed(seed_text.to_string()))?;
+                eprintln!(
+                    "vmc-pet: running particle body #{seed} (a {BOX_SIZE}-cell box drawn at x{ZOOM} over the whole grid); the view is fixed, no camera"
+                );
+                PetCore::with_particle_body(seed, FIELD_WIDTH, FIELD_HEIGHT)
+            }
+            None => {
+                let animal = vmc_pet_body::load_animal(code).map_err(PetError::Animal)?;
+                eprintln!(
+                    "vmc-pet: loaded {} ({}) R={} T={}",
+                    animal.name, animal.code, animal.params.radius, animal.params.time_divisor
+                );
+                PetCore::new(animal, FIELD_WIDTH, FIELD_HEIGHT)
+            }
+        };
+        let mut core = core;
         // 前回の記憶があれば、離れていた時間ぶん弱った状態で目を覚ます
         // (docs/DESIGN.md「プロセスをまたぐ記憶」参照)。
         if let Some(saved) = memory_store.load() {
@@ -116,6 +144,7 @@ impl Pet {
             core,
             grid: DotGrid::new(GRID_COLUMNS, GRID_ROWS),
             camera: Camera::new(),
+            fixed_origin,
             step_interval: Duration::from_secs_f64(1.0 / STEPS_PER_SECOND as f64),
             last_step: Instant::now(),
             surface_size: (0, 0),
@@ -166,12 +195,17 @@ impl Pet {
 #[derive(Debug)]
 pub enum PetError {
     Animal(vmc_pet_body::animal::AnimalError),
+    /// `particles:<番号>` の番号が読めなかった。
+    UnknownParticleSeed(String),
 }
 
 impl std::fmt::Display for PetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Animal(e) => write!(f, "failed to load the initial animal: {e}"),
+            Self::UnknownParticleSeed(seed) => {
+                write!(f, "invalid particles seed: {seed} (a non-negative integer)")
+            }
         }
     }
 }
@@ -195,9 +229,13 @@ impl Surface for Pet {
         // 世話がいつ来るかを学ぶため、時刻を知らせる(体は時計を読まない)。
         self.core.tick_clock(now_unix_seconds());
 
-        // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる
-        self.camera
-            .follow(self.core.observe(), GRID_COLUMNS, GRID_ROWS);
+        // 生物が場の端で分断されて見えないよう、表示原点を重心へ寄せる。
+        // 粒子の体では箱の全体をそのまま映す(体は壁で跳ね返り分断しない)ので、
+        // カメラの原点は (0, 0) のまま固定する
+        if !self.fixed_origin {
+            self.camera
+                .follow(self.core.observe(), GRID_COLUMNS, GRID_ROWS);
+        }
         canvas.fill(0);
         self.grid.draw_with_pigment(
             self.core.observe(),

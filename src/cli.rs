@@ -10,9 +10,11 @@ use vmc_pet_body::{list_animals, MoodState};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// ペットを起動する。`preview` があれば、その気分に固定したプレビューとして起動する。
+    /// `particles` があれば、Lenia の代わりに粒子の体(seed)で起動する。
     Run {
         animal_code: String,
         preview: Option<MoodState>,
+        particle_seed: Option<u64>,
     },
     /// 選べる生物の一覧を表示して終了する。
     ListAnimals,
@@ -189,9 +191,22 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
     if let Some(id) = multichannel {
         return Ok(Action::RunMultichannel { id, preview });
     }
+    // `particles:<番号>`(<code> の値)は、粒子の体(探索の候補番号)として読む。
+    // 記憶・気分・echo・色素など、Lenia のペットと同じ仕組みに繋がる
+    if let Some(seed_text) = animal_code.strip_prefix("particles:") {
+        let seed = seed_text
+            .parse::<u64>()
+            .map_err(|_| ArgsError::InvalidNumber("--animal", seed_text.to_string()))?;
+        return Ok(Action::Run {
+            animal_code,
+            preview,
+            particle_seed: Some(seed),
+        });
+    }
     Ok(Action::Run {
         animal_code,
         preview,
+        particle_seed: None,
     })
 }
 
@@ -216,7 +231,9 @@ pub const USAGE: &str = "\
 vmc-pet [オプション]
 
 オプション:
-  --animal <code>    起動時に使う生物を指定する(デフォルト: O2u)
+  --animal <code>    起動時に使う生物を指定する(デフォルト: O2u)。
+                     particles:<番号>(例 particles:1091)を渡すと、粒子の体で起動する
+                     (エネルギー・気分・echo・色素・慣れ・記憶は Lenia と同じ仕組み)
   --list-animals     選べる生物の一覧を表示して終了する
   --preview-mood <lively|waiting|disappointed>
                      気分を固定して、その見た目を確かめる(記憶は読みも書きもしない)
@@ -286,6 +303,7 @@ mod tests {
             Action::Run {
                 animal_code: "O2u".to_string(),
                 preview: None,
+                particle_seed: None,
             }
         );
     }
@@ -301,6 +319,7 @@ mod tests {
             Action::Run {
                 animal_code: "OG2g".to_string(),
                 preview: None,
+                particle_seed: None,
             }
         );
     }
@@ -316,6 +335,7 @@ mod tests {
             Action::Run {
                 animal_code: "OG2g".to_string(),
                 preview: None,
+                particle_seed: None,
             }
         );
     }
@@ -536,6 +556,7 @@ mod tests {
             Action::Run {
                 animal_code: "O2u".to_string(),
                 preview: Some(MoodState::Waiting),
+                particle_seed: None,
             }
         );
         assert_eq!(
@@ -543,7 +564,36 @@ mod tests {
             Action::Run {
                 animal_code: "O2u".to_string(),
                 preview: Some(MoodState::Disappointed),
+                particle_seed: None,
             }
+        );
+    }
+
+    #[test]
+    fn an_animal_code_with_the_particles_prefix_selects_a_particle_seed() {
+        // Arrange / Act
+        let action = parse(&args(&["--animal=particles:1091"]), "O2u").unwrap();
+
+        // Assert
+        assert_eq!(
+            action,
+            Action::Run {
+                animal_code: "particles:1091".to_string(),
+                preview: None,
+                particle_seed: Some(1091),
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_particles_seed_is_reported() {
+        // Arrange / Act
+        let result = parse(&args(&["--animal=particles:abc"]), "O2u");
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(ArgsError::InvalidNumber("--animal", "abc".to_string()))
         );
     }
 
