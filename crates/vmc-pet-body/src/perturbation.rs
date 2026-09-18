@@ -39,13 +39,18 @@ impl Perturbation {
 /// この処理を共有する。両者は加算先の配列とクランプ範囲が違うだけで、
 /// 「山型の重みで加算し、端は反対側へ折り返す」という処理そのものは同じであるべき
 /// (予測可能性: 同じ処理は同じパターンで書く)。
-pub fn accumulate_into(
+///
+/// `toroidal` を false にすると端で折り返さない(範囲外は捨てる)。壁で跳ね返る
+/// 箱の体(粒子の体)の echo への記録に使う。トーラス折り返しだと、壁際に置かれた
+/// 摂動の外周が場の反対側へ漏れて見える
+pub fn accumulate_into_toroidal(
     cells: &mut [f32],
     width: usize,
     height: usize,
     perturbation: &Perturbation,
     min: f32,
     max: f32,
+    toroidal: bool,
 ) {
     let reach = crate::math::ceilf(perturbation.radius) as i32;
     if reach <= 0 {
@@ -60,12 +65,34 @@ pub fn accumulate_into(
             if weight <= 0.0 {
                 continue;
             }
-            let x = (perturbation.at.x as i32 + dx).rem_euclid(signed_width) as usize;
-            let y = (perturbation.at.y as i32 + dy).rem_euclid(signed_height) as usize;
-            let index = y * width + x;
-            cells[index] = (cells[index] + perturbation.amount * weight).clamp(min, max);
+            if toroidal {
+                let x = (perturbation.at.x as i32 + dx).rem_euclid(signed_width) as usize;
+                let y = (perturbation.at.y as i32 + dy).rem_euclid(signed_height) as usize;
+                let index = y * width + x;
+                cells[index] = (cells[index] + perturbation.amount * weight).clamp(min, max);
+            } else {
+                let x = perturbation.at.x as i32 + dx;
+                let y = perturbation.at.y as i32 + dy;
+                if x < 0 || y < 0 || x >= signed_width || y >= signed_height {
+                    continue;
+                }
+                let index = y as usize * width + x as usize;
+                cells[index] = (cells[index] + perturbation.amount * weight).clamp(min, max);
+            }
         }
     }
+}
+
+/// トーラス折り返しで加算する(`accumulate_into_toroidal` の既定の使い方)。
+pub fn accumulate_into(
+    cells: &mut [f32],
+    width: usize,
+    height: usize,
+    perturbation: &Perturbation,
+    min: f32,
+    max: f32,
+) {
+    accumulate_into_toroidal(cells, width, height, perturbation, min, max, true)
 }
 
 #[cfg(test)]

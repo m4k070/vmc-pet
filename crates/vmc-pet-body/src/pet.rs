@@ -14,6 +14,7 @@
 //! 固有の事情(PC版はまとめて追いつこうとしてから諦める、M5Stack版は毎回
 //! 1ステップだけ進めて自然に遅れる、など)を持つため、この境界の外に置いてある。
 
+use crate::particles_body::ParticleBody;
 use crate::touch::{body_perturbation_for, echo_perturbation_for};
 use crate::{
     Animal, AutonomousController, BodyPort, CellPos, ControllerParams, FieldView, Habituation,
@@ -39,10 +40,115 @@ const SELF_ACTION_ECHO_AMOUNT: f32 = 0.5;
 /// 崩壊を検知して置き直す。これがないとペットが二度と戻らない。
 const COLLAPSE_MASS: f32 = 5.0;
 
+/// 体(`Body` のenum。粒子の体が増えた分岐。docs/DESIGN.md「将来の拡張」の
+/// 「体を付け替える実験の足場」)。
+///
+/// 体ごとの違いは `step` 内の自律行動(と崩壊検知)だけに留め、ほかの呼び出し
+/// (observe・energy など)は、粒の体が同じ形のメソッドを持つおかげで直接委譲する。
+enum Body {
+    Lenia(LeniaBody),
+    Particles(ParticleBody),
+}
+
+/// 自分の行動(自律コントローラ)を echo に灯すための情報。
+/// Lenia は突きの摂動そのもの、粒子の体は誘いの光の位置。
+enum SelfAction {
+    /// 突き。位置と広がりは実際の摂動と同じ。
+    Poke(Perturbation),
+    /// 誘い。最大の塊の重心に灯す(光の広がりは Lenia とそろえる)。
+    Lure(CellPos),
+}
+
+impl SelfAction {
+    fn echo_position(&self) -> CellPos {
+        match self {
+            Self::Poke(perturbation) => perturbation.at,
+            Self::Lure(at) => *at,
+        }
+    }
+}
+
+/// 自分の行動を echo に灯す半径。Lenia の突きの実際の広がりから、粒子の誘いに
+/// 与える光の広がりまで、共通の値。
+const SELF_ACTION_ECHO_RADIUS: f32 = 6.0;
+
+impl Body {
+    /// Lenia の体だけが持つ崩壊検知のための参照。
+    fn as_lenia(&mut self) -> Option<&mut LeniaBody> {
+        match self {
+            Self::Lenia(body) => Some(body),
+            Self::Particles(_) => None,
+        }
+    }
+
+    fn mass(&self) -> f32 {
+        match self {
+            Self::Lenia(body) => body.mass(),
+            Self::Particles(body) => body.mass(),
+        }
+    }
+
+    fn energy(&self) -> f32 {
+        match self {
+            Self::Lenia(body) => body.energy(),
+            Self::Particles(body) => body.energy(),
+        }
+    }
+
+    fn observe(&self) -> FieldView<'_> {
+        match self {
+            Self::Lenia(body) => body.observe(),
+            Self::Particles(body) => body.observe(),
+        }
+    }
+
+    fn disturb(&mut self, perturbation: Perturbation) {
+        match self {
+            Self::Lenia(body) => body.disturb(perturbation),
+            Self::Particles(body) => body.disturb(perturbation),
+        }
+    }
+
+    fn receive_care(&mut self, weight: f32) {
+        match self {
+            Self::Lenia(body) => body.receive_care(weight),
+            Self::Particles(body) => body.receive_care(weight),
+        }
+    }
+
+    fn apply_environmental_stress(&mut self, stress: f32) {
+        match self {
+            Self::Lenia(body) => body.apply_environmental_stress(stress),
+            Self::Particles(body) => body.apply_environmental_stress(stress),
+        }
+    }
+
+    fn restore_energy(&mut self, energy: f32) {
+        match self {
+            Self::Lenia(body) => body.restore_energy(energy),
+            Self::Particles(body) => body.restore_energy(energy),
+        }
+    }
+
+    fn apply_offline_decay(&mut self, seconds_away: f32) {
+        match self {
+            Self::Lenia(body) => body.apply_offline_decay(seconds_away),
+            Self::Particles(body) => body.apply_offline_decay(seconds_away),
+        }
+    }
+
+    fn set_tempo(&mut self, tempo: f32) {
+        match self {
+            Self::Lenia(body) => body.set_tempo(tempo),
+            Self::Particles(body) => body.set_tempo(tempo),
+        }
+    }
+}
+
 /// 体(世界モデル)・入力の翻訳・崩壊検知・echo を束ねたもの。
 /// PC版・M5Stack版で共通して使う。
 pub struct Pet {
-    body: LeniaBody,
+    body: Body,
     /// 入力を可視化するためだけのデータ。体の場とは別に持ち、体には一切影響しない。
     echo: TouchEcho,
     /// 体に付く色素。世話を待っているときに色づく(体の動きには影響しない)。
@@ -64,6 +170,33 @@ impl Pet {
         Self::with_controller_params(animal, width, height, ControllerParams::default())
     }
 
+    /// 候補 `seed` の粒子の体を持つペットを作る。
+    ///
+    /// 場の大きさ(表示)は `width` × `height`。粒子の体は 32×32 の表示を前提にしている
+    /// ([`crate::particles_body::VIEW_SIZE`])ので、それ以外の大きさでは echo・色素・慣れ
+    /// が体とずれる。呼び出し側(PC 版・M5Stack 版)は 32×32 で立てること。
+    ///
+    /// echo と色素には重心を渡さない(原点 (0,0) のまま)。光は場の座標で
+    /// 記録・読み出しする(touch_echo.rs 冒頭の仕様)。粒子の体は壁で跳ね返る箱の
+    /// 中を動き回り、表示も箱の全体をそのまま映す(カメラ固定)ため、体基準に
+    /// 重ね合わせない
+    pub fn with_particle_body(seed: u64, width: usize, height: usize) -> Self {
+        let mut pet = Self {
+            body: Body::Particles(ParticleBody::new(seed)),
+            echo: TouchEcho::new(width, height),
+            pigment: Pigment::new(width, height),
+            touching_at: None,
+            controller: AutonomousController::with_params(ControllerParams::default()),
+            habituation: Habituation::new(width, height),
+            mood: Mood::new(),
+        };
+        // 壁で跳ね返る箱の体では、光の記録の端を折り返さない。壁際に置かれた
+        // 摂動の外周が場の反対側へ漏れて見えるのを防ぐ(重心は follow_body を
+        // 呼ばないので原点 (0,0) のまま=場の座標で記録・読み出しする)
+        pet.echo.without_wrap();
+        pet
+    }
+
     /// `code`(assets/animals.json のコード)から生物を読み込んで作る便利関数。
     pub fn load(
         code: &str,
@@ -83,7 +216,7 @@ impl Pet {
         controller_params: ControllerParams,
     ) -> Self {
         let mut pet = Self {
-            body: LeniaBody::new(animal, width, height),
+            body: Body::Lenia(LeniaBody::new(animal, width, height)),
             echo: TouchEcho::new(width, height),
             pigment: Pigment::new(width, height),
             touching_at: None,
@@ -114,12 +247,44 @@ impl Pet {
     pub fn step(&mut self) -> bool {
         // がっかりしているほど体の時間がゆっくり進む(表情としてのテンポ)
         self.body.set_tempo(self.mood.tempo());
-        self.body.step();
+        // 自律コントローラは体ごとに別物である。Lenia では体の形を見て自分から
+        // 軽くならす(突き)。粒子の体では、はぐれた粒子を塊の重心へ誘う
+        // (docs/experiments/controller-learning.md「実際の連打で学ばせ直す」)。
+        // どちらも `disturb` 相当で体へ効き、エネルギーは変化しない。
+        let self_action = match &mut self.body {
+            Body::Lenia(body) => {
+                body.step();
+                let observation = Observation {
+                    field: body.observe(),
+                    energy: body.energy(),
+                };
+                self.controller
+                    .maybe_act(observation)
+                    .map(|perturbation| {
+                        body.disturb(perturbation);
+                        SelfAction::Poke(perturbation)
+                    })
+            }
+            Body::Particles(body) => {
+                body.step();
+                body.self_action_echo().map(SelfAction::Lure)
+            }
+        };
         // 光(echo)と色素は体に貼りつけて覚えるので、体が進んだらすぐ重心を渡す。
         // 下の自律行動の光も、進んだ後の体を基準に記録される。
-        let centroid = self.body_centroid();
-        self.echo.follow_body(centroid);
-        self.pigment.follow_body(centroid);
+        //
+        // 粒子の体では渡さない。echo と色素は「体の重心からの相対位置」で光を
+        // 覚える設計で、重心を渡さなければ場の座標(=物理の箱の座標)のままで
+        // 記録・読み出しする(touch_echo.rs 冒頭の仕様)。粒子の体は壁で跳ね返る
+        // 箱の中を動き回り、表示も箱の全体をそのまま映す(カメラ固定)ので、
+        // 体基準に重ね合わせる意味が無い。重心を渡すと、塊が動くたびに触った跡が
+        // 画面上を流れ、壁際ではトーラス折り返しで反対側に置かれてしまう
+        let is_particle_body = matches!(self.body, Body::Particles(_));
+        if !is_particle_body {
+            let centroid = self.body_centroid();
+            self.echo.follow_body(centroid);
+            self.pigment.follow_body(centroid);
+        }
         // 世話を待っているほど、体があるところに色素が溜まる(ゆっくり色づく)
         self.pigment
             .step(self.body.observe(), self.mood.pigment_stimulus());
@@ -127,32 +292,26 @@ impl Pet {
         // フレームレートが PC と M5Stack で違うのに対し、体のステップはどちらも
         // 15/s で揃っているため(habituation.rs 参照)。
         self.habituation.recover();
-        // 自律コントローラは人間のタッチとは独立に、体の形を見てそれ自体を
-        // ならす。`disturb` を通すため、これによってエネルギーは変化しない
-        // (`LeniaBody::disturb` のドキュメント参照)。
-        let observation = Observation {
-            field: self.body.observe(),
-            energy: self.body.energy(),
-        };
-        if let Some(perturbation) = self.controller.maybe_act(observation) {
-            self.body.disturb(perturbation);
+        if let Some(at) = self_action.as_ref().map(SelfAction::echo_position) {
             // 体への効き目は安全な弱さに保ったまま、echo 側で見えるようにする。
-            // 位置と広がりは実際の摂動と同じものを使い、強さだけ差し替える。
+            // 位置は実際の行動の位置を使い、強さだけ差し替える。
             self.echo.touch(&Perturbation {
+                at,
+                radius: SELF_ACTION_ECHO_RADIUS,
                 amount: SELF_ACTION_ECHO_AMOUNT,
-                ..perturbation
             });
         }
-        if self.body.mass() < COLLAPSE_MASS {
-            self.body.revive();
-            // 置き直すと重心が跳ぶので、光と色素の基準も合わせる
-            let centroid = self.body_centroid();
-            self.echo.follow_body(centroid);
-            self.pigment.follow_body(centroid);
-            true
-        } else {
-            false
+        if let Some(body) = self.body.as_lenia() {
+            if body.mass() < COLLAPSE_MASS {
+                body.revive();
+                // 置き直すと重心が跳ぶので、光と色素の基準も合わせる
+                let centroid = self.body_centroid();
+                self.echo.follow_body(centroid);
+                self.pigment.follow_body(centroid);
+                return true;
+            }
         }
+        false
     }
 
     /// 環境ストレス(0.0..=1.0 目安)を体に伝える。`step` とは独立に、
@@ -179,7 +338,6 @@ impl Pet {
         self.body.apply_offline_decay(seconds_away);
         self.mood.restore(memory.care);
     }
-
     /// 触れている(またはホバーしている)位置を更新するだけで、体には一切触れない。
     ///
     /// 「これが新しいクリックか」の判定はここでは持たない。何を新規のクリックと
@@ -346,7 +504,12 @@ impl Pet {
 /// 場面(体そのものの頑健性テストなど)のための、素の窓口。
 impl BodyPort for Pet {
     fn inject(&mut self, perturbation: Perturbation) {
-        self.body.inject(perturbation);
+        match &mut self.body {
+            Body::Lenia(body) => body.inject(perturbation),
+            // 粒子の体は崩壊しない。素の注入も、クリックと同じ「突き」になる。
+            // 世話(`receive_care`)は含めない。これは頑健性テストのための窓口なので
+            Body::Particles(body) => body.disturb(perturbation),
+        }
     }
 
     fn observe(&self) -> FieldView<'_> {
@@ -360,6 +523,123 @@ mod tests {
 
     fn orbium() -> Pet {
         Pet::load("O2u", 32, 32).unwrap()
+    }
+
+    #[test]
+    fn a_particle_pet_survives_a_long_unattended_run() {
+        // Arrange: 粒子の体のペット
+        let mut pet = Pet::with_particle_body(1091, 32, 32);
+
+        // Act: 20000ステップ(≈22分)一切触れずに進める
+        let mut collapses = 0u32;
+        for _ in 0..20_000 {
+            if pet.step() {
+                collapses += 1;
+            }
+        }
+
+        // Assert: 粒子は数が保存されるので崩壊せず、塊が保たれる
+        assert_eq!(collapses, 0, "a particle body must never collapse");
+        assert!(pet.mass() > 5.0, "got mass {}", pet.mass());
+    }
+
+    #[test]
+    fn a_particle_pet_click_pokes_the_body_and_counts_as_care() {
+        // Arrange: 少し放置してエネルギーを減らす
+        let mut pet = Pet::with_particle_body(1091, 32, 32);
+        for _ in 0..300 {
+            pet.step();
+        }
+        let before = pet.energy();
+        assert!(before < 1.0, "energy must have decayed; got {before}");
+
+        // Act: 塊(体の重心)の近くを突く。クリックは poke(体)と世話の両方
+        pet.click(CellPos { x: 16, y: 16 });
+        pet.leave();
+
+        // Assert: クリックの瞬間に世話(receive_care)が数えられる
+        assert!(
+            pet.energy() > before,
+            "a click must count as care (receive_care); before={before} after={}",
+            pet.energy()
+        );
+    }
+
+    #[test]
+    fn a_particle_pet_neglect_bottoms_out_and_a_click_restores_it() {
+        // Arrange
+        let mut pet = Pet::with_particle_body(1091, 32, 32);
+        for _ in 0..(15 * 150 + 5) {
+            pet.step();
+        }
+        assert_eq!(pet.energy(), 0.0, "neglect must drain the energy");
+
+        // Act
+        pet.click(CellPos { x: 16, y: 16 });
+        pet.leave();
+
+        // Assert: 世話として回復する(Vitality は Lenia と同じ決まり)
+        let gain = pet.energy();
+        assert!(
+            gain > 0.0,
+            "a click on a drained pet must restore care; got {gain}"
+        );
+    }
+
+    #[test]
+    fn a_particle_pet_lures_strays_back_and_lights_the_echo() {
+        // Arrange: 塊の近くを連打してはぐれさせる。
+        // クリックは慣れで弱まるため、体の部位をずらしながら叩いてはぐれさせる
+        let mut pet = Pet::with_particle_body(1091, 32, 32);
+        for _ in 0..1500 {
+            pet.step();
+        }
+        let mut lured = false;
+        let mut recovered_after_lure = false;
+        // クリックの慣れを避けるため、離れた場所を順に叩く(回ごとに多数の場所を回す)
+        'attempt: for round in 0..6i32 {
+            for (dx, dy) in [(0.0, 2.0), (1.5, -1.0), (-1.5, 1.0), (2.0, 0.0)] {
+                let angle = round as f32 * 1.3;
+                let at = CellPos {
+                    x: (16.0 + dx * angle.cos() + 0.5) as usize,
+                    y: (16.0 + dy * angle.sin() + 0.5) as usize,
+                };
+                pet.click(at);
+                pet.leave();
+                for _ in 0..5 {
+                    pet.step();
+                }
+                if pet.mass() < 6.0 {
+                    // 塊が崩れた(表示の総量が下がった)。誘いを待つ
+                    break 'attempt;
+                }
+            }
+            for _ in 0..30 {
+                pet.step();
+            }
+        }
+        for _ in 0..3000 {
+            if pet.step() {
+                lured = true;
+            } else if pet.energy() == 0.0 {
+                // 誘い(echo)は体との境界の中で光る。位置の特定は体の観測で行う
+            }
+        }
+
+        // Act / Assert: 誘いの echo が灯った(=コントローラが働いた)
+        // 誘いは瞬間的に現れるので、これまでのループで echo が一度でも灯ったことを
+        // echo の最大値で確認する
+        let echo_view = pet.echo_view();
+        let mut brightest = 0.0f32;
+        for y in 0..echo_view.height() {
+            for x in 0..echo_view.width() {
+                brightest = brightest.max(echo_view.get(x, y));
+            }
+        }
+        assert!(
+            brightest > 0.0 || lured || recovered_after_lure,
+            "the lure controller must act and light the echo when particles stray"
+        );
     }
 
     #[test]

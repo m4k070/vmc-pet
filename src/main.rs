@@ -13,11 +13,12 @@ use shell::{LayerWindow, LayerWindowConfig};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let (animal_code, preview) = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE) {
+    let (animal_code, preview, _particle_seed) = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE) {
         Ok(cli::Action::Run {
             animal_code,
             preview,
-        }) => (animal_code, preview),
+            particle_seed,
+        }) => (animal_code, preview, particle_seed),
         Ok(cli::Action::Help) => {
             print!("{}", cli::USAGE);
             return;

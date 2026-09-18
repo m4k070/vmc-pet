@@ -42,7 +42,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::body_frame::{nearest_cell, sample_on_body};
-use crate::{accumulate_into, CellPos, Perturbation};
+use crate::{accumulate_into_toroidal, CellPos, Perturbation};
 
 /// heat の値域。Field の値域(0.0..=1.0)と揃えてある。
 const MIN_HEAT: f32 = 0.0;
@@ -50,13 +50,18 @@ const MAX_HEAT: f32 = 1.0;
 
 /// 触れた跡の記憶。体には一切影響しない。
 ///
-/// 内部の配列は体の重心を原点とした座標で並んでいる。
+/// 内部の配列は体の重心を原点とした座標で並んでいる(`toroidal` が true のとき)。
+/// `follow_body` を呼ばない体(壁で跳ね返る箱の体。粒子の体)では、重心が原点
+/// (0,0)のままなので、場の座標で記録・読み出しする。そのとき折り返しも無効に
+/// しないと、壁際に置かれた摂動の外周が場の反対側へ漏れて見える
 pub struct TouchEcho {
     width: usize,
     height: usize,
     heat: Vec<f32>,
     /// いまの体の重心(場の座標、小数)。
     body_centre: (f32, f32),
+    /// 加算の端を反対側へ折り返すか。原点 (0,0) 固定の体では false。
+    toroidal: bool,
 }
 
 impl TouchEcho {
@@ -67,7 +72,14 @@ impl TouchEcho {
             height,
             heat: vec![MIN_HEAT; width * height],
             body_centre: (0.0, 0.0),
+            toroidal: true,
         }
+    }
+
+    /// 折り返しを切る。壁で跳ね返る箱の体(粒子の体)用。`follow_body` を
+    /// 呼ばない(原点 (0,0) のまま)のとセットで使う。
+    pub fn without_wrap(&mut self) {
+        self.toroidal = false;
     }
 
     /// 体の重心(場の座標)を受け取る。体が進むたびに呼ぶ。
@@ -78,12 +90,13 @@ impl TouchEcho {
     /// 触れた位置に加算する。`Field::inject` と同じ山型・トーラス折り返しを共有する。
     ///
     /// `perturbation.at` は場の座標。いまの体の重心からの相対位置に直して記録する。
+    /// `toroidal` が false のときは折り返さず、範囲外は捨てる
     pub fn touch(&mut self, perturbation: &Perturbation) {
         let on_body = CellPos {
             x: nearest_cell(perturbation.at.x as f32 - self.body_centre.0, self.width),
             y: nearest_cell(perturbation.at.y as f32 - self.body_centre.1, self.height),
         };
-        accumulate_into(
+        accumulate_into_toroidal(
             &mut self.heat,
             self.width,
             self.height,
@@ -93,6 +106,7 @@ impl TouchEcho {
             },
             MIN_HEAT,
             MAX_HEAT,
+            self.toroidal,
         );
     }
 
