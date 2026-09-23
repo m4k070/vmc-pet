@@ -52,6 +52,11 @@ use std::thread;
 use std::time::Instant;
 
 use vmc_pet_body::particles::{ParticleParams, ParticleRng, ParticleWorld};
+// 体をまたぐコントローラの実験(issue #11)で、Lenia のコントローラをそのまま使う。
+// この example にも `Observation`(粒子の体の観測)があるので、別名で取り込む。
+use vmc_pet_body::{
+    AutonomousController, ControllerParams, Field, Observation as ControllerObservation,
+};
 
 /// 場の一辺(セル)。ペットの場と同じ。
 const FIELD: f32 = 32.0;
@@ -1011,6 +1016,14 @@ struct LureEpisode {
     idle_seconds: f32,
     /// はぐれた粒子がいた秒数。`burst_episode` だけが測る。
     stray_seconds: f32,
+    /// 突いた回数(`Nudge::Poke` を選んだ回数)。`burst_episode_nudged` だけが測る。
+    pokes: u32,
+    /// 突きが、はぐれた粒子を塊の方へ押した度合いの和(-1〜+1 を回数ぶん足したもの)。
+    ///
+    /// 突きは点から外向きに弾くので、押す向きは「突いた点 → はぐれ」。それが
+    /// 「はぐれ → 塊」と揃っていれば +1、逆向きなら -1。回数で割ると、その方策が
+    /// はぐれを塊へ押せているかが分かる(issue #11 スパイク2)。
+    toward_cluster: f32,
 }
 
 /// エネルギーが尽きたときの力の倍率(試験で崩れずに戻れた ×0.6)。
@@ -3199,8 +3212,12 @@ const REALISTIC_WINDOW: u32 = 3000;
 enum Nudge {
     /// 何もしない。
     None,
-    /// 最大の塊の重心へ、`radius` 以内の粒子を引く。
-    Lure { radius: f32, strength: f32 },
+    /// `at` へ、`radius` 以内の粒子を引く。
+    Lure {
+        at: (f32, f32),
+        radius: f32,
+        strength: f32,
+    },
     /// `at` から外向きに、`radius` 以内の粒子を弾く。
     Poke {
         at: (f32, f32),
@@ -3219,14 +3236,37 @@ fn burst_episode(
     policy: &dyn Fn(&BodyObservation) -> f32,
 ) -> LureEpisode {
     // 誘いだけを返す行動として、一般の形(`burst_episode_nudged`)に委ねる。
-    burst_episode_nudged(seed, trial, burst_seed, limits, &|observed| {
+    burst_episode_nudged(seed, trial, burst_seed, limits, &|observed, _| {
         let strength = policy(observed).clamp(0.0, MAX_LURE_STRENGTH);
         if strength > 0.0 {
-            Nudge::Lure { radius, strength }
+            Nudge::Lure {
+                at: observed.center,
+                radius,
+                strength,
+            }
         } else {
             Nudge::None
         }
     })
+}
+
+/// 突き `at` が、はぐれた粒子を塊の方へ押しているか(+1 なら塊へ、-1 なら塊から遠ざける)。
+///
+/// 突きは点から外向きに弾くので、はぐれが受ける力の向きは「突いた点 → はぐれ」。
+/// それが「はぐれ → 塊」と揃っているかを見る。はぐれが無いときと、距離が縮退して
+/// 向きが定まらないときは 0。
+fn pushes_toward_cluster(at: (f32, f32), observed: &BodyObservation) -> f32 {
+    let Some(stray) = observed.stray_center else {
+        return 0.0;
+    };
+    let (push_x, push_y) = (stray.0 - at.0, stray.1 - at.1);
+    let (home_x, home_y) = (observed.center.0 - stray.0, observed.center.1 - stray.1);
+    let push = (push_x * push_x + push_y * push_y).sqrt();
+    let home = (home_x * home_x + home_y * home_y).sqrt();
+    if push < 1e-3 || home < 1e-3 {
+        return 0.0;
+    }
+    (push_x * home_x + push_y * home_y) / (push * home)
 }
 
 /// 実際の連打で崩し、1 秒ごとに `policy` が選んだ働きかけ(誘い・突き・何もしない)を効かせて
@@ -3236,7 +3276,7 @@ fn burst_episode_nudged(
     trial: u64,
     burst_seed: u64,
     limits: SpeedLimits,
-    policy: &dyn Fn(&BodyObservation) -> Nudge,
+    policy: &dyn Fn(&BodyObservation, &ParticleWorld) -> Nudge,
 ) -> LureEpisode {
     let mut world = started_world(seed, trial);
     let mut rng = ParticleRng::new(burst_seed);
@@ -3271,18 +3311,18 @@ fn burst_episode_nudged(
     for step in 1..=REALISTIC_WINDOW {
         if step % SAMPLE_EVERY == 1 {
             let observed = observe_body(&world);
-            let nudge = policy(&observed);
+            let nudge = policy(&observed, &world);
             acting = !matches!(nudge, Nudge::None);
             world.lure = None;
             match nudge {
                 Nudge::None => {}
-                Nudge::Lure { radius, strength } => {
+                Nudge::Lure {
+                    at,
+                    radius,
+                    strength,
+                } => {
                     world.lure_radius = radius;
-                    world.lure = Some((
-                        observed.center.0,
-                        observed.center.1,
-                        strength.clamp(0.0, MAX_LURE_STRENGTH),
-                    ));
+                    world.lure = Some((at.0, at.1, strength.clamp(0.0, MAX_LURE_STRENGTH)));
                 }
                 Nudge::Poke {
                     at,
@@ -3292,7 +3332,12 @@ fn burst_episode_nudged(
                     world.poke(at.0, at.1, radius, impulse);
                     // 突きは 1 秒に 1 回なので、1 秒ぶんの手間としてそのまま足す。
                     run.effort += impulse / (REALISTIC_WINDOW / SAMPLE_EVERY) as f32;
+                    run.pokes += 1;
+                    run.toward_cluster += pushes_toward_cluster(at, &observed);
                 }
+            }
+            if acting {
+                run.active += 1.0 / (REALISTIC_WINDOW / SAMPLE_EVERY) as f32;
             }
             if acting && observed.strays == 0 {
                 run.idle_seconds += 1.0;
@@ -3655,6 +3700,13 @@ fn main() {
                 .collect();
             realistic(&seeds);
         }
+        Some("lenia-policy") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            lenia_policy(&seeds);
+        }
         Some("poke-vs-lure") => {
             let seeds: Vec<u64> = args[1..]
                 .iter()
@@ -3778,25 +3830,27 @@ fn poke_vs_lure(seeds: &[u64]) {
         let (average_speed, limits) = normal_speed(seed);
         let scenes: Vec<(u64, u64)> = (0..TRIALS).map(|t| (t, seed * 7919 + t)).collect();
 
-        let run_all = |policy: &(dyn Fn(&BodyObservation) -> Nudge + Sync)| -> Summary {
-            let runs: Vec<LureEpisode> = thread::scope(|scope| {
-                let handles: Vec<_> = scenes
-                    .iter()
-                    .map(|&(trial, burst_seed)| {
-                        scope.spawn(move || {
-                            burst_episode_nudged(seed, trial, burst_seed, limits, policy)
+        let run_all =
+            |policy: &(dyn Fn(&BodyObservation, &ParticleWorld) -> Nudge + Sync)| -> Summary {
+                let runs: Vec<LureEpisode> = thread::scope(|scope| {
+                    let handles: Vec<_> = scenes
+                        .iter()
+                        .map(|&(trial, burst_seed)| {
+                            scope.spawn(move || {
+                                burst_episode_nudged(seed, trial, burst_seed, limits, policy)
+                            })
                         })
-                    })
-                    .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
-            });
-            Summary::of(&runs, average_speed)
-        };
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                Summary::of(&runs, average_speed)
+            };
 
-        let nothing = run_all(&|_| Nudge::None);
-        let lure = run_all(&|observed: &BodyObservation| {
+        let nothing = run_all(&|_, _| Nudge::None);
+        let lure = run_all(&|observed: &BodyObservation, _: &ParticleWorld| {
             if observed.strays >= 1 {
                 Nudge::Lure {
+                    at: observed.center,
                     radius: LEARNED_LURE_RADIUS,
                     strength: LEARNED_LURE_STRENGTH,
                 }
@@ -3809,7 +3863,7 @@ fn poke_vs_lure(seeds: &[u64]) {
         for &offset in &POKE_OFFSETS {
             for &radius in &POKE_RADII {
                 for &impulse in &POKE_IMPULSES {
-                    let summary = run_all(&move |observed: &BodyObservation| {
+                    let summary = run_all(&move |observed: &BodyObservation, _: &ParticleWorld| {
                         let Some(stray) = observed.stray_center else {
                             return Nudge::None;
                         };
@@ -3876,6 +3930,10 @@ struct Summary {
     /// 働きかけているあいだの、ふだんの揺らぎを超えた速さの和(秒あたり)。
     excess: f32,
     trials: usize,
+    /// 働きかけていた秒の割合。
+    acting: f32,
+    /// 突きがはぐれを塊の方へ押した度合いの平均(+1 なら塊へ、-1 なら遠ざける)。突かない方策では NaN。
+    toward_cluster: f32,
 }
 
 impl Summary {
@@ -3891,13 +3949,252 @@ impl Summary {
                 .sum::<f32>()
                 / count,
             trials: runs.len(),
+            acting: runs.iter().map(|r| r.active).sum::<f32>() / count,
+            toward_cluster: {
+                let pokes: u32 = runs.iter().map(|r| r.pokes).sum();
+                if pokes == 0 {
+                    f32::NAN
+                } else {
+                    runs.iter().map(|r| r.toward_cluster).sum::<f32>() / pokes as f32
+                }
+            },
         }
     }
 
     fn row(&self) -> String {
+        let toward = if self.toward_cluster.is_nan() {
+            "    -".to_string()
+        } else {
+            format!("{:5.2}", self.toward_cluster)
+        };
         format!(
-            "{:14.1} | {:10.1} | {:5}/{:<4} | {:.3}",
-            self.stray_seconds, self.seconds, self.broken, self.trials, self.excess
+            "{:14.1} | {:10.1} | {:5}/{:<4} | {:.3} | {:6.0}% | {toward}",
+            self.stray_seconds,
+            self.seconds,
+            self.broken,
+            self.trials,
+            self.excess,
+            self.acting * 100.0
         )
     }
+}
+
+/// 粒子を場へ配る(`ParticleBody::rasterize` と同じ手順・同じ重み)。ここでは箱と場が
+/// 同じ大きさ(32)なので拡大はしない。
+fn rasterize_world(world: &ParticleWorld, size: usize) -> Field {
+    /// 粒子1個が場のセルへ配る値の重み(`particles_body::PARTICLE_WEIGHT` と同じ)。
+    const PARTICLE_WEIGHT: f32 = 0.35;
+    let mut cells = vec![0.0f32; size * size];
+    for i in 0..world.x.len() {
+        let (u, v) = (world.x[i] - 0.5, world.y[i] - 0.5);
+        let (left, top) = (u.floor() as isize, v.floor() as isize);
+        let (gx, gy) = (u - u.floor(), v - v.floor());
+        for (cell_x, cell_y, share) in [
+            (left, top, (1.0 - gx) * (1.0 - gy)),
+            (left + 1, top, gx * (1.0 - gy)),
+            (left, top + 1, (1.0 - gx) * gy),
+            (left + 1, top + 1, gx * gy),
+        ] {
+            if cell_x < 0 || cell_y < 0 || cell_x >= size as isize || cell_y >= size as isize {
+                continue;
+            }
+            let index = cell_y as usize * size + cell_x as usize;
+            cells[index] = (cells[index] + PARTICLE_WEIGHT * share).min(1.0);
+        }
+    }
+    let mut field = Field::new(size, size);
+    field.map(|x, y, _| cells[y * size + x]);
+    field
+}
+
+/// 【スパイク2】共通の観測(体の場)だけで、いまの Lenia のコントローラが粒子の体を扱えるか。
+///
+/// issue #11。スパイク1で、行動の語彙(位置と強さの摂動)は体をまたげると分かった。
+/// 残るのは観測と方策で、両方の体が出せる観測は「体の場のビューとエネルギー」だけ。
+/// いまの Lenia のコントローラ(`AutonomousController`: 場の歪度が閾値を超えたら、
+/// 重心から重い側へ少し離れた点に注入)を、粒子をラスタ化した場にそのまま繋いで、
+/// はぐれを戻せるかを測る。
+///
+/// 粒子の体では、注入は `poke`(その点から外向きに弾く)に翻訳される
+/// (`ParticleBody::disturb` と同じ換算)。同じ `Perturbation` でも体での意味が違うので、
+/// 「押す向きが塊へ揃っているか」もあわせて測る。
+fn lenia_policy(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    /// 場の一辺(セル)。箱と同じ大きさにして、セル座標と箱の座標を一致させる。
+    const CELLS: usize = 32;
+    /// クリックの強さ(`Perturbation::amount`)を poke の速さに伸ばす倍率
+    /// (`particles_body::POKE_IMPULSE_PER_AMOUNT` と同じ)。
+    const POKE_IMPULSE_PER_AMOUNT: f32 = 5.0;
+    /// 既定の突きの強さを何倍にするか。既定(0.0239)のままでは、スパイク1で効いた
+    /// 強さ(poke 0.8 = amount 0.16)に遠く届かないため。
+    const AMOUNT_SCALES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    /// スパイク1で最良だった突き(はぐれの外へ 2 セル・届く距離 10・強さ 0.80)。
+    const SPIKE1_OFFSET: f32 = 2.0;
+    const SPIKE1_RADIUS: f32 = 10.0;
+    const SPIKE1_IMPULSE: f32 = 0.8;
+    const MIN_SEPARATION: f32 = 0.5;
+    /// 学んだ誘い(docs/experiments/controller-learning.md「実際の連打で学ばせ直す」)。
+    const LEARNED_LURE_STRENGTH: f32 = 0.13;
+    const LEARNED_LURE_RADIUS: f32 = 39.0;
+
+    let started = Instant::now();
+    for &seed in seeds {
+        let (average_speed, limits) = normal_speed(seed);
+        let scenes: Vec<(u64, u64)> = (0..TRIALS).map(|t| (t, seed * 7919 + t)).collect();
+
+        let run_all =
+            |policy: &(dyn Fn(&BodyObservation, &ParticleWorld) -> Nudge + Sync)| -> Summary {
+                let runs: Vec<LureEpisode> = thread::scope(|scope| {
+                    let handles: Vec<_> = scenes
+                        .iter()
+                        .map(|&(trial, burst_seed)| {
+                            scope.spawn(move || {
+                                burst_episode_nudged(seed, trial, burst_seed, limits, policy)
+                            })
+                        })
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                Summary::of(&runs, average_speed)
+            };
+
+        let nothing = run_all(&|_, _| Nudge::None);
+        let lure = run_all(&|observed: &BodyObservation, _: &ParticleWorld| {
+            if observed.strays >= 1 {
+                Nudge::Lure {
+                    at: observed.center,
+                    radius: LEARNED_LURE_RADIUS,
+                    strength: LEARNED_LURE_STRENGTH,
+                }
+            } else {
+                Nudge::None
+            }
+        });
+        let spike1 = run_all(&|observed: &BodyObservation, _: &ParticleWorld| {
+            let Some(stray) = observed.stray_center else {
+                return Nudge::None;
+            };
+            let (dx, dy) = (stray.0 - observed.center.0, stray.1 - observed.center.1);
+            let separation = (dx * dx + dy * dy).sqrt();
+            if separation < MIN_SEPARATION {
+                return Nudge::None;
+            }
+            let (ux, uy) = (dx / separation, dy / separation);
+            Nudge::Poke {
+                at: (stray.0 + ux * SPIKE1_OFFSET, stray.1 + uy * SPIKE1_OFFSET),
+                radius: SPIKE1_RADIUS,
+                impulse: SPIKE1_IMPULSE,
+            }
+        });
+
+        let base = ControllerParams::default();
+        // 同じコントローラの出力を、体が「引く」と解釈したらどうなるか。Lenia では
+        // 注入はその点に体を集める働きをするので、粒子で意味をそろえるならこちら
+        // ではないか、という仮説を測る。
+        let pulling_rows: Vec<(f32, Summary)> = AMOUNT_SCALES
+            .iter()
+            .map(|&scale| {
+                let summary = run_all(&move |_: &BodyObservation, world: &ParticleWorld| {
+                    let field = rasterize_world(world, CELLS);
+                    let mut controller = AutonomousController::with_params(ControllerParams {
+                        evaluate_every_steps: 1,
+                        nudge_amount: base.nudge_amount * scale,
+                        ..base
+                    });
+                    let observation = ControllerObservation {
+                        field: field.view(),
+                        energy: 1.0,
+                    };
+                    let Some(perturbation) = controller.maybe_act(observation) else {
+                        return Nudge::None;
+                    };
+                    Nudge::Lure {
+                        at: (
+                            perturbation.at.x as f32 + 0.5,
+                            perturbation.at.y as f32 + 0.5,
+                        ),
+                        radius: perturbation.radius,
+                        strength: perturbation.amount * POKE_IMPULSE_PER_AMOUNT,
+                    }
+                });
+                (scale, summary)
+            })
+            .collect();
+        let controller_rows: Vec<(f32, Summary)> = AMOUNT_SCALES
+            .iter()
+            .map(|&scale| {
+                let summary = run_all(&move |_: &BodyObservation, world: &ParticleWorld| {
+                    let field = rasterize_world(world, CELLS);
+                    // 判断の頻度は、ほかの方策(1 秒に 1 回)とそろえる。毎回作り直すことで、
+                    // コントローラの中の「何ステップ経ったか」を持ち越さない。
+                    let mut controller = AutonomousController::with_params(ControllerParams {
+                        evaluate_every_steps: 1,
+                        nudge_amount: base.nudge_amount * scale,
+                        ..base
+                    });
+                    let observation = ControllerObservation {
+                        field: field.view(),
+                        energy: 1.0,
+                    };
+                    let Some(perturbation) = controller.maybe_act(observation) else {
+                        return Nudge::None;
+                    };
+                    Nudge::Poke {
+                        // セルの中心を箱の座標として使う(箱と場が同じ大きさ)。
+                        at: (
+                            perturbation.at.x as f32 + 0.5,
+                            perturbation.at.y as f32 + 0.5,
+                        ),
+                        radius: perturbation.radius,
+                        impulse: perturbation.amount * POKE_IMPULSE_PER_AMOUNT,
+                    }
+                });
+                (scale, summary)
+            })
+            .collect();
+
+        println!(
+            "\n==== 候補 {seed}: いまの Lenia のコントローラで粒子の体を扱えるか({TRIALS} 試行、連打で崩してから {:.0} 秒) ====\n",
+            REALISTIC_WINDOW as f32 / 15.0
+        );
+        println!(
+            "  {:<34} | はぐれがいた秒 | 戻るまで秒 | 割れたまま | 超過 | 働きかけ | 塊へ押す",
+            "方策"
+        );
+        println!("  {:<34} | {}", "何もしない", nothing.row());
+        println!(
+            "  {:<34} | {}",
+            format!("学んだ誘い(引く、強さ {LEARNED_LURE_STRENGTH})"),
+            lure.row()
+        );
+        println!(
+            "  {:<34} | {}",
+            format!("スパイク1の突き(はぐれの外へ {SPIKE1_OFFSET:.0})"),
+            spike1.row()
+        );
+        for (scale, summary) in &pulling_rows {
+            println!(
+                "  {:<34} | {}",
+                format!(
+                    "同じ方策を引くと解釈 ×{scale:.0}(強さ {:.3})",
+                    base.nudge_amount * scale
+                ),
+                summary.row()
+            );
+        }
+        println!(
+            "\n  ※「引くと解釈」は強さ {MAX_LURE_STRENGTH} で頭打ちになるので、×2 以上は同じ行動になる"
+        );
+        for (scale, summary) in &controller_rows {
+            println!(
+                "  {:<34} | {}",
+                format!(
+                    "Lenia のコントローラ ×{scale:.0}(強さ {:.3})",
+                    base.nudge_amount * scale
+                ),
+                summary.row()
+            );
+        }
+    }
+    println!("\n所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
 }
