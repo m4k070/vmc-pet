@@ -62,14 +62,17 @@ use vmc_pet_cores3::{
 };
 
 use vmc_pet_body::appearance::{Color, DOT_GAP_RATIO, appearance_of};
+use vmc_pet_body::particles_body::{
+    BOX_SIZE as PARTICLE_BOX_SIZE, VIEW_SIZE as PARTICLE_VIEW_SIZE,
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// 場の解像度。縦は PC版と同じ 32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
+/// Lenia の体の場の解像度。縦は PC版と同じ 32(docs/DESIGN.md「場の解像度と表示解像度」参照)。
 /// 横は画面(320x240)のアスペクト比に合わせて広げてある。43 は 320/(240/32) の
 /// 近似値で、セルピッチが縦横ほぼ等しくなる(横7.44px・縦7.5px)ように選んだ。
-const FIELD_WIDTH: usize = 43;
-const FIELD_HEIGHT: usize = 32;
+const LENIA_FIELD_WIDTH: usize = 43;
+const LENIA_FIELD_HEIGHT: usize = 32;
 
 /// 場を進める頻度の目安(PC版の step_rate と同じ 15/s)。
 const STEP_INTERVAL: Duration = Duration::from_millis(66);
@@ -102,6 +105,18 @@ const PREVIEW_MOOD: Option<&str> = option_env!("VMC_PET_PREVIEW_MOOD");
 /// その生物を元気とタッチだけつないで動かす(`vmc_pet_cores3::multichannel`)。記憶は読みも書きも
 /// しない。見終わったら指定なしで書き込み直す。
 const MULTICHANNEL_ID: Option<&str> = option_env!("VMC_PET_MULTICHANNEL");
+
+/// 【実験】粒子の体を体にするときの候補番号(ビルド時の環境変数)。
+///
+/// `VMC_PET_PARTICLES=1091 cargo run --release` のように書き込むと、Lenia の代わりに
+/// 粒子の体(`vmc_pet_body::particles_body`)で立てる。ペットの仕組み(エネルギー・慣れ・
+/// 色素・気分・echo・記憶)は PC 版(`--animal particles:<番号>`)とまったく同じで、
+/// 記憶も同じように読み書きする(体が入れ替わっても、覚えたエネルギーと生活リズムの
+/// 意味は変わらないため)。
+///
+/// 体は PC 版と同じ 32×32・箱 16 セルのまま、画面の中央に正方形で描く
+/// (docs/M5STACK.md「粒子の体を第二の体でも動かす」)。
+const PARTICLE_SEED: Option<&str> = option_env!("VMC_PET_PARTICLES");
 
 /// echo(入力の可視化)の、タッチ読み取りごとの減衰率。
 /// PC版(app.rs の ECHO_DECAY_PER_FRAME)と同じ考え方で、体の時間とは独立に
@@ -138,23 +153,39 @@ struct DotRenderer {
     /// 実際に描いた場所」を覚えておかないと、消す円を今回の(ずれた)位置に
     /// 描いてしまい、古い位置のドットを消し損ねて残像になる。
     previous_center: Vec<Point>,
-    cell_pitch_x: f32,
-    cell_pitch_y: f32,
+    /// 描く場の大きさ(セル)。体によって変わる(Lenia は 43×32、粒子の体は 32×32)。
+    field_width: usize,
+    field_height: usize,
+    /// セルの間隔(ピクセル)。縦横で同じ値を使い、場のアスペクト比に関わらず
+    /// セルが正方形に並ぶようにする。
+    cell_pitch: f32,
+    /// 場を画面の中央に置くための余白(ピクセル)。場と画面のアスペクト比が違うとき
+    /// (粒子の体の 32×32 を 320×240 の画面に置くとき)に左右へ黒帯ができる。
+    offset_x: f32,
+    offset_y: f32,
     max_radius: f32,
 }
 
 impl DotRenderer {
-    fn new(screen_width: u32, screen_height: u32) -> Self {
-        let cell_pitch_x = screen_width as f32 / FIELD_WIDTH as f32;
-        let cell_pitch_y = screen_height as f32 / FIELD_HEIGHT as f32;
-        // ドットの大きさは、短い方のピッチを基準に決める(重なりを防ぐため)。
-        let max_radius = cell_pitch_x.min(cell_pitch_y) * 0.5 * (1.0 - DOT_GAP_RATIO);
+    fn new(screen_width: u32, screen_height: u32, field_width: usize, field_height: usize) -> Self {
+        // 縦横に同じピッチを使い、画面からはみ出さない方(短い方)に合わせる。
+        // Lenia の 43×32 は元から縦横のピッチがほぼ等しくなるよう選んだ大きさなので
+        // 見え方は変わらない(横7.44px・縦7.5px → 両方7.44px)。粒子の体の 32×32 は
+        // 画面中央に 240×240 の正方形として置かれ、左右に 40px ずつ黒帯ができる。
+        let cell_pitch = (screen_width as f32 / field_width as f32)
+            .min(screen_height as f32 / field_height as f32);
+        let offset_x = (screen_width as f32 - cell_pitch * field_width as f32) / 2.0;
+        let offset_y = (screen_height as f32 - cell_pitch * field_height as f32) / 2.0;
+        let max_radius = cell_pitch * 0.5 * (1.0 - DOT_GAP_RATIO);
         Self {
-            previous_radius: vec![0; FIELD_WIDTH * FIELD_HEIGHT],
-            previous_color: vec![BACKGROUND_COLOR; FIELD_WIDTH * FIELD_HEIGHT],
-            previous_center: vec![Point::zero(); FIELD_WIDTH * FIELD_HEIGHT],
-            cell_pitch_x,
-            cell_pitch_y,
+            previous_radius: vec![0; field_width * field_height],
+            previous_color: vec![BACKGROUND_COLOR; field_width * field_height],
+            previous_center: vec![Point::zero(); field_width * field_height],
+            field_width,
+            field_height,
+            cell_pitch,
+            offset_x,
+            offset_y,
             max_radius,
         }
     }
@@ -165,19 +196,29 @@ impl DotRenderer {
     /// 小数部が画面上のスロットとのずれをどれだけ補正するかを決める。
     /// `DotRenderer::update` が描く位置とずれないよう、同じ変換をここでも行う
     /// (PC版の `DotGrid::cell_at` と同じ考え方)。
+    ///
+    /// 場を中央に置いたときにできる黒帯(粒子の体の左右 40px)を触っても、
+    /// 引いた余白のぶんだけ列が範囲の外に出るので `None` になる。ここで弾かないと、
+    /// 下の `rem_euclid` が場の反対側へ折り返して、画面の外のタッチが体に当たる。
     fn cell_at(&self, screen_x: i32, screen_y: i32, origin: (f32, f32)) -> Option<CellPos> {
         let cell_origin_x = libm::floorf(origin.0) as i32;
         let cell_origin_y = libm::floorf(origin.1) as i32;
         let shift_x = origin.0 - cell_origin_x as f32;
         let shift_y = origin.1 - cell_origin_y as f32;
 
-        let column = libm::floorf(screen_x as f32 / self.cell_pitch_x + shift_x) as i32;
-        let row = libm::floorf(screen_y as f32 / self.cell_pitch_y + shift_y) as i32;
-        if column < 0 || column >= FIELD_WIDTH as i32 || row < 0 || row >= FIELD_HEIGHT as i32 {
+        let column =
+            libm::floorf((screen_x as f32 - self.offset_x) / self.cell_pitch + shift_x) as i32;
+        let row =
+            libm::floorf((screen_y as f32 - self.offset_y) / self.cell_pitch + shift_y) as i32;
+        if column < 0
+            || column >= self.field_width as i32
+            || row < 0
+            || row >= self.field_height as i32
+        {
             return None;
         }
-        let field_x = (column + cell_origin_x).rem_euclid(FIELD_WIDTH as i32);
-        let field_y = (row + cell_origin_y).rem_euclid(FIELD_HEIGHT as i32);
+        let field_x = (column + cell_origin_x).rem_euclid(self.field_width as i32);
+        let field_y = (row + cell_origin_y).rem_euclid(self.field_height as i32);
         Some(CellPos {
             x: field_x as usize,
             y: field_y as usize,
@@ -199,15 +240,15 @@ impl DotRenderer {
         let shift_x = origin.0 - cell_origin_x as f32;
         let shift_y = origin.1 - cell_origin_y as f32;
 
-        for row in 0..FIELD_HEIGHT {
-            for column in 0..FIELD_WIDTH {
+        for row in 0..self.field_height {
+            for column in 0..self.field_width {
                 // 画面のスロット(column, row)には、カメラの原点ぶんだけずらした
                 // 場のセルを表示する(dot_grid.rs の pool_cell と同じ考え方だが、
                 // 場と画面が1:1なのでプーリングは要らない)。
                 let field_x =
-                    ((column as i32 + cell_origin_x).rem_euclid(FIELD_WIDTH as i32)) as usize;
+                    ((column as i32 + cell_origin_x).rem_euclid(self.field_width as i32)) as usize;
                 let field_y =
-                    ((row as i32 + cell_origin_y).rem_euclid(FIELD_HEIGHT as i32)) as usize;
+                    ((row as i32 + cell_origin_y).rem_euclid(self.field_height as i32)) as usize;
                 let body_value = field.get(field_x, field_y);
                 let echo_value = echo.get(field_x, field_y);
                 // 1セルの見え方(大きさ・色)は PC版と共有する決まりに従う
@@ -215,7 +256,7 @@ impl DotRenderer {
                 // ドットの配置だけ。
                 let tint = pigment.get(field_x, field_y);
                 let appearance = appearance_of(body_value, echo_value, tint);
-                let index = row * FIELD_WIDTH + column;
+                let index = row * self.field_width + column;
                 if appearance.is_none() && self.previous_radius[index] == 0 {
                     continue;
                 }
@@ -232,8 +273,8 @@ impl DotRenderer {
                 // 画面上の位置(shift)を別々にずらす。これにより、生物の実際の
                 // 動きが1セル未満の単位でも滑らかに見える(dot_grid.rs 参照)。
                 let center = Point::new(
-                    (self.cell_pitch_x * (column as f32 + 0.5 - shift_x)) as i32,
-                    (self.cell_pitch_y * (row as f32 + 0.5 - shift_y)) as i32,
+                    (self.offset_x + self.cell_pitch * (column as f32 + 0.5 - shift_x)) as i32,
+                    (self.offset_y + self.cell_pitch * (row as f32 + 0.5 - shift_y)) as i32,
                 );
 
                 let previous_radius = self.previous_radius[index];
@@ -473,8 +514,30 @@ fn main() -> ! {
     })
     .expect("initialize CoreS3 display");
 
+    // 【実験】粒子の体で立てるときは、場が PC 版と同じ 32×32 になる(Lenia は 43×32)。
+    // 番号が読めなければ、いつもの Lenia の体で起動する。
+    let particle_seed = PARTICLE_SEED.and_then(|text| match text.parse::<u64>() {
+        Ok(seed) => Some(seed),
+        Err(_) => {
+            esp_println::println!(
+                "vmc-pet-cores3: unknown VMC_PET_PARTICLES={text} \
+                 (expected a candidate number like 1091); running the Lenia body"
+            );
+            None
+        }
+    });
+    let (field_width, field_height) = match particle_seed {
+        Some(_) => (PARTICLE_VIEW_SIZE, PARTICLE_VIEW_SIZE),
+        None => (LENIA_FIELD_WIDTH, LENIA_FIELD_HEIGHT),
+    };
+
     parts.display.clear(BACKGROUND_COLOR).expect("clear");
-    let mut renderer = DotRenderer::new(board.display.width as u32, board.display.height as u32);
+    let mut renderer = DotRenderer::new(
+        board.display.width as u32,
+        board.display.height as u32,
+        field_width,
+        field_height,
+    );
 
     // タッチコントローラ(FT6336U)と RTC(BM8563)は同じ内部I²Cバスに
     // いるので、バスを共有する。`main` は決して return しないため、
@@ -553,16 +616,32 @@ fn main() -> ! {
         }
     };
 
-    esp_println::println!("vmc-pet-cores3: loading Orbium unicaudatus");
-    let animal = load_animal("O2u").expect("assets/animals.json に O2u が無い");
-    esp_println::println!(
-        "vmc-pet-cores3: loaded {} R={} T={}",
-        animal.name,
-        animal.params.radius,
-        animal.params.time_divisor
-    );
-
-    let mut pet = Pet::new(animal, FIELD_WIDTH, FIELD_HEIGHT);
+    // 体を立てる。粒子の体は箱の全体をそのまま映す(表示は動かない)ので、
+    // カメラの追従もしない(PC 版 `app.rs` の `fixed_origin` と同じ扱い)。
+    let (mut pet, fixed_origin) = match particle_seed {
+        Some(seed) => {
+            esp_println::println!(
+                "vmc-pet-cores3: running particle body #{seed} \
+                 (a {PARTICLE_BOX_SIZE}-cell box drawn as {field_width}x{field_height} \
+                 in the middle of the screen); the view is fixed, no camera"
+            );
+            (
+                Pet::with_particle_body(seed, field_width, field_height),
+                true,
+            )
+        }
+        None => {
+            esp_println::println!("vmc-pet-cores3: loading Orbium unicaudatus");
+            let animal = load_animal("O2u").expect("assets/animals.json に O2u が無い");
+            esp_println::println!(
+                "vmc-pet-cores3: loaded {} R={} T={}",
+                animal.name,
+                animal.params.radius,
+                animal.params.time_divisor
+            );
+            (Pet::new(animal, field_width, field_height), false)
+        }
+    };
     if let Some(state) = preview {
         let (anticipation, disappointment) = state.anticipation_and_disappointment();
         pet.pin_mood(anticipation, disappointment);
@@ -600,6 +679,9 @@ fn main() -> ! {
 
     let mut step: u32 = 0;
     let mut last_step = Instant::now();
+    // 体の重さを 15 ステップごとに測る(実時間と、体の計算だけの時間)。
+    let mut last_fifteen_steps = Instant::now();
+    let mut body_micros: u64 = 0;
     let mut last_saved = Instant::now();
     let mut last_clock_read = Instant::now();
     loop {
@@ -641,11 +723,19 @@ fn main() -> ! {
         // 以前ここを毎ポーリング(40ms)無条件に呼んでいたため、描画頻度が
         // 実質2倍近くに増え、フレームレート全体が悪化していた。
         if last_step.elapsed() >= STEP_INTERVAL {
+            // 体の重さ(1ステップの計算時間)は、描画やタッチのポーリングを含む
+            // 実時間とは別に足し込む。体を差し替えたときに何がどれだけ軽くなったかは
+            // この2つを並べないと分からない(docs/M5STACK.md「粒子の体を第二の体でも
+            // 動かす」の見積もりと比べる)。
+            let body_started = Instant::now();
             let collapsed = pet.step();
+            body_micros += body_started.elapsed().as_micros();
             last_step += STEP_INTERVAL;
             step += 1;
 
-            camera.follow(pet.observe(), FIELD_WIDTH, FIELD_HEIGHT);
+            if !fixed_origin {
+                camera.follow(pet.observe(), field_width, field_height);
+            }
             renderer.update(
                 &mut parts.display,
                 pet.observe(),
@@ -659,12 +749,16 @@ fn main() -> ! {
             }
             if step.is_multiple_of(15) {
                 esp_println::println!(
-                    "vmc-pet-cores3: step={step:5} mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2}",
+                    "vmc-pet-cores3: step={step:5} 15 steps in {}ms (body {}ms) mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2}",
+                    last_fifteen_steps.elapsed().as_millis(),
+                    body_micros / 1000,
                     pet.mass(),
                     pet.energy(),
                     pet.anticipation(),
                     pet.disappointment()
                 );
+                last_fifteen_steps = Instant::now();
+                body_micros = 0;
             }
         }
 
