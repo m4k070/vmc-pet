@@ -17,6 +17,14 @@
 //! かったときに何を削れるかを先に知っておくため(誘いの判定は preview では1秒ごと
 //! だった。毎ステップ測るのを戻せば、その分は 15 分の 1 になる)。
 //!
+//! **PC 比の外挿は当たった。外したのは基準の取り方だった。** 実機では粒子の体が
+//! Lenia の ×0.193(ここで測った ×0.195 とほぼ一致)で、体の計算は 4.6 ms/ステップ、
+//! 15 ステップ 0.96〜1.01 秒と設計どおりの 15 step/s に届いた。一方この最初の版は、
+//! 「15 ステップ 1.33 秒」をまるごと体の計算だと読んで 1 ステップ 88.7 ms を基準にし、
+//! 「15 ステップ 0.26 秒」という外れた見積もりを出していた。実際の M5Stack の体は
+//! 23.8 ms/ステップで、残りは描画とタッチのポーリングの眠りだった
+//! (docs/M5STACK.md「粒子の体を第二の体でも動かす」)。
+//!
 //! ```sh
 //! cargo run --release -p vmc-pet-body --example particle_cost
 //! ```
@@ -38,11 +46,16 @@ const LENIA_MEASURED_STEPS: u32 = 5_000;
 /// M5Stack の体の場(画面のアスペクト比に合わせた大きさ)。
 const M5_FIELD_WIDTH: usize = 43;
 const M5_FIELD_HEIGHT: usize = 32;
-/// M5Stack(240MHz)で実測した、いまの Lenia の1ステップ(秒)。
-/// 15 ステップ 1.33 秒(docs/M5STACK.md)から。
-const M5_LENIA_STEP_SECONDS: f64 = 1.33 / 15.0;
-/// 体のステップの目標(15 ステップ/秒)。
-const TARGET_STEP_SECONDS: f64 = 1.0 / 15.0;
+/// M5Stack(240MHz)で実測した、いまの Lenia の**体の計算だけ**の1ステップ(秒)。
+///
+/// 15 ステップの実時間 1348 ms のうち、体の計算は 357 ms だった
+/// (docs/M5STACK.md「粒子の体を第二の体でも動かす」)。実時間には描画と、タッチの
+/// ポーリングの眠り(40 ms)が含まれるので、体の重さの基準には使えない。
+/// 最初にここを取り違えて(1.33 秒を体の計算と読んで)見積もりを外した。
+const M5_LENIA_BODY_STEP_SECONDS: f64 = 0.357 / 15.0;
+/// 体を進める刻み(秒)。1 ループ(眠り + 体 + 描画)がこれに収まらないと、
+/// 体の時間が実時間に追いつけなくなる。
+const STEP_INTERVAL_SECONDS: f64 = 0.066;
 
 fn main() {
     let params = ParticleParams::from_seed(PARTICLE_SEED);
@@ -69,17 +82,18 @@ fn main() {
     print_row("Lenia の体(43×32、O2u)", lenia_step, lenia_step);
 
     let ratio = body_step / lenia_step;
-    let estimated = M5_LENIA_STEP_SECONDS * ratio;
+    let estimated = M5_LENIA_BODY_STEP_SECONDS * ratio;
     println!(
-        "\nM5Stack の見積もり: {:.1} ms/ステップ(いまの Lenia の実測 {:.1} ms × {:.2})",
+        "\nM5Stack の見積もり: 体の計算 {:.1} ms/ステップ(実測した Lenia の体 {:.1} ms × {:.3})",
         estimated * 1e3,
-        M5_LENIA_STEP_SECONDS * 1e3,
+        M5_LENIA_BODY_STEP_SECONDS * 1e3,
         ratio
     );
     println!(
-        "15 ステップ {:.2} 秒(目標 1.00 秒、いまの体は 1.33 秒)。目標に{}",
-        estimated * 15.0,
-        if estimated <= TARGET_STEP_SECONDS {
+        "体を進める刻み {:.0} ms に{}。実機の実測は 4.6 ms/ステップで、\
+         15 ステップ 0.96〜1.01 秒(設計どおりの 15 step/s)だった",
+        STEP_INTERVAL_SECONDS * 1e3,
+        if estimated <= STEP_INTERVAL_SECONDS {
             "収まる"
         } else {
             "収まらない"
