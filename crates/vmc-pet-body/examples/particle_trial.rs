@@ -2052,6 +2052,12 @@ struct BodyObservation {
     center: (f32, f32),
     /// 最大の塊に入っていない粒子の数。
     strays: usize,
+    /// はぐれた粒子の重心。はぐれた粒子が無ければ `None`。
+    ///
+    /// 突きは点から外向きに弾くので、「はぐれの向こう側」を狙うために要る
+    /// (issue #11「体をまたぐコントローラ」のスパイク1)。誘い(点へ引く)は
+    /// 塊の重心だけで済むので、それまでは測っていなかった。
+    stray_center: Option<(f32, f32)>,
 }
 
 /// 1 回の判断の記録。将来、1 ステップごとの状態と結果から学ぶ方式(強化学習など)に使える形にしてある。
@@ -2095,7 +2101,26 @@ fn observe_body(world: &ParticleWorld) -> BodyObservation {
         stray_distance: observed.stray_distance,
         center: observed.center,
         strays: observed.strays,
+        stray_center: stray_center(world),
     }
+}
+
+/// 最大の塊に入っていない粒子の重心。はぐれた粒子が無ければ `None`。
+fn stray_center(world: &ParticleWorld) -> Option<(f32, f32)> {
+    let members = world.largest_cluster();
+    let mut in_cluster = vec![false; world.x.len()];
+    for index in members {
+        in_cluster[index] = true;
+    }
+    let strays: Vec<usize> = (0..world.x.len()).filter(|&i| !in_cluster[i]).collect();
+    if strays.is_empty() {
+        return None;
+    }
+    let count = strays.len() as f32;
+    Some((
+        strays.iter().map(|&i| world.x[i]).sum::<f32>() / count,
+        strays.iter().map(|&i| world.y[i]).sum::<f32>() / count,
+    ))
 }
 
 /// 観測から誘いの強さを決める行動 `policy` を、`lure_episode` と同じ場面(出発点, 散らし方の乱数, 散らす割合)で1回走らせる。1 秒ごとに観測し、強さが
@@ -3165,6 +3190,25 @@ const BURST_CLICKS_PER_SECOND: (u32, u32) = (1, 4);
 const BURST_RADIUS_CELLS: f32 = 3.2;
 const REALISTIC_WINDOW: u32 = 3000;
 
+/// 1 秒ごとに選べる働きかけ。
+///
+/// 誘い(点へ引く)と突き(点から外向きに弾く)を同じ形で扱うために入れた
+/// (issue #11「体をまたぐコントローラ」)。突きは `BodyPort::disturb` と同じ語彙で、
+/// Lenia の体も受け取れる。誘いは粒子の体だけが持つ内部ルールで、`disturb` を通らない。
+#[derive(Clone, Copy, Debug)]
+enum Nudge {
+    /// 何もしない。
+    None,
+    /// 最大の塊の重心へ、`radius` 以内の粒子を引く。
+    Lure { radius: f32, strength: f32 },
+    /// `at` から外向きに、`radius` 以内の粒子を弾く。
+    Poke {
+        at: (f32, f32),
+        radius: f32,
+        impulse: f32,
+    },
+}
+
 /// 実際の連打で崩し、行動 `policy` を効かせて 200 秒ぶん動かす。`policy` は 1 秒ごとの観測から誘いの強さを返す。
 fn burst_episode(
     seed: u64,
@@ -3174,9 +3218,28 @@ fn burst_episode(
     limits: SpeedLimits,
     policy: &dyn Fn(&BodyObservation) -> f32,
 ) -> LureEpisode {
+    // 誘いだけを返す行動として、一般の形(`burst_episode_nudged`)に委ねる。
+    burst_episode_nudged(seed, trial, burst_seed, limits, &|observed| {
+        let strength = policy(observed).clamp(0.0, MAX_LURE_STRENGTH);
+        if strength > 0.0 {
+            Nudge::Lure { radius, strength }
+        } else {
+            Nudge::None
+        }
+    })
+}
+
+/// 実際の連打で崩し、1 秒ごとに `policy` が選んだ働きかけ(誘い・突き・何もしない)を効かせて
+/// 200 秒ぶん動かす。
+fn burst_episode_nudged(
+    seed: u64,
+    trial: u64,
+    burst_seed: u64,
+    limits: SpeedLimits,
+    policy: &dyn Fn(&BodyObservation) -> Nudge,
+) -> LureEpisode {
     let mut world = started_world(seed, trial);
     let mut rng = ParticleRng::new(burst_seed);
-    world.lure_radius = radius;
     // 連打: 1 秒ごとに数回、塊の重心の近くを弾く
     let seconds = rng.range(BURST_SECONDS.0 as f32, BURST_SECONDS.1 as f32 + 0.99) as u32;
     for _ in 0..seconds {
@@ -3202,16 +3265,36 @@ fn burst_episode(
 
     let mut run = LureEpisode::default();
     let mut recovered = false;
+    // この秒に働きかけているか。誘いは続く力、突きは瞬間の力なので、超過を測る区間を
+    // そろえるために秒単位で持つ(突きを打った秒は、その 1 秒を働きかけ中と数える)。
+    let mut acting = false;
     for step in 1..=REALISTIC_WINDOW {
         if step % SAMPLE_EVERY == 1 {
             let observed = observe_body(&world);
-            let strength = policy(&observed).clamp(0.0, MAX_LURE_STRENGTH);
-            world.lure = if strength > 0.0 {
-                Some((observed.center.0, observed.center.1, strength))
-            } else {
-                None
-            };
-            if strength > 0.0 && observed.strays == 0 {
+            let nudge = policy(&observed);
+            acting = !matches!(nudge, Nudge::None);
+            world.lure = None;
+            match nudge {
+                Nudge::None => {}
+                Nudge::Lure { radius, strength } => {
+                    world.lure_radius = radius;
+                    world.lure = Some((
+                        observed.center.0,
+                        observed.center.1,
+                        strength.clamp(0.0, MAX_LURE_STRENGTH),
+                    ));
+                }
+                Nudge::Poke {
+                    at,
+                    radius,
+                    impulse,
+                } => {
+                    world.poke(at.0, at.1, radius, impulse);
+                    // 突きは 1 秒に 1 回なので、1 秒ぶんの手間としてそのまま足す。
+                    run.effort += impulse / (REALISTIC_WINDOW / SAMPLE_EVERY) as f32;
+                }
+            }
+            if acting && observed.strays == 0 {
                 run.idle_seconds += 1.0;
             }
         }
@@ -3219,7 +3302,7 @@ fn burst_episode(
             run.effort += applied / REALISTIC_WINDOW as f32;
         }
         world.step();
-        if world.lure.is_some() {
+        if acting {
             run.excess_speed += (world.mean_speed() - limits.mean).max(0.0);
         }
         if step % SAMPLE_EVERY != 0 {
@@ -3572,6 +3655,13 @@ fn main() {
                 .collect();
             realistic(&seeds);
         }
+        Some("poke-vs-lure") => {
+            let seeds: Vec<u64> = args[1..]
+                .iter()
+                .map(|s| s.parse().expect("候補の番号"))
+                .collect();
+            poke_vs_lure(&seeds);
+        }
         Some("log") => {
             log_summary(&args[1..]);
         }
@@ -3654,5 +3744,160 @@ fn main() {
         _ => eprintln!(
             "使い方: particle_trial search <出力先> | suite <候補の番号>... | lure <候補の番号>... | regroup <候補の番号>... | landscape <候補の番号>... | learn <候補の番号>... | energy <候補の番号>... | situational <候補の番号>... | shaped <候補の番号>... | excess <候補の番号>... | shaped-sum <候補の番号>... | realistic <候補の番号>... | log <記録のファイル>..."
         ),
+    }
+}
+
+/// 【スパイク】誘い(点へ引く)を使わず、突き(点から外向きに弾く)だけで、はぐれた粒子を
+/// 塊へ戻せるか。issue #11「体をまたぐコントローラ」のスパイク1。
+///
+/// 行動の窓口(`BodyPort::disturb`)は両方の体が受け取れるのに、粒子の誘いはその窓口を
+/// 通らない体の内部ルールになっている。突き(= `disturb` と同じ語彙で、Lenia の体も
+/// 受け取れる)だけで同じ仕事ができるなら、行動の語彙は体をまたげることになる。
+///
+/// 突きは点から外向きに弾くので、「はぐれの向こう側」に置けば塊の方へ押せる。置く場所
+/// (はぐれの重心から外へ何セル)・届く距離・強さを格子で調べ、学んだ誘い(はぐれ1個以上・
+/// 強さ 0.13・箱いっぱい)と、何もしない場合に並べる。崩し方と窓は `realistic` と同じ。
+fn poke_vs_lure(seeds: &[u64]) {
+    const TRIALS: u64 = 16;
+    /// 学んだ誘い(docs/experiments/controller-learning.md「実際の連打で学ばせ直す」)。
+    const LEARNED_LURE_STRENGTH: f32 = 0.13;
+    const LEARNED_LURE_RADIUS: f32 = 39.0;
+    /// 突きを置く位置: はぐれの重心から、塊と反対の向きへ何セル離すか。
+    const POKE_OFFSETS: [f32; 4] = [1.0, 2.0, 3.0, 5.0];
+    /// 突きが届く距離(セル)。
+    const POKE_RADII: [f32; 4] = [4.0, 6.0, 10.0, 16.0];
+    /// 突きの強さ(速度に足す量)。ユーザーのクリック1回が 1.0。
+    const POKE_IMPULSES: [f32; 5] = [0.05, 0.1, 0.2, 0.4, 0.8];
+    /// はぐれの重心と塊の重心が近すぎると、押す向きが定まらない。この距離未満なら突かない。
+    const MIN_SEPARATION: f32 = 0.5;
+    /// 表に出す上位の数。
+    const TOP_ROWS: usize = 12;
+
+    let started = Instant::now();
+    for &seed in seeds {
+        let (average_speed, limits) = normal_speed(seed);
+        let scenes: Vec<(u64, u64)> = (0..TRIALS).map(|t| (t, seed * 7919 + t)).collect();
+
+        let run_all = |policy: &(dyn Fn(&BodyObservation) -> Nudge + Sync)| -> Summary {
+            let runs: Vec<LureEpisode> = thread::scope(|scope| {
+                let handles: Vec<_> = scenes
+                    .iter()
+                    .map(|&(trial, burst_seed)| {
+                        scope.spawn(move || {
+                            burst_episode_nudged(seed, trial, burst_seed, limits, policy)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            Summary::of(&runs, average_speed)
+        };
+
+        let nothing = run_all(&|_| Nudge::None);
+        let lure = run_all(&|observed: &BodyObservation| {
+            if observed.strays >= 1 {
+                Nudge::Lure {
+                    radius: LEARNED_LURE_RADIUS,
+                    strength: LEARNED_LURE_STRENGTH,
+                }
+            } else {
+                Nudge::None
+            }
+        });
+
+        let mut rows: Vec<(f32, f32, f32, Summary)> = Vec::new();
+        for &offset in &POKE_OFFSETS {
+            for &radius in &POKE_RADII {
+                for &impulse in &POKE_IMPULSES {
+                    let summary = run_all(&move |observed: &BodyObservation| {
+                        let Some(stray) = observed.stray_center else {
+                            return Nudge::None;
+                        };
+                        let (dx, dy) = (stray.0 - observed.center.0, stray.1 - observed.center.1);
+                        let separation = (dx * dx + dy * dy).sqrt();
+                        if separation < MIN_SEPARATION {
+                            return Nudge::None;
+                        }
+                        // はぐれの向こう側(塊と反対の側)へ置くと、外向きの力が塊の方を向く。
+                        let (ux, uy) = (dx / separation, dy / separation);
+                        Nudge::Poke {
+                            at: (stray.0 + ux * offset, stray.1 + uy * offset),
+                            radius,
+                            impulse,
+                        }
+                    });
+                    rows.push((offset, radius, impulse, summary));
+                }
+            }
+        }
+        rows.sort_by(|a, b| a.3.stray_seconds.total_cmp(&b.3.stray_seconds));
+
+        println!(
+            "\n==== 候補 {seed}: 突きだけではぐれを戻せるか({TRIALS} 試行、連打で崩してから {:.0} 秒) ====\n",
+            REALISTIC_WINDOW as f32 / 15.0
+        );
+        println!("基準");
+        println!("  {:<28} | {}", "何もしない", nothing.row());
+        println!(
+            "  {:<28} | {}",
+            format!("学んだ誘い(強さ {LEARNED_LURE_STRENGTH})"),
+            lure.row()
+        );
+        println!(
+            "\n突き(はぐれの重心から外へ offset セル、届く距離 radius、強さ impulse)。はぐれがいた秒の少ない順に {TOP_ROWS} 件"
+        );
+        println!("  offset | radius | impulse | はぐれがいた秒 | 戻るまで秒 | 割れたまま | 超過");
+        for (offset, radius, impulse, summary) in rows.iter().take(TOP_ROWS) {
+            println!(
+                "  {offset:6.1} | {radius:6.1} | {impulse:7.2} | {}",
+                summary.row()
+            );
+        }
+        let worst = rows.last().unwrap();
+        println!(
+            "  (最下位: offset {:.1}・radius {:.1}・強さ {:.2} | {})",
+            worst.0,
+            worst.1,
+            worst.2,
+            worst.3.row()
+        );
+    }
+    println!("\n所要時間 {:.0} 秒", started.elapsed().as_secs_f32());
+}
+
+/// 試行をまとめた成績。
+struct Summary {
+    /// はぐれた粒子がいた秒の平均(窓 200 秒あたり)。
+    stray_seconds: f32,
+    /// はぐれが 0 に戻るまでの秒の平均(戻らなければ窓の長さ)。
+    seconds: f32,
+    /// 窓の終わりにまだはぐれていた試行の数。
+    broken: usize,
+    /// 働きかけているあいだの、ふだんの揺らぎを超えた速さの和(秒あたり)。
+    excess: f32,
+    trials: usize,
+}
+
+impl Summary {
+    fn of(runs: &[LureEpisode], average_speed: f32) -> Self {
+        let count = runs.len() as f32;
+        Self {
+            stray_seconds: runs.iter().map(|r| r.stray_seconds).sum::<f32>() / count,
+            seconds: runs.iter().map(|r| r.seconds).sum::<f32>() / count,
+            broken: runs.iter().filter(|r| r.broken).count(),
+            excess: runs
+                .iter()
+                .map(|r| r.excess_speed / average_speed / 15.0)
+                .sum::<f32>()
+                / count,
+            trials: runs.len(),
+        }
+    }
+
+    fn row(&self) -> String {
+        format!(
+            "{:14.1} | {:10.1} | {:5}/{:<4} | {:.3}",
+            self.stray_seconds, self.seconds, self.broken, self.trials, self.excess
+        )
     }
 }
