@@ -86,6 +86,17 @@ cargo run --release -- --preview-particles 1091 --particle-controller off       
 記録は、ユーザーの操作を含めた状況を後から調べるためのもので、その場では学習しない。集計は
 `cargo run --release -p vmc-pet-body --example particle_trial -- log ~/particles.csv` で行う。
 
+この粒子の体は、`--animal particles:<番号>` で**ペット本体の体としても動かせる**。上の
+`--preview-particles`(体だけを見る実験)と違い、ペットの仕組み(エネルギー・慣れ・色素・
+気分によるテンポ・echo・記憶)がひととおり繋がっている。
+
+```sh
+cargo run --release -- --animal particles:1091                              # 粒子の体のペットを起動する
+cargo run --release -- --animal particles:1091 --preview-mood disappointed  # がっかりのテンポで動かす
+```
+
+同じ体は M5Stack でも動かせる([docs/M5STACK.md](docs/M5STACK.md)「粒子の体を第二の体でも動かす」)。
+
 `--multichannel` では、放っておくと約150秒でエネルギーが尽きて体が弱り、クリックすると回復する。
 慣れ・色素・生活リズムの学習・自律コントローラ・記憶はまだつないでいない。
 
