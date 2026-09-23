@@ -13,6 +13,11 @@
 //!   テンポを徐々に目標まで下げて保つ。場にごく小さなゆらぎを掛けて何回も試し、崩壊した割合を
 //!   下限ごとに数える。いまの下限 0.85 が崖からどれだけ離れているかが分かる
 //!
+//! どちらも **PC 版の場(32×32)と M5Stack 版の場(43×32)の両方**で測る。前回は PC の場
+//! だけで測り、M5Stack の場は「限界」として残していた。粒子の体を第二の体として載せた
+//! (issue #8)いま、M5Stack でも Lenia の体が既定のまま動いているので、そちらの場でも
+//! 余裕を確かめる。
+//!
 //! ペット本体の振る舞いには触れない。
 
 use std::thread;
@@ -20,8 +25,34 @@ use std::time::Instant;
 
 use vmc_pet_body::{load_animal, Animal, Field, Lenia, Pet, PetMemory};
 
-const FIELD_SIZE: usize = 32;
-const CELLS: usize = FIELD_SIZE * FIELD_SIZE;
+/// 測る場の大きさ。同じ下限・同じテンポでも、場が変われば周りとの巡り合い方が変わるため、
+/// 実際に動いている2つの体の場で測る(前回は PC の 32×32 だけだった)。
+#[derive(Clone, Copy)]
+struct FieldShape {
+    label: &'static str,
+    width: usize,
+    height: usize,
+}
+
+impl FieldShape {
+    fn cells(&self) -> usize {
+        self.width * self.height
+    }
+}
+
+/// PC 版の場(docs/DESIGN.md「場の解像度と表示解像度」)。
+const PC_FIELD: FieldShape = FieldShape {
+    label: "PC 32x32",
+    width: 32,
+    height: 32,
+};
+/// M5Stack 版の場。横は画面(320x240)のアスペクト比に合わせて広げてある。
+const M5_FIELD: FieldShape = FieldShape {
+    label: "M5 43x32",
+    width: 43,
+    height: 32,
+};
+const FIELDS: [FieldShape; 2] = [PC_FIELD, M5_FIELD];
 /// `Pet::step` と同じ崩壊の判定。
 const COLLAPSE_MASS: f32 = 5.0;
 /// 触られないままエネルギーが尽きるまでのステップ数(`LeniaBody` の減り方と同じ約150秒)。
@@ -94,9 +125,9 @@ struct PetOutcome {
 }
 
 /// 測定1: いまのペットを放置してがっかりさせ続ける。
-fn pet_trial(code: &str, trial: u64) -> PetOutcome {
+fn pet_trial(code: &str, trial: u64, field: FieldShape) -> PetOutcome {
     let mut rng = Rng(seed_for(code, trial));
-    let mut pet = Pet::load(code, FIELD_SIZE, FIELD_SIZE).unwrap();
+    let mut pet = Pet::load(code, field.width, field.height).unwrap();
     for _ in 0..rng.range_u32(0, MAX_WARMUP_JITTER) {
         pet.restore(PetMemory::with_energy(1.0), 0.0);
         pet.step();
@@ -121,18 +152,24 @@ fn pet_trial(code: &str, trial: u64) -> PetOutcome {
 
 /// 測定2: 成長の強さを `growth_floor` まで、テンポを `tempo_floor` まで徐々に下げて保つ。
 /// 崩壊したら `true`。
-fn lenia_trial(animal: &Animal, growth_floor: f32, tempo_floor: f32, seed: u64) -> bool {
+fn lenia_trial(
+    animal: &Animal,
+    growth_floor: f32,
+    tempo_floor: f32,
+    seed: u64,
+    shape: FieldShape,
+) -> bool {
     let mut rng = Rng(seed);
     let mut lenia = Lenia::new(animal.params.clone());
-    let mut field = Field::new(FIELD_SIZE, FIELD_SIZE);
+    let mut field = Field::new(shape.width, shape.height);
     field.place_centered(&animal.pattern);
     for _ in 0..(LENIA_WARMUP_STEPS + rng.range_u32(0, MAX_WARMUP_JITTER)) {
         lenia.step(&mut field, 1.0);
     }
-    let noise: Vec<f32> = (0..CELLS)
+    let noise: Vec<f32> = (0..shape.cells())
         .map(|_| 1.0 + rng.range_f32(-NOISE, NOISE))
         .collect();
-    field.map(|x, y, value| (value * noise[y * FIELD_SIZE + x]).min(1.0));
+    field.map(|x, y, value| (value * noise[y * shape.width + x]).min(1.0));
     for step in 0..(NEGLECT_STEPS + MOOD_RAMP_STEPS + LENIA_HOLD_STEPS) {
         let depletion = (step as f32 / NEGLECT_STEPS as f32).min(1.0);
         let growth = 1.0 - (1.0 - growth_floor) * depletion;
@@ -145,11 +182,26 @@ fn lenia_trial(animal: &Animal, growth_floor: f32, tempo_floor: f32, seed: u64) 
     false
 }
 
-fn collapses(code: &str, growth_floor: f32, tempo_floor: f32, trials: u64) -> u64 {
+fn collapses(
+    code: &str,
+    growth_floor: f32,
+    tempo_floor: f32,
+    trials: u64,
+    shape: FieldShape,
+) -> u64 {
     let animal = load_animal(code).unwrap();
-    let label = format!("{code}-{growth_floor}-{tempo_floor}");
+    // 場も種に混ぜる。場ごとに違うゆらぎ・違う落ち着かせ方で試すため。
+    let label = format!("{code}-{growth_floor}-{tempo_floor}-{}", shape.label);
     (0..trials)
-        .filter(|trial| lenia_trial(&animal, growth_floor, tempo_floor, seed_for(&label, *trial)))
+        .filter(|trial| {
+            lenia_trial(
+                &animal,
+                growth_floor,
+                tempo_floor,
+                seed_for(&label, *trial),
+                shape,
+            )
+        })
         .count() as u64
 }
 
@@ -162,38 +214,46 @@ fn main() {
         .collect();
 
     let (pet_results, o2u_results, all_results) = thread::scope(|scope| {
-        let pet_handles: Vec<_> = codes
+        let pet_handles: Vec<_> = FIELDS
             .iter()
-            .map(|code| {
-                scope.spawn(move || {
-                    let outcomes: Vec<PetOutcome> = (0..PET_TRIALS)
-                        .map(|trial| pet_trial(code, trial))
-                        .collect();
-                    (code.clone(), outcomes)
+            .flat_map(|shape| {
+                codes.iter().map(move |code| {
+                    scope.spawn(move || {
+                        let outcomes: Vec<PetOutcome> = (0..PET_TRIALS)
+                            .map(|trial| pet_trial(code, trial, *shape))
+                            .collect();
+                        (shape.label, code.clone(), outcomes)
+                    })
                 })
             })
             .collect();
-        let o2u_handles: Vec<_> = O2U_TEMPOS
+        let o2u_handles: Vec<_> = FIELDS
             .iter()
-            .map(|tempo| {
-                scope.spawn(move || {
-                    let counts: Vec<u64> = O2U_FLOORS
-                        .iter()
-                        .map(|floor| collapses("O2u", *floor, *tempo, O2U_TRIALS))
-                        .collect();
-                    (*tempo, counts)
+            .flat_map(|shape| {
+                O2U_TEMPOS.iter().map(move |tempo| {
+                    scope.spawn(move || {
+                        let counts: Vec<u64> = O2U_FLOORS
+                            .iter()
+                            .map(|floor| collapses("O2u", *floor, *tempo, O2U_TRIALS, *shape))
+                            .collect();
+                        (shape.label, *tempo, counts)
+                    })
                 })
             })
             .collect();
-        let all_handles: Vec<_> = codes
+        let all_handles: Vec<_> = FIELDS
             .iter()
-            .map(|code| {
-                scope.spawn(move || {
-                    let counts: Vec<u64> = ALL_FLOORS
-                        .iter()
-                        .map(|floor| collapses(code, *floor, DISAPPOINTED_TEMPO, ALL_TRIALS))
-                        .collect();
-                    (code.clone(), counts)
+            .flat_map(|shape| {
+                codes.iter().map(move |code| {
+                    scope.spawn(move || {
+                        let counts: Vec<u64> = ALL_FLOORS
+                            .iter()
+                            .map(|floor| {
+                                collapses(code, *floor, DISAPPOINTED_TEMPO, ALL_TRIALS, *shape)
+                            })
+                            .collect();
+                        (shape.label, code.clone(), counts)
+                    })
                 })
             })
             .collect();
@@ -214,43 +274,62 @@ fn main() {
     println!(
         "==== 測定1: いまのペットを放置してがっかりさせ続ける({PET_TRIALS}回、放置 {NEGLECT_STEPS} + がっかりへ {MOOD_RAMP_STEPS} + {PET_HOLD_STEPS} ステップ) ===="
     );
-    for (code, outcomes) in &pet_results {
-        let collapsed: Vec<u32> = outcomes.iter().filter_map(|o| o.collapsed_at).collect();
-        let lowest = outcomes
-            .iter()
-            .map(|o| o.lowest_mass_ratio)
-            .fold(f32::INFINITY, f32::min);
-        println!(
-            "  {code:6} 崩壊 {}/{PET_TRIALS}{} | 総量の底(放置し始めを1として、全試行で最も低い) {lowest:.2}",
-            collapsed.len(),
-            if collapsed.is_empty() {
-                String::new()
-            } else {
-                format!("(ステップ {collapsed:?})")
-            }
-        );
+    for shape in FIELDS {
+        for (label, code, outcomes) in pet_results.iter().filter(|(l, _, _)| *l == shape.label) {
+            let collapsed: Vec<u32> = outcomes.iter().filter_map(|o| o.collapsed_at).collect();
+            let lowest = outcomes
+                .iter()
+                .map(|o| o.lowest_mass_ratio)
+                .fold(f32::INFINITY, f32::min);
+            println!(
+                "  [{label}] {code:6} 崩壊 {}/{PET_TRIALS}{} | 総量の底(放置し始めを1として、全試行で最も低い) {lowest:.2}",
+                collapsed.len(),
+                if collapsed.is_empty() {
+                    String::new()
+                } else {
+                    format!("(ステップ {collapsed:?})")
+                }
+            );
+        }
     }
     println!();
+
+    let floor_header = |floors: &[f32]| -> String {
+        floors
+            .iter()
+            .map(|f| format!("{f:.2}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let counts_row = |counts: &[u64]| -> String {
+        counts
+            .iter()
+            .map(|c| format!("{c:4}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
 
     println!(
         "==== 測定2: O2u を徐々に弱らせたときに崩壊した回数({O2U_TRIALS}回中。行=テンポの下限、列=成長の強さの下限) ===="
     );
-    let header: Vec<String> = O2U_FLOORS.iter().map(|f| format!("{f:.2}")).collect();
-    println!("  テンポ  | {}", header.join(" | "));
-    for (tempo, counts) in &o2u_results {
-        let cells: Vec<String> = counts.iter().map(|c| format!("{c:4}")).collect();
-        println!("  ×{tempo:<5} | {}", cells.join(" | "));
+    for shape in FIELDS {
+        println!("  [{}]", shape.label);
+        println!("    テンポ  | {}", floor_header(&O2U_FLOORS));
+        for (_, tempo, counts) in o2u_results.iter().filter(|(l, _, _)| *l == shape.label) {
+            println!("    ×{tempo:<5} | {}", counts_row(counts));
+        }
     }
     println!();
 
     println!(
         "==== 測定2: 全生物、テンポ ×{DISAPPOINTED_TEMPO} まで徐々に弱らせたときに崩壊した回数({ALL_TRIALS}回中) ===="
     );
-    let header: Vec<String> = ALL_FLOORS.iter().map(|f| format!("{f:.2}")).collect();
-    println!("  生物   | {}", header.join(" | "));
-    for (code, counts) in &all_results {
-        let cells: Vec<String> = counts.iter().map(|c| format!("{c:4}")).collect();
-        println!("  {code:6} | {}", cells.join(" | "));
+    for shape in FIELDS {
+        println!("  [{}]", shape.label);
+        println!("    生物   | {}", floor_header(&ALL_FLOORS));
+        for (_, code, counts) in all_results.iter().filter(|(l, _, _)| *l == shape.label) {
+            println!("    {code:6} | {}", counts_row(counts));
+        }
     }
     println!();
     println!("合計 {:.0} 秒", started.elapsed().as_secs_f32());
