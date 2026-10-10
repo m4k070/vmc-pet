@@ -152,6 +152,40 @@ mod tests {
     }
 
     #[test]
+    fn maximum_stress_halves_the_time_before_the_energy_is_gone() {
+        // Arrange: 2つの個体を、片方だけ最大の環境ストレスに晒す
+        // (M5Stack 版が電池の残量から作る値が 1.0 のときの効き方)
+        let mut calm = Vitality::new();
+        let mut harsh = Vitality::new();
+        let mut calm_steps = 0u32;
+        let mut harsh_steps = 0u32;
+
+        // Act: 15 step/s で、尽きるまでのステップ数を数える
+        while calm.energy() > 0.0 && calm_steps < 100_000 {
+            calm.decay_step();
+            calm_steps += 1;
+        }
+        while harsh.energy() > 0.0 && harsh_steps < 100_000 {
+            harsh.decay_step();
+            harsh.apply_environmental_stress(1.0);
+            harsh_steps += 1;
+        }
+
+        // Assert: 最大のストレスは減衰を2倍にする(150秒 → 75秒)。
+        // ストレスは「尽きる速さ」だけを変え、尽きた後の安全性には影響しない。
+        let calm_seconds = calm_steps as f32 / 15.0;
+        let harsh_seconds = harsh_steps as f32 / 15.0;
+        assert!(
+            (calm_seconds - 150.0).abs() < 1.0,
+            "calm: {calm_seconds}s"
+        );
+        assert!(
+            (harsh_seconds - 75.0).abs() < 1.0,
+            "harsh: {harsh_seconds}s"
+        );
+    }
+
+    #[test]
     fn tempo_is_clamped_to_the_measured_safe_range() {
         // Arrange
         let mut vitality = Vitality::new();

@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<title>css-gesture spike (pose space)</title>
+<style>
+/* css-gesture spike — 姿勢パラメータ空間の描画（手書き・決定論的）
+ *
+ * 変遷:
+ *   1. 8個の keyframe アニメーションを確率で重ねる → 「半透明の図形がずれた雲」になり不採用
+ *   2. 語彙を姿勢パラメータ空間の点にし、混合を重み付き平均（補間）に → 雲は解消
+ *   3. rise（符号付き1次元）が混合で相殺する → lift / sink の非負2チャネルに分割
+ *   4. 平行移動の振幅差は人間に読めない → **Cube にして回転（rotateX/Y/Z）を持たせた**
+ *
+ * 4 について: 立方体では yaw / pitch が「別の面が見える」という離散的な変化になるので、
+ * ただの foreshortening（＝拡大縮小に見える）にならず、回転として読める。
+ * 混合の「葛藤」（2*min(lift, sink)）も、縦振幅ではなく roll の振れとして描く。
+ *
+ * 受け取る変数（build_viewer.py の JS が .stage に inline style で入れる。子は継承で受ける）:
+ *   --p-bob   : 上下のボブ振幅（px）
+ *   --p-rise  : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
+ *   --p-tiltx : 静的な pitch（姿勢、度）。正 = のけぞる / 負 = うつむく。energy では増幅しない
+ *   --p-rotx  : pitch の振れ幅（度）
+ *   --p-roty  : yaw の振れ幅（度）
+ *   --p-rotz  : roll の振れ幅（度）。混合の「葛藤」もここに加算済み
+ *   --p-size  : 体の大きさ
+ *   --p-freq  : 動きの速さ（大きいほど速い。周期の逆数の相対値）
+ *   --p-flick : 明滅の強さ（0-1）
+ *   --p-base  : 不透明度の基準（発火の強さ）
+ *   --p-glow  : 発光の強さ（発火の強さ）
+ */
+
+.stage {
+  --cube-w: 44px;
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: grid;
+  place-items: center;
+  /* 3D の遠近。これが無いと Cube の回転が「回転」に見えない。
+     probe-rotation.html の実測: 440px では立体として読むのに 30度必要、170px なら 15度で読める。 */
+  perspective: 170px;
+  perspective-origin: 50% 45%;
+}
+
+/* 発光。Cube の box-shadow は 3D に乗らないので、後ろに置いた光で代用する。 */
+.stage::before {
+  content: '';
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent, #d2694a) 0%, transparent 68%);
+  opacity: calc(0.75 * var(--p-glow, 0));
+  filter: blur(7px);
+  pointer-events: none;
+}
+
+/* 明滅はこの層が持つ。opacity < 1 を preserve-3d の要素に当てると 3D が平坦化されるため、
+   Cube 本体とは別の要素に分けている。 */
+.flick {
+  animation: k-flick calc(0.9s / var(--p-freq, 1)) steps(1, end) infinite;
+}
+
+/* Cube。姿勢ベクトル1つで駆動される。 */
+.body {
+  position: relative;
+  width: var(--cube-w);
+  height: var(--cube-w);
+  transform-style: preserve-3d;
+  transform-origin: 50% 50%;
+  animation: k-pose calc(2.2s / var(--p-freq, 1)) ease-in-out infinite;
+}
+
+.face {
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  background: var(--accent, #d2694a);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+}
+/* 面ごとに明度を変えて、回転したときに立体として読めるようにする。 */
+.f-front  { transform: translateZ(calc(var(--cube-w) / 2)); }
+.f-back   { transform: rotateY(180deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.55); }
+.f-right  { transform: rotateY(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.74); }
+.f-left   { transform: rotateY(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.62); }
+.f-top    { transform: rotateX(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(1.18); }
+.f-bottom { transform: rotateX(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.44); }
+
+/* 姿勢。tilt_x は静的な pitch（姿勢）、rot_* は振れ幅。波の形は往復の正弦1種類。
+   rotateX は「tilt_x（姿勢）+ rot_x * sin（振れ）」の合成。 */
+@keyframes k-pose {
+  0%, 100% {
+    transform: translateY(calc((var(--p-rise, 0) - var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * -1deg))
+               rotateY(calc(var(--p-roty, 0) * -1deg))
+               rotateZ(calc(var(--p-rotz, 0) * -1deg))
+               scale(var(--p-size, 1));
+  }
+  50% {
+    transform: translateY(calc((var(--p-rise, 0) + var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * 1deg))
+               rotateY(calc(var(--p-roty, 0) * 1deg))
+               rotateZ(calc(var(--p-rotz, 0) * 1deg))
+               scale(var(--p-size, 1));
+  }
+}
+
+/* 明滅。--p-flick が 0 なら全キーフレームで同じ不透明度になり、静止する。 */
+@keyframes k-flick {
+  0%, 100% { opacity: calc(var(--p-base, 1) * (1 - 0.10 * var(--p-flick, 0))); }
+  17%      { opacity: calc(var(--p-base, 1) * (1 - 0.85 * var(--p-flick, 0))); }
+  23%      { opacity: calc(var(--p-base, 1) * (1 - 0.00 * var(--p-flick, 0))); }
+  41%      { opacity: calc(var(--p-base, 1) * (1 - 0.72 * var(--p-flick, 0))); }
+  67%      { opacity: calc(var(--p-base, 1) * (1 - 0.04 * var(--p-flick, 0))); }
+  83%      { opacity: calc(var(--p-base, 1) * (1 - 0.66 * var(--p-flick, 0))); }
+}
+
+/* 比較用の小さい枠（Laya など別モデルの結果を並べるとき） */
+.stage.sm { --cube-w: 32px; width: 110px; height: 110px; perspective: 140px; }
+.stage.sm::before { width: 56px; height: 56px; }
+.stage.sm .face { border-radius: 5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flick, .body { animation: none; }
+}
+
+/* --- ビューアのレイアウト。gestures.css より後に置いて上書きする --- */
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--foreground, #ddd); font-family: inherit; }
+h1 { font-size: 15px; margin: 0 0 6px; }
+.sub { font-size: 12px; color: var(--muted-foreground, #999); margin: 0 0 12px; line-height: 1.55; }
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px;
+  padding: 10px 12px; border: 1px solid var(--border, rgba(127,127,127,.3)); border-radius: 10px; }
+.controls label { font-size: 12px; white-space: nowrap; }
+.controls input[type=range] { width: 200px; accent-color: var(--accent, #d2694a); }
+.controls .val { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; min-width: 44px; }
+.controls .count, .controls .fires { font-size: 11px; color: var(--muted-foreground, #999); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 12px; }
+.card { background: var(--card, rgba(127,127,127,.08)); border: 1px solid var(--border, rgba(127,127,127,.25));
+  border-radius: 10px; padding: 12px; transition: opacity .15s; }
+.card.err { border-color: #a33; }
+.card.silent { opacity: .5; }
+h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
+.tag { font-size: 10px; font-weight: 400; color: var(--muted-foreground, #999); border: 1px solid var(--border, #555);
+  border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+.state { font-size: 11px; color: var(--muted-foreground, #999); margin: 0 0 8px; min-height: 28px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.cmp { display: grid; justify-items: center; gap: 2px; }
+.cmp-label, .cmp-meta { font-size: 9px; color: var(--muted-foreground, #999); text-align: center; }
+.meta { font-size: 12px; margin: 6px 0 4px; }
+.gnote { color: var(--muted-foreground, #999); font-size: 10px; }
+.conf { color: var(--muted-foreground, #999); font-size: 10px; }
+.pose { font-size: 9px; color: var(--muted-foreground, #999); font-variant-numeric: tabular-nums;
+  margin: 0 0 8px; line-height: 1.4; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 11px; margin: 0 0 8px; }
+dt { color: var(--muted-foreground, #999); }
+dd { margin: 0; font-variant-numeric: tabular-nums; }
+.bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }
+.seg { display: block; height: 100%; }
+.dist { font-size: 10px; color: var(--muted-foreground, #999); margin-top: 5px; }
+.dist b { font-weight: 600; }
+.d-idle { color: #6b7280; } .d-perk_up { color: #f59e0b; } .d-nod { color: #22c55e; }
+.d-shake { color: #ef4444; } .d-lean_in { color: #3b82f6; } .d-recoil { color: #a855f7; }
+.d-settle { color: #0ea5e9; } .d-flicker { color: #eab308; }
+.rest { opacity: .65; }
+.swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+.s-idle { background: #6b7280; } .s-perk_up { background: #f59e0b; } .s-nod { background: #22c55e; }
+.s-shake { background: #ef4444; } .s-lean_in { background: #3b82f6; } .s-recoil { background: #a855f7; }
+.s-settle { background: #0ea5e9; } .s-flicker { background: #eab308; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--muted-foreground, #999); margin-top: 6px; }
+.stage { width: 118px; height: 118px; }
+.stage .body { width: 42px; height: 42px; border-radius: 12px; }
+.stage.sm { width: 92px; height: 92px; }
+.stage.sm .body { width: 32px; height: 32px; border-radius: 10px; }
+</style></head>
+<body>
+<h1>css-gesture spike — 姿勢パラメータ空間（混合は補間、描画は1体）</h1>
+<p class="sub">
+語彙を <code>poses.json</code> の<code>&lbrace;bob, rot_x, rot_y, rot_z, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
+混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に<strong>1つの Cube</strong>。<br>
+<strong>回転が主役</strong>: 平行移動の振幅差は人間に読めない（実測で fixed_bug と approved の縦振幅差は 1.31x しかなく静止画では読めなかった）。
+Cube では yaw / pitch が「別の面が見える」離散的な変化になるので、回転として読める。<br>
+<code>lift</code> / <code>sink</code> は上下の向きを分けた非負のチャネル。静的な偏りは <code>(sink - lift)</code> が担い、
+符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>roll の振れ（度）として戻す</strong>ので、
+「沈む + 浮く」が<strong>傾き（葛藤）</strong>として描かれる。<br>
+前版の「確率で重ねる」方式は<strong>半透明の図形がずれた雲</strong>になり、動きの混合にならなかった（人の判定）。
+<strong>表示</strong>を切り替えると、一番確率の高い姿勢（argmax）と、補間した姿勢（mean）を同じ枠で比べられる。<br>
+モデル <b>clef</b> / 比較 <b>laya</b>。
+波の形は往復の正弦1種類に統一したので、<code>perk_up</code> の「一瞬沈んでから跳ねる」ような
+波形の違いは表現できない（振幅・速度・静的偏りで近似）。
+</p>
+<div class="controls">
+  <label for="th">θ（emit の発火しきい値）</label>
+  <input id="th" type="range" min="0" max="0.5" step="0.01" value="0.3">
+  <span class="val" id="thv">0.30</span>
+  <span class="count" id="cnt"></span>
+  <span class="fires" id="fires"></span>
+  <label for="mode">表示</label>
+  <select id="mode">
+    <option value="mean" selected>mean（姿勢を補間）</option>
+    <option value="argmax">argmax（一番高い姿勢）</option>
+  </select>
+</div>
+<div class="grid">
+  <div class="card" data-key="fixed_bug">
+    <h3>fixed_bug <span class="tag">clef</span></h3>
+    <p class="state">ついに3日詰まっていたバグが直った。テストも全部通った。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.18, &quot;rot_x&quot;: 18, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 19.0467, &quot;bob&quot;: 0.3048, &quot;rot_x&quot;: 12.4159, &quot;rot_y&quot;: 0.4146, &quot;rot_z&quot;: 0.7408, &quot;lift&quot;: 0.2211, &quot;sink&quot;: 0.1235, &quot;size&quot;: 1.0129, &quot;freq&quot;: 1.3728, &quot;flick&quot;: 0.0267}"
+          data-energy="2.781948281233433" data-approach="2.7248762040554406" data-emit="0.47065061788877743"
+          data-top="nod">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 1.0281, &quot;bob&quot;: 0.1222, &quot;rot_x&quot;: 3.9581, &quot;rot_y&quot;: 5.7548, &quot;rot_z&quot;: 4.4493, &quot;lift&quot;: 0.1078, &quot;sink&quot;: 0.1084, &quot;size&quot;: 0.9734, &quot;freq&quot;: 1.2081, &quot;flick&quot;: 0.5328}"
+          data-energy="1.1085895315065621" data-approach="2.010867446223232"
+          data-emit="0.05416380573906749">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e1.1 a2.0</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.31</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>2.78 / 4</dd>
+      <dt>approach</dt><dd>2.72 / 4</dd>
+      <dt>emit</dt><dd>0.471</dd>
+      <dt>latency</dt><dd>39.568s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-nod" style="width:39.25%" title="nod 0.392 (39.2%)"></span><span class="seg s-perk_up" style="width:30.77%" title="perk_up 0.308 (30.8%)"></span><span class="seg s-idle" style="width:10.55%" title="idle 0.105 (10.5%)"></span><span class="seg s-lean_in" style="width:8.03%" title="lean_in 0.080 (8.0%)"></span><span class="seg s-settle" style="width:6.16%" title="settle 0.062 (6.2%)"></span><span class="seg s-flicker" style="width:2.67%" title="flicker 0.027 (2.7%)"></span><span class="seg s-recoil" style="width:1.66%" title="recoil 0.017 (1.7%)"></span><span class="seg s-shake" style="width:0.92%" title="shake 0.009 (0.9%)"></span></div>
+    <div class="dist"><b class="d-nod">nod</b> 39% · <b class="d-perk_up">perk_up</b> 31% · <b class="d-idle">idle</b> 11% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="build_fail">
+    <h3>build_fail <span class="tag">clef</span></h3>
+    <p class="state">またビルドが落ちた。同じエラーが4回目。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -9.0281, &quot;bob&quot;: 0.191, &quot;rot_x&quot;: 6.1686, &quot;rot_y&quot;: 2.3425, &quot;rot_z&quot;: 1.2691, &quot;lift&quot;: 0.0965, &quot;sink&quot;: 0.5849, &quot;size&quot;: 0.8325, &quot;freq&quot;: 0.9243, &quot;flick&quot;: 0.0869}"
+          data-energy="1.059922208640876" data-approach="1.0891702567640278" data-emit="0.3558336394126617"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 0.486, &quot;bob&quot;: 0.0826, &quot;rot_x&quot;: 2.4057, &quot;rot_y&quot;: 3.1433, &quot;rot_z&quot;: 6.1314, &quot;lift&quot;: 0.0537, &quot;sink&quot;: 0.0576, &quot;size&quot;: 0.9885, &quot;freq&quot;: 1.1479, &quot;flick&quot;: 0.7523}"
+          data-energy="2.0207871318474595" data-approach="1.9222507569040301"
+          data-emit="0.11162016520335129">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e2.0 a1.9</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.48</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>1.06 / 4</dd>
+      <dt>approach</dt><dd>1.09 / 4</dd>
+      <dt>emit</dt><dd>0.356</dd>
+      <dt>latency</dt><dd>28.745s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-settle" style="width:54.78%" title="settle 0.548 (54.8%)"></span><span class="seg s-idle" style="width:11.48%" title="idle 0.115 (11.5%)"></span><span class="seg s-flicker" style="width:8.69%" title="flicker 0.087 (8.7%)"></span><span class="seg s-nod" style="width:6.44%" title="nod 0.064 (6.4%)"></span><span class="seg s-recoil" style="width:6.39%" title="recoil 0.064 (6.4%)"></span><span class="seg s-shake" style="width:5.21%" title="shake 0.052 (5.2%)"></span><span class="seg s-perk_up" style="width:4.23%" title="perk_up 0.042 (4.2%)"></span><span class="seg s-lean_in" style="width:2.79%" title="lean_in 0.028 (2.8%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 55% · <b class="d-idle">idle</b> 11% · <b class="d-flicker">flicker</b> 9% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="waiting">
+    <h3>waiting <span class="tag">clef</span></h3>
+    <p class="state">テストスイートの実行が終わるのをただ待っている。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.22, &quot;rot_x&quot;: 3, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 0.3569, &quot;bob&quot;: 0.2191, &quot;rot_x&quot;: 3.8938, &quot;rot_y&quot;: 0.5457, &quot;rot_z&quot;: 4.4226, &quot;lift&quot;: 0.032, &quot;sink&quot;: 0.041, &quot;size&quot;: 0.9936, &quot;freq&quot;: 1.0325, &quot;flick&quot;: 0.0312}"
+          data-energy="0.5057425893281169" data-approach="1.639626740264764" data-emit="0.03626141769958141"
+          data-top="idle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 1.2438, &quot;bob&quot;: 0.1187, &quot;rot_x&quot;: 3.1548, &quot;rot_y&quot;: 7.6721, &quot;rot_z&quot;: 4.4913, &quot;lift&quot;: 0.0772, &quot;sink&quot;: 0.0803, &quot;size&quot;: 0.9815, &quot;freq&quot;: 1.2047, &quot;flick&quot;: 0.4701}"
+          data-energy="0.8035862374487781" data-approach="1.8855115480383735"
+          data-emit="0.062105065616315916">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e0.8 a1.9</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.81</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>0.51 / 4</dd>
+      <dt>approach</dt><dd>1.64 / 4</dd>
+      <dt>emit</dt><dd>0.036</dd>
+      <dt>latency</dt><dd>34.538s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-idle" style="width:83.47%" title="idle 0.835 (83.5%)"></span><span class="seg s-nod" style="width:3.42%" title="nod 0.034 (3.4%)"></span><span class="seg s-settle" style="width:3.42%" title="settle 0.034 (3.4%)"></span><span class="seg s-flicker" style="width:3.12%" title="flicker 0.031 (3.1%)"></span><span class="seg s-lean_in" style="width:2.33%" title="lean_in 0.023 (2.3%)"></span><span class="seg s-perk_up" style="width:1.83%" title="perk_up 0.018 (1.8%)"></span><span class="seg s-shake" style="width:1.21%" title="shake 0.012 (1.2%)"></span><span class="seg s-recoil" style="width:1.21%" title="recoil 0.012 (1.2%)"></span></div>
+    <div class="dist"><b class="d-idle">idle</b> 83% · <b class="d-nod">nod</b> 3% · <b class="d-settle">settle</b> 3% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="branch_gone">
+    <h3>branch_gone <span class="tag">clef</span></h3>
+    <p class="state">レビュー前にブランチを消されてしまった。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -7.3222, &quot;bob&quot;: 0.1922, &quot;rot_x&quot;: 6.1328, &quot;rot_y&quot;: 3.4648, &quot;rot_z&quot;: 1.4407, &quot;lift&quot;: 0.1169, &quot;sink&quot;: 0.5266, &quot;size&quot;: 0.8414, &quot;freq&quot;: 0.9927, &quot;flick&quot;: 0.1004}"
+          data-energy="0.7860229123961211" data-approach="0.7995392655666422" data-emit="0.17981665398860586"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 0.2023, &quot;bob&quot;: 0.0924, &quot;rot_x&quot;: 2.6562, &quot;rot_y&quot;: 2.6907, &quot;rot_z&quot;: 5.916, &quot;lift&quot;: 0.059, &quot;sink&quot;: 0.0828, &quot;size&quot;: 0.9803, &quot;freq&quot;: 1.1345, &quot;flick&quot;: 0.7132}"
+          data-energy="1.2071314724795634" data-approach="1.8806378961439547"
+          data-emit="0.028199451682429315">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e1.2 a1.9</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.42</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>0.79 / 4</dd>
+      <dt>approach</dt><dd>0.80 / 4</dd>
+      <dt>emit</dt><dd>0.180</dd>
+      <dt>latency</dt><dd>34.392s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-settle" style="width:49.40%" title="settle 0.494 (49.4%)"></span><span class="seg s-idle" style="width:12.76%" title="idle 0.128 (12.8%)"></span><span class="seg s-flicker" style="width:10.04%" title="flicker 0.100 (10.0%)"></span><span class="seg s-recoil" style="width:9.29%" title="recoil 0.093 (9.3%)"></span><span class="seg s-shake" style="width:7.70%" title="shake 0.077 (7.7%)"></span><span class="seg s-nod" style="width:5.25%" title="nod 0.053 (5.3%)"></span><span class="seg s-perk_up" style="width:3.54%" title="perk_up 0.035 (3.5%)"></span><span class="seg s-lean_in" style="width:2.02%" title="lean_in 0.020 (2.0%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 49% · <b class="d-idle">idle</b> 13% · <b class="d-flicker">flicker</b> 10% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="uncertain">
+    <h3>uncertain <span class="tag">clef</span></h3>
+    <p class="state">次に何をすればいいのか分からない。選択肢が多すぎる。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.04, &quot;rot_x&quot;: 1, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 8, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.1, &quot;flick&quot;: 1.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -0.1814, &quot;bob&quot;: 0.0821, &quot;rot_x&quot;: 2.0692, &quot;rot_y&quot;: 1.1314, &quot;rot_z&quot;: 6.6852, &quot;lift&quot;: 0.0231, &quot;sink&quot;: 0.0505, &quot;size&quot;: 0.9856, &quot;freq&quot;: 1.1017, &quot;flick&quot;: 0.7599}"
+          data-energy="0.9302040205270176" data-approach="1.150667561300046" data-emit="0.22343648219510964"
+          data-top="flicker">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 0.7381, &quot;bob&quot;: 0.1435, &quot;rot_x&quot;: 4.2399, &quot;rot_y&quot;: 10.4485, &quot;rot_z&quot;: 2.9162, &quot;lift&quot;: 0.1219, &quot;sink&quot;: 0.1398, &quot;size&quot;: 0.9743, &quot;freq&quot;: 1.2336, &quot;flick&quot;: 0.3044}"
+          data-energy="1.9930983482359932" data-approach="2.3641832389921715"
+          data-emit="0.034546244783597004">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e2.0 a2.4</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.73</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>0.93 / 4</dd>
+      <dt>approach</dt><dd>1.15 / 4</dd>
+      <dt>emit</dt><dd>0.223</dd>
+      <dt>latency</dt><dd>34.876s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-flicker" style="width:75.99%" title="flicker 0.760 (76.0%)"></span><span class="seg s-idle" style="width:12.12%" title="idle 0.121 (12.1%)"></span><span class="seg s-settle" style="width:4.59%" title="settle 0.046 (4.6%)"></span><span class="seg s-shake" style="width:2.51%" title="shake 0.025 (2.5%)"></span><span class="seg s-nod" style="width:1.56%" title="nod 0.016 (1.6%)"></span><span class="seg s-recoil" style="width:1.53%" title="recoil 0.015 (1.5%)"></span><span class="seg s-perk_up" style="width:0.94%" title="perk_up 0.009 (0.9%)"></span><span class="seg s-lean_in" style="width:0.75%" title="lean_in 0.008 (0.8%)"></span></div>
+    <div class="dist"><b class="d-flicker">flicker</b> 76% · <b class="d-idle">idle</b> 12% · <b class="d-settle">settle</b> 5% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="late_night">
+    <h3>late_night <span class="tag">clef</span></h3>
+    <p class="state">深夜3時。そろそろ寝たほうがいいのは分かっている。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.22, &quot;rot_x&quot;: 3, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -3.6213, &quot;bob&quot;: 0.1957, &quot;rot_x&quot;: 6.3055, &quot;rot_y&quot;: 1.9345, &quot;rot_z&quot;: 2.5477, &quot;lift&quot;: 0.0429, &quot;sink&quot;: 0.2803, &quot;size&quot;: 0.9274, &quot;freq&quot;: 1.0313, &quot;flick&quot;: 0.0554}"
+          data-energy="0.7930367697916169" data-approach="1.7409923557947473" data-emit="0.12216669888904044"
+          data-top="idle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: -0.0951, &quot;bob&quot;: 0.0622, &quot;rot_x&quot;: 1.7023, &quot;rot_y&quot;: 0.9061, &quot;rot_z&quot;: 7.1255, &quot;lift&quot;: 0.024, &quot;sink&quot;: 0.0403, &quot;size&quot;: 0.9909, &quot;freq&quot;: 1.1069, &quot;flick&quot;: 0.8811}"
+          data-energy="0.8381388772002609" data-approach="1.9996774136961555"
+          data-emit="0.0017712571088769281">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e0.8 a2.0</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.34</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>0.79 / 4</dd>
+      <dt>approach</dt><dd>1.74 / 4</dd>
+      <dt>emit</dt><dd>0.122</dd>
+      <dt>latency</dt><dd>35.315s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-idle" style="width:42.09%" title="idle 0.421 (42.1%)"></span><span class="seg s-settle" style="width:24.35%" title="settle 0.243 (24.3%)"></span><span class="seg s-nod" style="width:16.45%" title="nod 0.165 (16.5%)"></span><span class="seg s-flicker" style="width:5.54%" title="flicker 0.055 (5.5%)"></span><span class="seg s-shake" style="width:4.30%" title="shake 0.043 (4.3%)"></span><span class="seg s-perk_up" style="width:3.32%" title="perk_up 0.033 (3.3%)"></span><span class="seg s-lean_in" style="width:2.57%" title="lean_in 0.026 (2.6%)"></span><span class="seg s-recoil" style="width:1.38%" title="recoil 0.014 (1.4%)"></span></div>
+    <div class="dist"><b class="d-idle">idle</b> 42% · <b class="d-settle">settle</b> 24% · <b class="d-nod">nod</b> 16% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="approved">
+    <h3>approved <span class="tag">clef</span></h3>
+    <p class="state">レビューで全部OKをもらった。そのままマージできた。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.18, &quot;rot_x&quot;: 18, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 2.083, &quot;bob&quot;: 0.2006, &quot;rot_x&quot;: 16.0087, &quot;rot_y&quot;: 0.1796, &quot;rot_z&quot;: 0.3911, &quot;lift&quot;: 0.0432, &quot;sink&quot;: 0.135, &quot;size&quot;: 0.9759, &quot;freq&quot;: 1.3979, &quot;flick&quot;: 0.009}"
+          data-energy="2.223484666090634" data-approach="2.906082483303416" data-emit="0.4345962403544053"
+          data-top="nod">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 2.0529, &quot;bob&quot;: 0.1467, &quot;rot_x&quot;: 4.6867, &quot;rot_y&quot;: 7.7722, &quot;rot_z&quot;: 3.3562, &quot;lift&quot;: 0.1222, &quot;sink&quot;: 0.1267, &quot;size&quot;: 0.9793, &quot;freq&quot;: 1.2256, &quot;flick&quot;: 0.3745}"
+          data-energy="1.890232044951825" data-approach="2.0482492346587278"
+          data-emit="0.08107550230782218">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e1.9 a2.0</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.81</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>2.22 / 4</dd>
+      <dt>approach</dt><dd>2.91 / 4</dd>
+      <dt>emit</dt><dd>0.435</dd>
+      <dt>latency</dt><dd>34.122s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-nod" style="width:83.14%" title="nod 0.831 (83.1%)"></span><span class="seg s-idle" style="width:6.38%" title="idle 0.064 (6.4%)"></span><span class="seg s-perk_up" style="width:4.09%" title="perk_up 0.041 (4.1%)"></span><span class="seg s-lean_in" style="width:3.67%" title="lean_in 0.037 (3.7%)"></span><span class="seg s-settle" style="width:0.98%" title="settle 0.010 (1.0%)"></span><span class="seg s-flicker" style="width:0.90%" title="flicker 0.009 (0.9%)"></span><span class="seg s-recoil" style="width:0.44%" title="recoil 0.004 (0.4%)"></span><span class="seg s-shake" style="width:0.40%" title="shake 0.004 (0.4%)"></span></div>
+    <div class="dist"><b class="d-nod">nod</b> 83% · <b class="d-idle">idle</b> 6% · <b class="d-perk_up">perk_up</b> 4% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card" data-key="nag">
+    <h3>nag <span class="tag">clef</span></h3>
+    <p class="state">同じ指摘を3回目にされた。もう直したはずなのに。</p>
+    <div class="row">
+      <div class="cmp">
+        <div class="cmp-label">clef</div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 0.4151, &quot;bob&quot;: 0.2099, &quot;rot_x&quot;: 7.5396, &quot;rot_y&quot;: 9.2367, &quot;rot_z&quot;: 0.9963, &quot;lift&quot;: 0.2139, &quot;sink&quot;: 0.3241, &quot;size&quot;: 0.8802, &quot;freq&quot;: 1.3049, &quot;flick&quot;: 0.067}"
+          data-energy="1.0351038252136997" data-approach="0.6439321590020773" data-emit="0.49276928165859474"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;tilt_x&quot;: 2.2022, &quot;bob&quot;: 0.1529, &quot;rot_x&quot;: 4.7812, &quot;rot_y&quot;: 10.9264, &quot;rot_z&quot;: 2.5984, &quot;lift&quot;: 0.1428, &quot;sink&quot;: 0.1341, &quot;size&quot;: 0.9781, &quot;freq&quot;: 1.2693, &quot;flick&quot;: 0.2854}"
+          data-energy="1.705721753118623" data-approach="2.117846401295882"
+          data-emit="0.10074516323507156">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
+        <div class="cmp-meta">flicker / e1.7 a2.1</div>
+      </div>
+    </div>
+    <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf 0.20</span></div>
+    <div class="pose"></div>
+    <dl>
+      <dt>energy</dt><dd>1.04 / 4</dd>
+      <dt>approach</dt><dd>0.64 / 4</dd>
+      <dt>emit</dt><dd>0.493</dd>
+      <dt>latency</dt><dd>34.672s</dd>
+    </dl>
+    <div class="bar"><span class="seg s-settle" style="width:29.58%" title="settle 0.296 (29.6%)"></span><span class="seg s-shake" style="width:20.53%" title="shake 0.205 (20.5%)"></span><span class="seg s-recoil" style="width:19.51%" title="recoil 0.195 (19.5%)"></span><span class="seg s-idle" style="width:9.21%" title="idle 0.092 (9.2%)"></span><span class="seg s-nod" style="width:9.00%" title="nod 0.090 (9.0%)"></span><span class="seg s-flicker" style="width:6.70%" title="flicker 0.067 (6.7%)"></span><span class="seg s-perk_up" style="width:3.89%" title="perk_up 0.039 (3.9%)"></span><span class="seg s-lean_in" style="width:1.58%" title="lean_in 0.016 (1.6%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 30% · <b class="d-shake">shake</b> 21% · <b class="d-recoil">recoil</b> 20% <span class="rest">他 5</span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div></div>
+<script>
+const PX = 18.0;
+const DPC = 60.0;
+const IDLE = {"tilt_x": 0, "bob": 0.22, "rot_x": 3, "rot_y": 0, "rot_z": 5, "lift": 0.0, "sink": 0.0, "size": 1.0, "freq": 1.0, "flick": 0.0};
+
+/* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。
+ *
+ * 回転が主役（平行移動の振幅差は人間に読めないと判定されたため）:
+ *   bob / rise が平行移動。rot_x(pitch) / rot_y(yaw) / rot_z(roll) が回転。
+ *
+ * lift / sink（poses.json の _recovery_rule）:
+ *   静的な上下オフセット = (sink - lift)                    … 姿勢としての沈み／浮き
+ *   葛藤 = 2*min(lift, sink)  … 符号付き平均が捨てる量そのもの
+ *   → これを**縦振幅ではなく roll（rot_z）に加算する**。振幅の差は読めないが
+ *     傾きは質的な差として読める。
+ * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので roll は増えない。
+ * 混合のときだけ「葛藤が傾きとして見える」。 */
+function varsFor(pose, energy, approach, emit) {
+  const bobS  = 0.70 + 0.15 * energy;     // 平行移動のスケール
+  const rotS  = 0.80 + 0.10 * energy;     // 回転のスケール
+  const freqM = 1.00 + 0.18 * energy;
+  const sizeM = 0.94 + 0.035 * approach;
+  const conflict = 2 * Math.min(pose.lift, pose.sink);
+  return {
+    '--p-bob':   (pose.bob * PX * bobS).toFixed(2),
+    '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
+    '--p-tiltx': (pose.tilt_x).toFixed(2),
+    '--p-rotx':  (pose.rot_x * rotS).toFixed(2),
+    '--p-roty':  (pose.rot_y * rotS).toFixed(2),
+    '--p-rotz':  ((pose.rot_z + DPC * conflict) * rotS).toFixed(2),
+    '--p-size':  (pose.size * sizeM).toFixed(3),
+    '--p-freq':  (pose.freq * freqM).toFixed(3),
+    '--p-flick': (pose.flick).toFixed(3),
+    '--p-base':  (0.22 + 0.78 * emit).toFixed(3),
+    '--p-glow':  (emit).toFixed(3),
+  };
+}
+
+function poseText(pose) {
+  const f = (v, n) => v.toFixed(n);
+  const conflict = 2 * Math.min(pose.lift, pose.sink);
+  const net = pose.sink - pose.lift;
+  const roll = pose.rot_z + DPC * conflict;
+  const face = pose.tilt_x >= 15 ? '（上面が見える）' : (pose.tilt_x <= -15 ? '（下面が見える）' : '');
+  return 'tilt ' + f(pose.tilt_x, 1) + 'deg' + face
+       + ' · rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
+       + f(roll, 1) + 'deg'
+       + (conflict > 0.02 ? '（うち葛藤 ' + f(DPC * conflict, 1) + 'deg）' : '')
+       + '  /  bob ' + f(pose.bob, 2) + ' · 正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
+       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2) + ' · flick ' + f(pose.flick, 2);
+}
+
+function apply(theta, mode) {
+  document.getElementById('thv').textContent = theta.toFixed(2);
+  const fired = [];
+  document.querySelectorAll('.card[data-key]').forEach(card => {
+    const body = card.querySelector('[data-role=main]');
+    const emit = parseFloat(body.dataset.emit);
+    const energy = parseFloat(body.dataset.energy);
+    const approach = parseFloat(body.dataset.approach);
+    const top = body.dataset.top;
+    const on = emit >= theta;
+
+    let pose, label;
+    if (mode === 'argmax' && !on) {
+      pose = IDLE; label = 'idle';
+    } else if (mode === 'argmax') {
+      pose = JSON.parse(body.dataset.poseTop.replace(/&quot;/g, '"')); label = top;
+    } else {
+      pose = JSON.parse(body.dataset.poseMean.replace(/&quot;/g, '"'));
+      label = on ? '補間' : '補間（沈黙）';
+    }
+    const v = varsFor(pose, energy, approach, on || mode === 'mean' ? emit : 0);
+    for (const k in v) body.style.setProperty(k, v[k]);
+
+    card.classList.toggle('silent', mode === 'argmax' && !on);
+    const name = card.querySelector('.gname');
+    const note = card.querySelector('.gnote');
+    if (name) name.textContent = label;
+    if (note) note.innerHTML = (mode === 'argmax' && !on)
+      ? ' <span>(emit ' + emit.toFixed(2) + ' &lt; ' + theta.toFixed(2) + ' → idle。モデルの選択は ' + top + ')</span>'
+      : '';
+    card.querySelector('.pose').textContent = poseText(pose);
+    if (on) fired.push(card.dataset.key);
+  });
+  document.querySelectorAll('[data-role=cmp]').forEach(b => {
+    const p = JSON.parse(b.dataset.pose.replace(/&quot;/g, '"'));
+    const v = varsFor(p, parseFloat(b.dataset.energy), parseFloat(b.dataset.approach), parseFloat(b.dataset.emit));
+    for (const k in v) b.style.setProperty(k, v[k]);
+  });
+  document.getElementById('cnt').textContent = '発火 ' + fired.length + ' / 8';
+  document.getElementById('fires').textContent = fired.join(', ');
+}
+const th = document.getElementById('th'), md = document.getElementById('mode');
+const upd = () => apply(parseFloat(th.value), md.value);
+th.addEventListener('input', upd);
+md.addEventListener('change', upd);
+upd();
+</script>
+</body></html>

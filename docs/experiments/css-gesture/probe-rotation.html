@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<title>probe: 回転が読める角度と perspective のしきい値</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; padding: 16px; background: #14161a; color: #ddd;
+       font-family: system-ui, sans-serif; }
+h2 { font-size: 12px; font-weight: 600; margin: 14px 0 6px; color: #9aa; }
+.grid { display: flex; gap: 10px; flex-wrap: wrap; }
+.cell { text-align: center; }
+.cell .lbl { font-size: 10px; color: #8a8f98; margin-top: 3px; }
+.scene { width: 96px; height: 96px; display: grid; place-items: center;
+         perspective-origin: 50% 45%; }
+.cube { position: relative; width: 44px; height: 44px; transform-style: preserve-3d; }
+.face { position: absolute; inset: 0; border-radius: 6px;
+        background: #d2694a; border: 1px solid rgba(0,0,0,.25); }
+.f-front  { transform: translateZ(22px); }
+.f-back   { transform: rotateY(180deg) translateZ(22px); filter: brightness(.55); }
+.f-right  { transform: rotateY(90deg)  translateZ(22px); filter: brightness(.74); }
+.f-left   { transform: rotateY(-90deg) translateZ(22px); filter: brightness(.62); }
+.f-top    { transform: rotateX(90deg)  translateZ(22px); filter: brightness(1.18); }
+.f-bottom { transform: rotateX(-90deg) translateZ(22px); filter: brightness(.44); }
+</style></head>
+<body>
+<div id="out"></div>
+<script>
+const PERSP = [440, 260, 170, 110];
+const ANGLES = [[0,0],[15,0],[30,0],[45,0],[60,0],[0,15],[0,30],[0,45],[0,60],[30,30]];
+let html = '';
+for (const p of PERSP) {
+  html += `<h2>perspective: ${p}px</h2><div class="grid">`;
+  for (const [ry, rx] of ANGLES) {
+    html += `<div class="cell">
+      <div class="scene" style="perspective:${p}px">
+        <div class="cube" style="transform: rotateY(${ry}deg) rotateX(${rx}deg)">
+          <div class="face f-front"></div><div class="face f-back"></div>
+          <div class="face f-right"></div><div class="face f-left"></div>
+          <div class="face f-top"></div><div class="face f-bottom"></div>
+        </div>
+      </div>
+      <div class="lbl">yaw ${ry}° / pitch ${rx}°</div></div>`;
+  }
+  html += '</div>';
+}
+document.getElementById('out').innerHTML = html;
+</script></body></html>
