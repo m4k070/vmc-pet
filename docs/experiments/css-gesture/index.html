@@ -4,63 +4,101 @@
 <style>
 /* css-gesture spike — 姿勢パラメータ空間の描画（手書き・決定論的）
  *
- * 8個の keyframe アニメーションを並べる方式は、確率で重ねると「半透明の図形がずれた雲」になり、
- * 動きの混合にならなかった（docs/experiments/css-gesture.md「混合を重ね合わせで描くと雲になる」）。
+ * 変遷:
+ *   1. 8個の keyframe アニメーションを確率で重ねる → 「半透明の図形がずれた雲」になり不採用
+ *   2. 語彙を姿勢パラメータ空間の点にし、混合を重み付き平均（補間）に → 雲は解消
+ *   3. rise（符号付き1次元）が混合で相殺する → lift / sink の非負2チャネルに分割
+ *   4. 平行移動の振幅差は人間に読めない → **Cube にして回転（rotateX/Y/Z）を持たせた**
  *
- * そこで語彙を poses.json の「姿勢パラメータ空間の点」として定義し直し、
- * 混合は**重み付き平均（補間）**で1つの姿勢ベクトルにした。描画は常に1体。
+ * 4 について: 立方体では yaw / pitch が「別の面が見える」という離散的な変化になるので、
+ * ただの foreshortening（＝拡大縮小に見える）にならず、回転として読める。
+ * 混合の「葛藤」（2*min(lift, sink)）も、縦振幅ではなく roll の振れとして描く。
  *
- * 受け取る変数（build_viewer.py の JS が計算して inline style で入れる）:
- *   --p-ampx : 横振幅（px）
- *   --p-ampy : 縦振幅（px）。混合の「葛藤」分（2*min(lift, sink)）もここに加算済み
- *   --p-rise : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
- *   --p-size : 体の大きさ
- *   --p-freq : 動きの速さ（大きいほど速い。周期の逆数の相対値）
- *   --p-flick: 明滅の強さ（0-1）
- *   --p-base : 不透明度の基準（発火の強さ）
- *   --p-glow : 発光の強さ（発火の強さ）
- *
- * 軸（縦/横）が連続量なので、nod と shake の混合は「斜めの振れ」として素直に出る。
- * 上下も lift / sink に割ってあるので、「沈む + 浮く」は相殺せず縦の揺れになる。
+ * 受け取る変数（build_viewer.py の JS が .stage に inline style で入れる。子は継承で受ける）:
+ *   --p-bob   : 上下のボブ振幅（px）
+ *   --p-rise  : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
+ *   --p-rotx  : pitch の振れ幅（度）
+ *   --p-roty  : yaw の振れ幅（度）
+ *   --p-rotz  : roll の振れ幅（度）。混合の「葛藤」もここに加算済み
+ *   --p-size  : 体の大きさ
+ *   --p-freq  : 動きの速さ（大きいほど速い。周期の逆数の相対値）
+ *   --p-flick : 明滅の強さ（0-1）
+ *   --p-base  : 不透明度の基準（発火の強さ）
+ *   --p-glow  : 発光の強さ（発火の強さ）
  */
 
 .stage {
+  --cube-w: 44px;
   position: relative;
   width: 160px;
   height: 160px;
   display: grid;
   place-items: center;
+  /* 3D の遠近。これが無いと Cube の回転が「回転」に見えない。
+     probe-rotation.html の実測: 440px では立体として読むのに 30度必要、170px なら 15度で読める。 */
+  perspective: 170px;
+  perspective-origin: 50% 45%;
 }
 
-/* 体。姿勢ベクトル1つで駆動される。 */
+/* 発光。Cube の box-shadow は 3D に乗らないので、後ろに置いた光で代用する。 */
+.stage::before {
+  content: '';
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent, #d2694a) 0%, transparent 68%);
+  opacity: calc(0.75 * var(--p-glow, 0));
+  filter: blur(7px);
+  pointer-events: none;
+}
+
+/* 明滅はこの層が持つ。opacity < 1 を preserve-3d の要素に当てると 3D が平坦化されるため、
+   Cube 本体とは別の要素に分けている。 */
+.flick {
+  animation: k-flick calc(0.9s / var(--p-freq, 1)) steps(1, end) infinite;
+}
+
+/* Cube。姿勢ベクトル1つで駆動される。 */
 .body {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: var(--accent, #d2694a);
-  transform-origin: 50% 70%;
-  box-shadow: 0 0 calc(26px * var(--p-glow, 0)) var(--accent, #d2694a);
-
-  /* 変形（姿勢）と明滅は独立したプロパティなので、別アニメーションで同時に走らせられる。 */
-  animation-name: k-pose, k-flick;
-  animation-duration: calc(2.2s / var(--p-freq, 1)), calc(0.9s / var(--p-freq, 1));
-  animation-timing-function: ease-in-out, steps(1, end);
-  animation-iteration-count: infinite, infinite;
+  position: relative;
+  width: var(--cube-w);
+  height: var(--cube-w);
+  transform-style: preserve-3d;
+  transform-origin: 50% 50%;
+  animation: k-pose calc(2.2s / var(--p-freq, 1)) ease-in-out infinite;
 }
 
-/* 姿勢。振幅と静的偏りを変数から受ける。波の形は往復の正弦1種類。 */
+.face {
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  background: var(--accent, #d2694a);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+}
+/* 面ごとに明度を変えて、回転したときに立体として読めるようにする。 */
+.f-front  { transform: translateZ(calc(var(--cube-w) / 2)); }
+.f-back   { transform: rotateY(180deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.55); }
+.f-right  { transform: rotateY(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.74); }
+.f-left   { transform: rotateY(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.62); }
+.f-top    { transform: rotateX(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(1.18); }
+.f-bottom { transform: rotateX(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.44); }
+
+/* 姿勢。平行移動は上下のボブと静的偏りだけ。回転が主役。波の形は往復の正弦1種類。 */
 @keyframes k-pose {
   0%, 100% {
-    transform: translate(
-        calc(var(--p-ampx, 0) * -1px),
-        calc((var(--p-rise, 0) - var(--p-ampy, 0)) * 1px)
-      ) scale(var(--p-size, 1));
+    transform: translateY(calc((var(--p-rise, 0) - var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-rotx, 0) * -1deg))
+               rotateY(calc(var(--p-roty, 0) * -1deg))
+               rotateZ(calc(var(--p-rotz, 0) * -1deg))
+               scale(var(--p-size, 1));
   }
   50% {
-    transform: translate(
-        calc(var(--p-ampx, 0) * 1px),
-        calc((var(--p-rise, 0) + var(--p-ampy, 0)) * 1px)
-      ) scale(var(--p-size, 1));
+    transform: translateY(calc((var(--p-rise, 0) + var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-rotx, 0) * 1deg))
+               rotateY(calc(var(--p-roty, 0) * 1deg))
+               rotateZ(calc(var(--p-rotz, 0) * 1deg))
+               scale(var(--p-size, 1));
   }
 }
 
@@ -75,11 +113,12 @@
 }
 
 /* 比較用の小さい枠（Laya など別モデルの結果を並べるとき） */
-.stage.sm { width: 110px; height: 110px; }
-.stage.sm .body { width: 40px; height: 40px; border-radius: 12px; }
+.stage.sm { --cube-w: 32px; width: 110px; height: 110px; perspective: 140px; }
+.stage.sm::before { width: 56px; height: 56px; }
+.stage.sm .face { border-radius: 5px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .body { animation: none; }
+  .flick, .body { animation: none; }
 }
 
 /* --- ビューアのレイアウト。gestures.css より後に置いて上書きする --- */
@@ -135,11 +174,13 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
 <body>
 <h1>css-gesture spike — 姿勢パラメータ空間（混合は補間、描画は1体）</h1>
 <p class="sub">
-語彙を <code>poses.json</code> の<code>&lbrace;amp_x, amp_y, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
-混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に1体。<br>
+語彙を <code>poses.json</code> の<code>&lbrace;bob, rot_x, rot_y, rot_z, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
+混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に<strong>1つの Cube</strong>。<br>
+<strong>回転が主役</strong>: 平行移動の振幅差は人間に読めない（実測で fixed_bug と approved の縦振幅差は 1.31x しかなく静止画では読めなかった）。
+Cube では yaw / pitch が「別の面が見える」離散的な変化になるので、回転として読める。<br>
 <code>lift</code> / <code>sink</code> は上下の向きを分けた非負のチャネル。静的な偏りは <code>(sink - lift)</code> が担い、
-符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>縦の揺れとして戻す</strong>ので、
-「沈む + 浮く」が中立ではなく<strong>葛藤（揺れ）</strong>として描かれる（各カードの「葛藤」の値）。<br>
+符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>roll の振れ（度）として戻す</strong>ので、
+「沈む + 浮く」が<strong>傾き（葛藤）</strong>として描かれる。<br>
 前版の「確率で重ねる」方式は<strong>半透明の図形がずれた雲</strong>になり、動きの混合にならなかった（人の判定）。
 <strong>表示</strong>を切り替えると、一番確率の高い姿勢（argmax）と、補間した姿勢（mean）を同じ枠で比べられる。<br>
 モデル <b>clef</b> / 比較 <b>laya</b>。
@@ -165,18 +206,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.7, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0083, &quot;amp_y&quot;: 0.6587, &quot;lift&quot;: 0.2211, &quot;sink&quot;: 0.1235, &quot;size&quot;: 1.0129, &quot;freq&quot;: 1.3728, &quot;flick&quot;: 0.0267}"
-        data-energy="2.781948281233433" data-approach="2.7248762040554406" data-emit="0.47065061788877743"
-        data-top="nod"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.18, &quot;rot_x&quot;: 40, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.3048, &quot;rot_x&quot;: 27.8596, &quot;rot_y&quot;: 0.4146, &quot;rot_z&quot;: 0.7408, &quot;lift&quot;: 0.2211, &quot;sink&quot;: 0.1235, &quot;size&quot;: 1.0129, &quot;freq&quot;: 1.3728, &quot;flick&quot;: 0.0267}"
+          data-energy="2.781948281233433" data-approach="2.7248762040554406" data-emit="0.47065061788877743"
+          data-top="nod">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.1151, &quot;amp_y&quot;: 0.2086, &quot;lift&quot;: 0.1078, &quot;sink&quot;: 0.1084, &quot;size&quot;: 0.9734, &quot;freq&quot;: 1.2081, &quot;flick&quot;: 0.5328}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.1222, &quot;rot_x&quot;: 8.6332, &quot;rot_y&quot;: 5.7548, &quot;rot_z&quot;: 4.4493, &quot;lift&quot;: 0.1078, &quot;sink&quot;: 0.1084, &quot;size&quot;: 0.9734, &quot;freq&quot;: 1.2081, &quot;flick&quot;: 0.5328}"
           data-energy="1.1085895315065621" data-approach="2.010867446223232"
-          data-emit="0.05416380573906749"></div></div>
+          data-emit="0.05416380573906749">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e1.1 a2.0</div>
       </div>
     </div>
@@ -198,18 +243,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.22, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0469, &quot;amp_y&quot;: 0.3059, &quot;lift&quot;: 0.0965, &quot;sink&quot;: 0.5849, &quot;size&quot;: 0.8325, &quot;freq&quot;: 0.9243, &quot;flick&quot;: 0.0869}"
-        data-energy="1.059922208640876" data-approach="1.0891702567640278" data-emit="0.3558336394126617"
-        data-top="settle"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.191, &quot;rot_x&quot;: 13.0752, &quot;rot_y&quot;: 2.3425, &quot;rot_z&quot;: 1.2691, &quot;lift&quot;: 0.0965, &quot;sink&quot;: 0.5849, &quot;size&quot;: 0.8325, &quot;freq&quot;: 0.9243, &quot;flick&quot;: 0.0869}"
+          data-energy="1.059922208640876" data-approach="1.0891702567640278" data-emit="0.3558336394126617"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.0629, &quot;amp_y&quot;: 0.1346, &quot;lift&quot;: 0.0537, &quot;sink&quot;: 0.0576, &quot;size&quot;: 0.9885, &quot;freq&quot;: 1.1479, &quot;flick&quot;: 0.7523}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.0826, &quot;rot_x&quot;: 5.1598, &quot;rot_y&quot;: 3.1433, &quot;rot_z&quot;: 6.1314, &quot;lift&quot;: 0.0537, &quot;sink&quot;: 0.0576, &quot;size&quot;: 0.9885, &quot;freq&quot;: 1.1479, &quot;flick&quot;: 0.7523}"
           data-energy="2.0207871318474595" data-approach="1.9222507569040301"
-          data-emit="0.11162016520335129"></div></div>
+          data-emit="0.11162016520335129">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e2.0 a1.9</div>
       </div>
     </div>
@@ -231,18 +280,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.28, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0109, &quot;amp_y&quot;: 0.3039, &quot;lift&quot;: 0.032, &quot;sink&quot;: 0.041, &quot;size&quot;: 0.9936, &quot;freq&quot;: 1.0325, &quot;flick&quot;: 0.0312}"
-        data-energy="0.5057425893281169" data-approach="1.639626740264764" data-emit="0.03626141769958141"
-        data-top="idle"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.22, &quot;rot_x&quot;: 6, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.2191, &quot;rot_x&quot;: 8.0926, &quot;rot_y&quot;: 0.5457, &quot;rot_z&quot;: 4.4226, &quot;lift&quot;: 0.032, &quot;sink&quot;: 0.041, &quot;size&quot;: 0.9936, &quot;freq&quot;: 1.0325, &quot;flick&quot;: 0.0312}"
+          data-energy="0.5057425893281169" data-approach="1.639626740264764" data-emit="0.03626141769958141"
+          data-top="idle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.1534, &quot;amp_y&quot;: 0.1867, &quot;lift&quot;: 0.0772, &quot;sink&quot;: 0.0803, &quot;size&quot;: 0.9815, &quot;freq&quot;: 1.2047, &quot;flick&quot;: 0.4701}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.1187, &quot;rot_x&quot;: 6.7995, &quot;rot_y&quot;: 7.6721, &quot;rot_z&quot;: 4.4913, &quot;lift&quot;: 0.0772, &quot;sink&quot;: 0.0803, &quot;size&quot;: 0.9815, &quot;freq&quot;: 1.2047, &quot;flick&quot;: 0.4701}"
           data-energy="0.8035862374487781" data-approach="1.8855115480383735"
-          data-emit="0.062105065616315916"></div></div>
+          data-emit="0.062105065616315916">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e0.8 a1.9</div>
       </div>
     </div>
@@ -264,18 +317,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.22, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0693, &quot;amp_y&quot;: 0.3037, &quot;lift&quot;: 0.1169, &quot;sink&quot;: 0.5266, &quot;size&quot;: 0.8414, &quot;freq&quot;: 0.9927, &quot;flick&quot;: 0.1004}"
-        data-energy="0.7860229123961211" data-approach="0.7995392655666422" data-emit="0.17981665398860586"
-        data-top="settle"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.1922, &quot;rot_x&quot;: 13.0295, &quot;rot_y&quot;: 3.4648, &quot;rot_z&quot;: 1.4407, &quot;lift&quot;: 0.1169, &quot;sink&quot;: 0.5266, &quot;size&quot;: 0.8414, &quot;freq&quot;: 0.9927, &quot;flick&quot;: 0.1004}"
+          data-energy="0.7860229123961211" data-approach="0.7995392655666422" data-emit="0.17981665398860586"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.0538, &quot;amp_y&quot;: 0.1484, &quot;lift&quot;: 0.059, &quot;sink&quot;: 0.0828, &quot;size&quot;: 0.9803, &quot;freq&quot;: 1.1345, &quot;flick&quot;: 0.7132}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.0924, &quot;rot_x&quot;: 5.6864, &quot;rot_y&quot;: 2.6907, &quot;rot_z&quot;: 5.916, &quot;lift&quot;: 0.059, &quot;sink&quot;: 0.0828, &quot;size&quot;: 0.9803, &quot;freq&quot;: 1.1345, &quot;flick&quot;: 0.7132}"
           data-energy="1.2071314724795634" data-approach="1.8806378961439547"
-          data-emit="0.028199451682429315"></div></div>
+          data-emit="0.028199451682429315">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e1.2 a1.9</div>
       </div>
     </div>
@@ -297,18 +354,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.06, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.1, &quot;flick&quot;: 1.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0226, &quot;amp_y&quot;: 0.1249, &quot;lift&quot;: 0.0231, &quot;sink&quot;: 0.0505, &quot;size&quot;: 0.9856, &quot;freq&quot;: 1.1017, &quot;flick&quot;: 0.7599}"
-        data-energy="0.9302040205270176" data-approach="1.150667561300046" data-emit="0.22343648219510964"
-        data-top="flicker"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.04, &quot;rot_x&quot;: 2, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 8, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.1, &quot;flick&quot;: 1.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.0821, &quot;rot_x&quot;: 4.3148, &quot;rot_y&quot;: 1.1314, &quot;rot_z&quot;: 6.6852, &quot;lift&quot;: 0.0231, &quot;sink&quot;: 0.0505, &quot;size&quot;: 0.9856, &quot;freq&quot;: 1.1017, &quot;flick&quot;: 0.7599}"
+          data-energy="0.9302040205270176" data-approach="1.150667561300046" data-emit="0.22343648219510964"
+          data-top="flicker">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.209, &quot;amp_y&quot;: 0.2379, &quot;lift&quot;: 0.1219, &quot;sink&quot;: 0.1398, &quot;size&quot;: 0.9743, &quot;freq&quot;: 1.2336, &quot;flick&quot;: 0.3044}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.1435, &quot;rot_x&quot;: 9.2807, &quot;rot_y&quot;: 10.4485, &quot;rot_z&quot;: 2.9162, &quot;lift&quot;: 0.1219, &quot;sink&quot;: 0.1398, &quot;size&quot;: 0.9743, &quot;freq&quot;: 1.2336, &quot;flick&quot;: 0.3044}"
           data-energy="1.9930983482359932" data-approach="2.3641832389921715"
-          data-emit="0.034546244783597004"></div></div>
+          data-emit="0.034546244783597004">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e2.0 a2.4</div>
       </div>
     </div>
@@ -330,18 +391,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.28, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0387, &quot;amp_y&quot;: 0.3433, &quot;lift&quot;: 0.0429, &quot;sink&quot;: 0.2803, &quot;size&quot;: 0.9274, &quot;freq&quot;: 1.0313, &quot;flick&quot;: 0.0554}"
-        data-energy="0.7930367697916169" data-approach="1.7409923557947473" data-emit="0.12216669888904044"
-        data-top="idle"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.22, &quot;rot_x&quot;: 6, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.1957, &quot;rot_x&quot;: 13.5085, &quot;rot_y&quot;: 1.9345, &quot;rot_z&quot;: 2.5477, &quot;lift&quot;: 0.0429, &quot;sink&quot;: 0.2803, &quot;size&quot;: 0.9274, &quot;freq&quot;: 1.0313, &quot;flick&quot;: 0.0554}"
+          data-energy="0.7930367697916169" data-approach="1.7409923557947473" data-emit="0.12216669888904044"
+          data-top="idle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.0181, &quot;amp_y&quot;: 0.0975, &quot;lift&quot;: 0.024, &quot;sink&quot;: 0.0403, &quot;size&quot;: 0.9909, &quot;freq&quot;: 1.1069, &quot;flick&quot;: 0.8811}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.0622, &quot;rot_x&quot;: 3.5606, &quot;rot_y&quot;: 0.9061, &quot;rot_z&quot;: 7.1255, &quot;lift&quot;: 0.024, &quot;sink&quot;: 0.0403, &quot;size&quot;: 0.9909, &quot;freq&quot;: 1.1069, &quot;flick&quot;: 0.8811}"
           data-energy="0.8381388772002609" data-approach="1.9996774136961555"
-          data-emit="0.0017712571088769281"></div></div>
+          data-emit="0.0017712571088769281">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e0.8 a2.0</div>
       </div>
     </div>
@@ -363,18 +428,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.7, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.0036, &quot;amp_y&quot;: 0.6603, &quot;lift&quot;: 0.0432, &quot;sink&quot;: 0.135, &quot;size&quot;: 0.9759, &quot;freq&quot;: 1.3979, &quot;flick&quot;: 0.009}"
-        data-energy="2.223484666090634" data-approach="2.906082483303416" data-emit="0.4345962403544053"
-        data-top="nod"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.18, &quot;rot_x&quot;: 40, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.2006, &quot;rot_x&quot;: 35.5974, &quot;rot_y&quot;: 0.1796, &quot;rot_z&quot;: 0.3911, &quot;lift&quot;: 0.0432, &quot;sink&quot;: 0.135, &quot;size&quot;: 0.9759, &quot;freq&quot;: 1.3979, &quot;flick&quot;: 0.009}"
+          data-energy="2.223484666090634" data-approach="2.906082483303416" data-emit="0.4345962403544053"
+          data-top="nod">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.1554, &quot;amp_y&quot;: 0.257, &quot;lift&quot;: 0.1222, &quot;sink&quot;: 0.1267, &quot;size&quot;: 0.9793, &quot;freq&quot;: 1.2256, &quot;flick&quot;: 0.3745}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.1467, &quot;rot_x&quot;: 10.3032, &quot;rot_y&quot;: 7.7722, &quot;rot_z&quot;: 3.3562, &quot;lift&quot;: 0.1222, &quot;sink&quot;: 0.1267, &quot;size&quot;: 0.9793, &quot;freq&quot;: 1.2256, &quot;flick&quot;: 0.3745}"
           data-energy="1.890232044951825" data-approach="2.0482492346587278"
-          data-emit="0.08107550230782218"></div></div>
+          data-emit="0.08107550230782218">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e1.9 a2.0</div>
       </div>
     </div>
@@ -396,18 +465,22 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">clef</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{&quot;amp_x&quot;: 0.0, &quot;amp_y&quot;: 0.22, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-        data-pose-mean="{&quot;amp_x&quot;: 0.1847, &quot;amp_y&quot;: 0.3576, &quot;lift&quot;: 0.2139, &quot;sink&quot;: 0.3241, &quot;size&quot;: 0.8802, &quot;freq&quot;: 1.3049, &quot;flick&quot;: 0.067}"
-        data-energy="1.0351038252136997" data-approach="0.6439321590020773" data-emit="0.49276928165859474"
-        data-top="settle"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;bob&quot;: 0.2099, &quot;rot_x&quot;: 16.4069, &quot;rot_y&quot;: 9.2367, &quot;rot_z&quot;: 0.9963, &quot;lift&quot;: 0.2139, &quot;sink&quot;: 0.3241, &quot;size&quot;: 0.8802, &quot;freq&quot;: 1.3049, &quot;flick&quot;: 0.067}"
+          data-energy="1.0351038252136997" data-approach="0.6439321590020773" data-emit="0.49276928165859474"
+          data-top="settle">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
       </div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
-          data-pose="{&quot;amp_x&quot;: 0.2185, &quot;amp_y&quot;: 0.2632, &quot;lift&quot;: 0.1428, &quot;sink&quot;: 0.1341, &quot;size&quot;: 0.9781, &quot;freq&quot;: 1.2693, &quot;flick&quot;: 0.2854}"
+        <div class="stage sm" data-role="cmp"
+          data-pose="{&quot;bob&quot;: 0.1529, &quot;rot_x&quot;: 10.5446, &quot;rot_y&quot;: 10.9264, &quot;rot_z&quot;: 2.5984, &quot;lift&quot;: 0.1428, &quot;sink&quot;: 0.1341, &quot;size&quot;: 0.9781, &quot;freq&quot;: 1.2693, &quot;flick&quot;: 0.2854}"
           data-energy="1.705721753118623" data-approach="2.117846401295882"
-          data-emit="0.10074516323507156"></div></div>
+          data-emit="0.10074516323507156">
+          <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
+        </div>
         <div class="cmp-meta">flicker / e1.7 a2.1</div>
       </div>
     </div>
@@ -425,25 +498,33 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
   </div></div>
 <script>
 const PX = 18.0;
-const IDLE = {"amp_x": 0.0, "amp_y": 0.28, "lift": 0.0, "sink": 0.0, "size": 1.0, "freq": 1.0, "flick": 0.0};
+const DPC = 60.0;
+const IDLE = {"bob": 0.22, "rot_x": 6, "rot_y": 0, "rot_z": 5, "lift": 0.0, "sink": 0.0, "size": 1.0, "freq": 1.0, "flick": 0.0};
 
 /* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。
  *
- * lift / sink の扱い（poses.json の _recovery_rule）:
- *   静的な上下オフセット = (sink - lift)          … 姿勢としての沈み／浮き
- *   縦の振れ幅に + 2*min(lift, sink)              … 符号付き平均が捨てていた量をそのまま戻す
- *   （lift + sink - |sink - lift| = 2*min(lift, sink)）
- * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので振れは増えない。
- * 混合のときだけ「葛藤が揺れとして見える」。 */
+ * 回転が主役（平行移動の振幅差は人間に読めないと判定されたため）:
+ *   bob / rise が平行移動。rot_x(pitch) / rot_y(yaw) / rot_z(roll) が回転。
+ *
+ * lift / sink（poses.json の _recovery_rule）:
+ *   静的な上下オフセット = (sink - lift)                    … 姿勢としての沈み／浮き
+ *   葛藤 = 2*min(lift, sink)  … 符号付き平均が捨てる量そのもの
+ *   → これを**縦振幅ではなく roll（rot_z）に加算する**。振幅の差は読めないが
+ *     傾きは質的な差として読める。
+ * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので roll は増えない。
+ * 混合のときだけ「葛藤が傾きとして見える」。 */
 function varsFor(pose, energy, approach, emit) {
-  const ampS  = 0.70 + 0.15 * energy;     // energy 0->4 で 0.70 -> 1.30
-  const freqM = 1.00 + 0.18 * energy;     // 1.00 -> 1.72
-  const sizeM = 0.94 + 0.035 * approach;  // 0.94 -> 1.08
+  const bobS  = 0.70 + 0.15 * energy;     // 平行移動のスケール
+  const rotS  = 0.80 + 0.10 * energy;     // 回転のスケール
+  const freqM = 1.00 + 0.18 * energy;
+  const sizeM = 0.94 + 0.035 * approach;
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   return {
-    '--p-ampx':  (pose.amp_x * PX * ampS).toFixed(2),
-    '--p-ampy':  ((pose.amp_y + conflict) * PX * ampS).toFixed(2),
+    '--p-bob':   (pose.bob * PX * bobS).toFixed(2),
     '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
+    '--p-rotx':  (pose.rot_x * rotS).toFixed(2),
+    '--p-roty':  (pose.rot_y * rotS).toFixed(2),
+    '--p-rotz':  ((pose.rot_z + DPC * conflict) * rotS).toFixed(2),
     '--p-size':  (pose.size * sizeM).toFixed(3),
     '--p-freq':  (pose.freq * freqM).toFixed(3),
     '--p-flick': (pose.flick).toFixed(3),
@@ -456,12 +537,12 @@ function poseText(pose) {
   const f = (v, n) => v.toFixed(n);
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   const net = pose.sink - pose.lift;
-  return 'ampx ' + f(pose.amp_x, 2) + ' · ampy ' + f(pose.amp_y, 2)
-       + ' · lift ' + f(pose.lift, 2) + ' · sink ' + f(pose.sink, 2)
-       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2)
-       + ' · flick ' + f(pose.flick, 2)
-       + '  →  正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
-       + (conflict > 0.02 ? ' / 葛藤 ' + f(conflict, 2) : '');
+  const roll = pose.rot_z + DPC * conflict;
+  return 'rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
+       + f(roll, 1) + 'deg'
+       + (conflict > 0.02 ? '（うち葛藤 ' + f(DPC * conflict, 1) + 'deg）' : '')
+       + '  /  bob ' + f(pose.bob, 2) + ' · 正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
+       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2) + ' · flick ' + f(pose.flick, 2);
 }
 
 function apply(theta, mode) {
@@ -497,7 +578,7 @@ function apply(theta, mode) {
     card.querySelector('.pose').textContent = poseText(pose);
     if (on) fired.push(card.dataset.key);
   });
-  document.querySelectorAll('.cmp .body').forEach(b => {
+  document.querySelectorAll('[data-role=cmp]').forEach(b => {
     const p = JSON.parse(b.dataset.pose.replace(/&quot;/g, '"'));
     const v = varsFor(p, parseFloat(b.dataset.energy), parseFloat(b.dataset.approach), parseFloat(b.dataset.emit));
     for (const k in v) b.style.setProperty(k, v[k]);

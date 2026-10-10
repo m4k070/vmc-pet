@@ -29,6 +29,9 @@ from pathlib import Path
 
 GESTURE_ORDER = ["idle", "perk_up", "nod", "shake", "lean_in", "recoil", "settle", "flicker"]
 DEFAULT_THETA = 0.30
+FACES = ('<div class="face f-front"></div><div class="face f-back"></div>'
+         '<div class="face f-right"></div><div class="face f-left"></div>'
+         '<div class="face f-top"></div><div class="face f-bottom"></div>')
 
 
 def load_poses(path: Path) -> dict:
@@ -36,6 +39,7 @@ def load_poses(path: Path) -> dict:
     return {
         "gestures": d["gestures"],
         "px_per_unit": d["scale"]["px_per_unit"],
+        "deg_per_conflict": d["scale"]["deg_per_conflict"],
         "dimensions": list(d["dimensions"]),
         "notes": d["notes"],
     }
@@ -118,10 +122,12 @@ def main() -> None:
         energy = row.get("energy") or 0.0
         approach = row.get("approach") or 0.0
         emit = row.get("emit") or 0.0
-        report.append(f"  {row['key']:12} top={top:9} ampx{mean_r['amp_x']:.2f} "
-                      f"ampy{mean_r['amp_y']:.2f} lift{mean_r['lift']:.2f} sink{mean_r['sink']:.2f} "
+        report.append(f"  {row['key']:12} top={top:9} bob{mean_r['bob']:.2f} "
+                      f"rot_x{mean_r['rot_x']:.1f} rot_y{mean_r['rot_y']:.1f} "
+                      f"rot_z{mean_r['rot_z']:.1f} lift{mean_r['lift']:.2f} sink{mean_r['sink']:.2f} "
                       f"size{mean_r['size']:.2f} freq{mean_r['freq']:.2f} flick{mean_r['flick']:.2f} "
-                      f"| 葛藤{2*min(mean_r['lift'], mean_r['sink']):.3f} 正味{mean_r['sink']-mean_r['lift']:+.3f}")
+                      f"| 葛藤{2*min(mean_r['lift'], mean_r['sink']):.3f} "
+                      f"→ roll {P['deg_per_conflict']*2*min(mean_r['lift'], mean_r['sink']):.1f}deg")
 
         # Laya を並べる（同じ姿勢空間で描く）
         other_html = ""
@@ -133,10 +139,12 @@ def main() -> None:
             other_html = f"""
       <div class="cmp">
         <div class="cmp-label">{cmp_data['model']}</div>
-        <div class="stage sm"><div class="body" data-role="cmp"
+        <div class="stage sm" data-role="cmp"
           data-pose="{json.dumps(omean_r).replace(chr(34), '&quot;')}"
           data-energy="{other.get('energy') or 0}" data-approach="{other.get('approach') or 0}"
-          data-emit="{other.get('emit') or 0}"></div></div>
+          data-emit="{other.get('emit') or 0}">
+          <div class="flick"><div class="body">{FACES}</div></div>
+        </div>
         <div class="cmp-meta">{otop} / e{(other.get('energy') or 0):.1f} a{(other.get('approach') or 0):.1f}</div>
       </div>"""
 
@@ -147,11 +155,13 @@ def main() -> None:
     <div class="row">
       <div class="cmp">
         <div class="cmp-label">{data['model']}</div>
-        <div class="stage"><div class="body" data-role="main"
-        data-pose-top="{json.dumps(pose_top).replace(chr(34), '&quot;')}"
-        data-pose-mean="{json.dumps(mean_r).replace(chr(34), '&quot;')}"
-        data-energy="{energy}" data-approach="{approach}" data-emit="{emit}"
-        data-top="{top}"></div></div>
+        <div class="stage" data-role="main"
+          data-pose-top="{json.dumps(pose_top).replace(chr(34), '&quot;')}"
+          data-pose-mean="{json.dumps(mean_r).replace(chr(34), '&quot;')}"
+          data-energy="{energy}" data-approach="{approach}" data-emit="{emit}"
+          data-top="{top}">
+          <div class="flick"><div class="body">{FACES}</div></div>
+        </div>
       </div>{other_html}
     </div>
     <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf {row.get('gesture_confidence') or 0:.2f}</span></div>
@@ -229,11 +239,13 @@ dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
 <body>
 <h1>css-gesture spike — 姿勢パラメータ空間（混合は補間、描画は1体）</h1>
 <p class="sub">
-語彙を <code>poses.json</code> の<code>&lbrace;amp_x, amp_y, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
-混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に1体。<br>
+語彙を <code>poses.json</code> の<code>&lbrace;bob, rot_x, rot_y, rot_z, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
+混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に<strong>1つの Cube</strong>。<br>
+<strong>回転が主役</strong>: 平行移動の振幅差は人間に読めない（実測で fixed_bug と approved の縦振幅差は 1.31x しかなく静止画では読めなかった）。
+Cube では yaw / pitch が「別の面が見える」離散的な変化になるので、回転として読める。<br>
 <code>lift</code> / <code>sink</code> は上下の向きを分けた非負のチャネル。静的な偏りは <code>(sink - lift)</code> が担い、
-符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>縦の揺れとして戻す</strong>ので、
-「沈む + 浮く」が中立ではなく<strong>葛藤（揺れ）</strong>として描かれる（各カードの「葛藤」の値）。<br>
+符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>roll の振れ（度）として戻す</strong>ので、
+「沈む + 浮く」が<strong>傾き（葛藤）</strong>として描かれる。<br>
 前版の「確率で重ねる」方式は<strong>半透明の図形がずれた雲</strong>になり、動きの混合にならなかった（人の判定）。
 <strong>表示</strong>を切り替えると、一番確率の高い姿勢（argmax）と、補間した姿勢（mean）を同じ枠で比べられる。<br>
 モデル <b>{data['model']}</b> / 比較 <b>{cmp_data['model'] if cmp_data else '-'}</b>。
@@ -255,25 +267,33 @@ dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
 <div class="grid">{''.join(cards)}</div>
 <script>
 const PX = {P['px_per_unit']};
+const DPC = {P['deg_per_conflict']};
 const IDLE = {json.dumps(gestures['idle'])};
 
 /* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。
  *
- * lift / sink の扱い（poses.json の _recovery_rule）:
- *   静的な上下オフセット = (sink - lift)          … 姿勢としての沈み／浮き
- *   縦の振れ幅に + 2*min(lift, sink)              … 符号付き平均が捨てていた量をそのまま戻す
- *   （lift + sink - |sink - lift| = 2*min(lift, sink)）
- * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので振れは増えない。
- * 混合のときだけ「葛藤が揺れとして見える」。 */
+ * 回転が主役（平行移動の振幅差は人間に読めないと判定されたため）:
+ *   bob / rise が平行移動。rot_x(pitch) / rot_y(yaw) / rot_z(roll) が回転。
+ *
+ * lift / sink（poses.json の _recovery_rule）:
+ *   静的な上下オフセット = (sink - lift)                    … 姿勢としての沈み／浮き
+ *   葛藤 = 2*min(lift, sink)  … 符号付き平均が捨てる量そのもの
+ *   → これを**縦振幅ではなく roll（rot_z）に加算する**。振幅の差は読めないが
+ *     傾きは質的な差として読める。
+ * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので roll は増えない。
+ * 混合のときだけ「葛藤が傾きとして見える」。 */
 function varsFor(pose, energy, approach, emit) {{
-  const ampS  = 0.70 + 0.15 * energy;     // energy 0->4 で 0.70 -> 1.30
-  const freqM = 1.00 + 0.18 * energy;     // 1.00 -> 1.72
-  const sizeM = 0.94 + 0.035 * approach;  // 0.94 -> 1.08
+  const bobS  = 0.70 + 0.15 * energy;     // 平行移動のスケール
+  const rotS  = 0.80 + 0.10 * energy;     // 回転のスケール
+  const freqM = 1.00 + 0.18 * energy;
+  const sizeM = 0.94 + 0.035 * approach;
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   return {{
-    '--p-ampx':  (pose.amp_x * PX * ampS).toFixed(2),
-    '--p-ampy':  ((pose.amp_y + conflict) * PX * ampS).toFixed(2),
+    '--p-bob':   (pose.bob * PX * bobS).toFixed(2),
     '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
+    '--p-rotx':  (pose.rot_x * rotS).toFixed(2),
+    '--p-roty':  (pose.rot_y * rotS).toFixed(2),
+    '--p-rotz':  ((pose.rot_z + DPC * conflict) * rotS).toFixed(2),
     '--p-size':  (pose.size * sizeM).toFixed(3),
     '--p-freq':  (pose.freq * freqM).toFixed(3),
     '--p-flick': (pose.flick).toFixed(3),
@@ -286,12 +306,12 @@ function poseText(pose) {{
   const f = (v, n) => v.toFixed(n);
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   const net = pose.sink - pose.lift;
-  return 'ampx ' + f(pose.amp_x, 2) + ' · ampy ' + f(pose.amp_y, 2)
-       + ' · lift ' + f(pose.lift, 2) + ' · sink ' + f(pose.sink, 2)
-       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2)
-       + ' · flick ' + f(pose.flick, 2)
-       + '  →  正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
-       + (conflict > 0.02 ? ' / 葛藤 ' + f(conflict, 2) : '');
+  const roll = pose.rot_z + DPC * conflict;
+  return 'rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
+       + f(roll, 1) + 'deg'
+       + (conflict > 0.02 ? '（うち葛藤 ' + f(DPC * conflict, 1) + 'deg）' : '')
+       + '  /  bob ' + f(pose.bob, 2) + ' · 正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
+       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2) + ' · flick ' + f(pose.flick, 2);
 }}
 
 function apply(theta, mode) {{
@@ -327,7 +347,7 @@ function apply(theta, mode) {{
     card.querySelector('.pose').textContent = poseText(pose);
     if (on) fired.push(card.dataset.key);
   }});
-  document.querySelectorAll('.cmp .body').forEach(b => {{
+  document.querySelectorAll('[data-role=cmp]').forEach(b => {{
     const p = JSON.parse(b.dataset.pose.replace(/&quot;/g, '"'));
     const v = varsFor(p, parseFloat(b.dataset.energy), parseFloat(b.dataset.approach), parseFloat(b.dataset.emit));
     for (const k in v) b.style.setProperty(k, v[k]);
