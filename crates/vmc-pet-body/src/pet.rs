@@ -392,6 +392,12 @@ impl Pet {
         self.mood.anticipation()
     }
 
+    /// いま体を進めているテンポ(1.0 がいつもどおり)。姿勢層(`gesture`)の入力の1つで、
+    /// 「がっかりしている」を、体の時間の進み方とは別に外から読めるようにする窓口。
+    pub fn tempo(&self) -> f32 {
+        self.mood.tempo()
+    }
+
     /// 期待していたのに世話が来なかったことの溜まり具合(0.0..=1.0)。
     pub fn disappointment(&self) -> f32 {
         self.mood.disappointment()
@@ -595,7 +601,7 @@ mod tests {
             pet.step();
         }
         let mut lured = false;
-        let mut recovered_after_lure = false;
+        let recovered_after_lure = false;
         // クリックの慣れを避けるため、離れた場所を順に叩く(回ごとに多数の場所を回す)
         'attempt: for round in 0..6i32 {
             for (dx, dy) in [(0.0, 2.0), (1.5, -1.0), (-1.5, 1.0), (2.0, 0.0)] {

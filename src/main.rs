@@ -4,21 +4,34 @@ mod interface;
 mod multichannel_preview;
 mod particle_preview;
 mod persistence;
+mod pose_probe;
 mod render;
 mod shell;
 
-use app::Pet;
+use app::{Pet, PoseMode};
 use shell::{LayerWindow, LayerWindowConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let (animal_code, preview, _particle_seed) = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE) {
+    let (animal_code, preview, _particle_seed, pose) = match cli::parse(&args, app::DEFAULT_ANIMAL_CODE)
+    {
         Ok(cli::Action::Run {
             animal_code,
             preview,
             particle_seed,
-        }) => (animal_code, preview, particle_seed),
+            pose,
+        }) => (animal_code, preview, particle_seed, pose),
+        Ok(cli::Action::ProbePose { directory }) => {
+            match pose_probe::run(std::path::Path::new(&directory)) {
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("vmc-pet: pose probe failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Ok(cli::Action::Help) => {
             print!("{}", cli::USAGE);
             return;
@@ -110,6 +123,11 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let mut pet = pet;
+    if pose != PoseMode::Auto {
+        pet.set_pose_mode(pose);
+        eprintln!("vmc-pet: pose layer set to {pose:?}");
+    }
     if let Err(error) = LayerWindow::run(LayerWindowConfig::default(), Box::new(pet)) {
         eprintln!("vmc-pet: {error}");
         std::process::exit(1);

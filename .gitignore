@@ -1,2 +1,6 @@
 /target
 /result
+# 姿勢層の実測が書き出す生の画像(`--probe-pose`)。1枚440KBの無圧縮 PNG で、
+# リポジトリには大きすぎる。確認用の一覧画像だけを docs/experiments/ に置く
+# (作り方は docs/experiments/expression-layer.md)。
+/docs/experiments/expression-layer/raw/
