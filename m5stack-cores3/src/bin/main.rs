@@ -48,12 +48,13 @@ use esp_hal::{
 use core_s3::{
     CoreS3,
     bsp::CoreS3DisplayResources,
+    power::{Axp2101, ChargeState, ExternalPower},
     touch::{Ft6336u, TouchPhase},
 };
 use embedded_hal_bus::i2c::RefCellDevice;
 use vmc_pet_body::{
     Camera, CellPos, FieldView, LineReader, Pet, PigmentView, SerialCommand, TouchEchoView,
-    load_animal,
+    load_animal, stress_from_battery,
 };
 use vmc_pet_cores3::{
     clock::Clock,
@@ -90,6 +91,18 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// RTC から時刻を読んで `Pet::tick_clock` に渡す間隔。
 const CLOCK_READ_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 電池の状態(AXP2101)を読みに行く間隔。
+///
+/// 内部 I²C バスはタッチコントローラと RTC が共有しているので、読む頻度は抑える。
+/// 残量はゆっくりしか変わらないので、30秒で十分。
+const BATTERY_READ_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 電池の残量の平滑化(指数移動平均の、前回の値を残す割合)。
+///
+/// AXP2101 の残量は負荷で数%動く。そのまま「環境の厳しさ」に写すと、体の弱り方が
+/// 読みの揺れで跳ねる。0.7 だと、1回の読みで 30% だけ新しい値へ寄る。
+const BATTERY_SMOOTHING: f32 = 0.7;
 
 /// 気分を固定したプレビュー用ファームウェアにするときの指定(ビルド時の環境変数)。
 ///
@@ -464,6 +477,37 @@ where
     }
 }
 
+/// AXP2101 から電池の状態を読み、「環境の厳しさ」に写す。
+///
+/// 返り値は (平滑化した残量, 環境の厳しさ)。読めなかったら `None` を返し、
+/// 呼び出し側はストレスを掛けない。**PMIC が読めないことを理由に体を弱らせない。**
+///
+/// 「外部電源につながっている」は、`ExternalPower::Connected` か、充電状態が
+/// Charging / Full のどちらかで判定する(残量そのものは、充電状態が不明でも
+/// 放電しているなら減っているので信用する)。
+fn read_environmental_stress<I2C, E>(
+    battery: &mut Axp2101<I2C>,
+    smoothed_percent: &mut Option<f32>,
+) -> Option<(f32, f32)>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: core::fmt::Debug,
+{
+    let status = battery.status().ok()?;
+    let percent = status.percentage as f32;
+    let smoothed = match *smoothed_percent {
+        Some(previous) => previous * BATTERY_SMOOTHING + percent * (1.0 - BATTERY_SMOOTHING),
+        None => percent,
+    };
+    *smoothed_percent = Some(smoothed);
+    let plugged_in = matches!(status.external_power, ExternalPower::Connected)
+        || matches!(
+            status.charge_state,
+            ChargeState::Charging | ChargeState::Full
+        );
+    Some((smoothed, stress_from_battery(smoothed, plugged_in)))
+}
+
 #[main]
 fn main() -> ! {
     // CPU クロックは 240MHz を既定にする。Lenia の畳み込みが CPU バウンドで、80MHz の
@@ -581,6 +625,12 @@ fn main() -> ! {
         }
     };
 
+    // 「環境ストレス」の読み取り役(ロードマップ step 6)。PC 版の CPU 負荷の代わりに、
+    // この体では**電池の余力**を環境の厳しさとする(docs/M5STACK.md
+    // 「『環境ストレス』の意味づけを考え直した」)。
+    let mut battery = Axp2101::new(RefCellDevice::new(&internal_i2c));
+    let mut battery_percent: Option<f32> = None;
+
     // 記憶の置き場所(フラッシュの `pet` パーティション)。
     let preview = PREVIEW_MOOD.and_then(vmc_pet_body::MoodState::from_name);
     if let (Some(name), None) = (PREVIEW_MOOD, preview) {
@@ -670,6 +720,24 @@ fn main() -> ! {
     // (PC版 app.rs の Camera と同じもの。docs/DESIGN.md参照)。
     let mut camera = Camera::new();
 
+    // 起動直後に電池を1回読む。最初のステップから正しい環境で始めるため。
+    let mut last_battery_read = Instant::now();
+    let mut environmental_stress = match read_environmental_stress(&mut battery, &mut battery_percent)
+    {
+        Some((percent, stress)) => {
+            esp_println::println!(
+                "vmc-pet-cores3: battery {percent:.0}% -> environmental stress {stress:.2}"
+            );
+            stress
+        }
+        None => {
+            esp_println::println!(
+                "vmc-pet-cores3: battery unavailable; not applying environmental stress"
+            );
+            0.0
+        }
+    };
+
     // PC から時計を合わせる行(`time <Unix 秒>`)を USB シリアルで受け取る
     // (`vmc_pet_body::time_sync`)。送信は esp_println がレジスタへ直接書くので、受信側だけ使う。
     // USB デバイスは esp-hal が常に有効にしておく周辺機器なので、ここで作ってもリセットは
@@ -718,6 +786,20 @@ fn main() -> ! {
 
         pet.tick_input(ECHO_DECAY_PER_POLL);
 
+        // 環境の厳しさ(電池の余力)を読み直す。体を進めるより前に読むので、
+        // このステップから新しい環境が効く。
+        if last_battery_read.elapsed() >= BATTERY_READ_INTERVAL {
+            last_battery_read = Instant::now();
+            if let Some((percent, stress)) =
+                read_environmental_stress(&mut battery, &mut battery_percent)
+            {
+                environmental_stress = stress;
+                esp_println::println!(
+                    "vmc-pet-cores3: battery {percent:.0}% -> environmental stress {stress:.2}"
+                );
+            }
+        }
+
         // 描画(SPIへの書き込み)は重く、体が実際に1ステップ進んだときだけ行う。
         // タッチのサンプリング(上のポーリング)とは頻度を分離してある。
         // 以前ここを毎ポーリング(40ms)無条件に呼んでいたため、描画頻度が
@@ -730,6 +812,10 @@ fn main() -> ! {
             let body_started = Instant::now();
             let collapsed = pet.step();
             body_micros += body_started.elapsed().as_micros();
+            // 環境が厳しいほど、エネルギーが早く尽きる(PC 版の CPU 負荷と同じ扱い。
+            // `Vitality::apply_environmental_stress` は減衰の速さだけを変え、
+            // 体の安全性には影響しない)。
+            pet.apply_environmental_stress(environmental_stress);
             last_step += STEP_INTERVAL;
             step += 1;
 
@@ -749,13 +835,14 @@ fn main() -> ! {
             }
             if step.is_multiple_of(15) {
                 esp_println::println!(
-                    "vmc-pet-cores3: step={step:5} 15 steps in {}ms (body {}ms) mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2}",
+                    "vmc-pet-cores3: step={step:5} 15 steps in {}ms (body {}ms) mass={:.2} energy={:.2} anticipation={:.2} disappointment={:.2} stress={:.2}",
                     last_fifteen_steps.elapsed().as_millis(),
                     body_micros / 1000,
                     pet.mass(),
                     pet.energy(),
                     pet.anticipation(),
-                    pet.disappointment()
+                    pet.disappointment(),
+                    environmental_stress
                 );
                 last_fifteen_steps = Instant::now();
                 body_micros = 0;

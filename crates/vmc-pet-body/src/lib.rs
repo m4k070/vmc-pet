@@ -25,6 +25,7 @@ pub mod camera;
 pub mod care_prediction;
 pub mod civil_time;
 pub mod controller;
+pub mod environment;
 pub mod field;
 #[cfg(feature = "std")]
 pub mod fitness;
@@ -51,6 +52,7 @@ pub use camera::Camera;
 pub use care_prediction::{CareMemory, CarePredictor, CarePredictorParams};
 pub use civil_time::{civil_from_unix_seconds, unix_seconds_from_civil, CivilDateTime};
 pub use controller::{AutonomousController, ControllerParams, Observation};
+pub use environment::{stress_from_battery, BATTERY_COMFORTABLE_PERCENT, BATTERY_STRESSED_PERCENT};
 pub use field::{Field, FieldView};
 pub use gesture::{Expression, Gesture, Pose, ResolvedPose, GESTURES};
 pub use habituation::Habituation;
