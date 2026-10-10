@@ -34,7 +34,7 @@ use alloc::vec;
 use crate::math::floorf;
 use crate::particles::{ParticleParams, ParticleWorld, DEFAULT_FIELD_SIZE};
 use crate::vitality::Vitality;
-use crate::{CellPos, Field, FieldView, Perturbation};
+use crate::{BodyPort, CellPos, Field, FieldView, Perturbation};
 
 /// 物理の箱の一辺(セル)。表示の場(32 セル)を zoom 2 で割った大きさ。
 pub const BOX_SIZE: f32 = DEFAULT_FIELD_SIZE / 2.0;
@@ -132,11 +132,6 @@ impl ParticleBody {
     /// 呼び出し形状を保つための noop)。
     pub fn revive(&mut self) {}
 
-    /// 体に摂動を直接注入する(`BodyPort` 経由の窓口)。クリックと同じ翻訳を通す。
-    pub fn inject(&mut self, perturbation: Perturbation) {
-        self.disturb(perturbation);
-    }
-
     /// 世話をされたぶんだけエネルギーを回復させる。場には触れない
     /// (`LeniaBody::receive_care` と同じ区別)。
     pub fn receive_care(&mut self, weight: f32) {
@@ -223,6 +218,22 @@ impl ParticleBody {
         // Field::map は Fn を要求するが (x, y) を渡してくるので、行優先の番号を
         // x, y から出して静止したバッファを読むだけでよい(書き込みはしない)。
         self.field.map(|x, y, _| cells[y * VIEW_SIZE + x]);
+    }
+}
+
+impl BodyPort for ParticleBody {
+    /// 体へ直接注入する。**世話(`receive_care`)は含めない。**
+    ///
+    /// 崩壊しない体なので、素の注入は「突き」だけでよい。崩壊する体(`LeniaBody`)は
+    /// 素の注入で壊し切れる必要があるため世話を含む(lenia_body.rs の
+    /// `inject_also_raises_energy` が固定している)。**この判断を `Pet` 側へ漏らさない
+    /// ために、体のファイルに置く。**
+    fn inject(&mut self, perturbation: Perturbation) {
+        self.disturb(perturbation);
+    }
+
+    fn observe(&self) -> FieldView<'_> {
+        self.field.view()
     }
 }
 
