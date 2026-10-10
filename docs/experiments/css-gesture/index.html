@@ -17,6 +17,7 @@
  * 受け取る変数（build_viewer.py の JS が .stage に inline style で入れる。子は継承で受ける）:
  *   --p-bob   : 上下のボブ振幅（px）
  *   --p-rise  : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
+ *   --p-tiltx : 静的な pitch（姿勢、度）。正 = のけぞる / 負 = うつむく。energy では増幅しない
  *   --p-rotx  : pitch の振れ幅（度）
  *   --p-roty  : yaw の振れ幅（度）
  *   --p-rotz  : roll の振れ幅（度）。混合の「葛藤」もここに加算済み
@@ -84,18 +85,19 @@
 .f-top    { transform: rotateX(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(1.18); }
 .f-bottom { transform: rotateX(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.44); }
 
-/* 姿勢。平行移動は上下のボブと静的偏りだけ。回転が主役。波の形は往復の正弦1種類。 */
+/* 姿勢。tilt_x は静的な pitch（姿勢）、rot_* は振れ幅。波の形は往復の正弦1種類。
+   rotateX は「tilt_x（姿勢）+ rot_x * sin（振れ）」の合成。 */
 @keyframes k-pose {
   0%, 100% {
     transform: translateY(calc((var(--p-rise, 0) - var(--p-bob, 0)) * 1px))
-               rotateX(calc(var(--p-rotx, 0) * -1deg))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * -1deg))
                rotateY(calc(var(--p-roty, 0) * -1deg))
                rotateZ(calc(var(--p-rotz, 0) * -1deg))
                scale(var(--p-size, 1));
   }
   50% {
     transform: translateY(calc((var(--p-rise, 0) + var(--p-bob, 0)) * 1px))
-               rotateX(calc(var(--p-rotx, 0) * 1deg))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * 1deg))
                rotateY(calc(var(--p-roty, 0) * 1deg))
                rotateZ(calc(var(--p-rotz, 0) * 1deg))
                scale(var(--p-size, 1));
@@ -207,8 +209,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.18, &quot;rot_x&quot;: 40, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.3048, &quot;rot_x&quot;: 27.8596, &quot;rot_y&quot;: 0.4146, &quot;rot_z&quot;: 0.7408, &quot;lift&quot;: 0.2211, &quot;sink&quot;: 0.1235, &quot;size&quot;: 1.0129, &quot;freq&quot;: 1.3728, &quot;flick&quot;: 0.0267}"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.18, &quot;rot_x&quot;: 18, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 19.0467, &quot;bob&quot;: 0.3048, &quot;rot_x&quot;: 12.4159, &quot;rot_y&quot;: 0.4146, &quot;rot_z&quot;: 0.7408, &quot;lift&quot;: 0.2211, &quot;sink&quot;: 0.1235, &quot;size&quot;: 1.0129, &quot;freq&quot;: 1.3728, &quot;flick&quot;: 0.0267}"
           data-energy="2.781948281233433" data-approach="2.7248762040554406" data-emit="0.47065061788877743"
           data-top="nod">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -217,7 +219,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.1222, &quot;rot_x&quot;: 8.6332, &quot;rot_y&quot;: 5.7548, &quot;rot_z&quot;: 4.4493, &quot;lift&quot;: 0.1078, &quot;sink&quot;: 0.1084, &quot;size&quot;: 0.9734, &quot;freq&quot;: 1.2081, &quot;flick&quot;: 0.5328}"
+          data-pose="{&quot;tilt_x&quot;: 1.0281, &quot;bob&quot;: 0.1222, &quot;rot_x&quot;: 3.9581, &quot;rot_y&quot;: 5.7548, &quot;rot_z&quot;: 4.4493, &quot;lift&quot;: 0.1078, &quot;sink&quot;: 0.1084, &quot;size&quot;: 0.9734, &quot;freq&quot;: 1.2081, &quot;flick&quot;: 0.5328}"
           data-energy="1.1085895315065621" data-approach="2.010867446223232"
           data-emit="0.05416380573906749">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -244,8 +246,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.191, &quot;rot_x&quot;: 13.0752, &quot;rot_y&quot;: 2.3425, &quot;rot_z&quot;: 1.2691, &quot;lift&quot;: 0.0965, &quot;sink&quot;: 0.5849, &quot;size&quot;: 0.8325, &quot;freq&quot;: 0.9243, &quot;flick&quot;: 0.0869}"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -9.0281, &quot;bob&quot;: 0.191, &quot;rot_x&quot;: 6.1686, &quot;rot_y&quot;: 2.3425, &quot;rot_z&quot;: 1.2691, &quot;lift&quot;: 0.0965, &quot;sink&quot;: 0.5849, &quot;size&quot;: 0.8325, &quot;freq&quot;: 0.9243, &quot;flick&quot;: 0.0869}"
           data-energy="1.059922208640876" data-approach="1.0891702567640278" data-emit="0.3558336394126617"
           data-top="settle">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -254,7 +256,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.0826, &quot;rot_x&quot;: 5.1598, &quot;rot_y&quot;: 3.1433, &quot;rot_z&quot;: 6.1314, &quot;lift&quot;: 0.0537, &quot;sink&quot;: 0.0576, &quot;size&quot;: 0.9885, &quot;freq&quot;: 1.1479, &quot;flick&quot;: 0.7523}"
+          data-pose="{&quot;tilt_x&quot;: 0.486, &quot;bob&quot;: 0.0826, &quot;rot_x&quot;: 2.4057, &quot;rot_y&quot;: 3.1433, &quot;rot_z&quot;: 6.1314, &quot;lift&quot;: 0.0537, &quot;sink&quot;: 0.0576, &quot;size&quot;: 0.9885, &quot;freq&quot;: 1.1479, &quot;flick&quot;: 0.7523}"
           data-energy="2.0207871318474595" data-approach="1.9222507569040301"
           data-emit="0.11162016520335129">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -281,8 +283,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.22, &quot;rot_x&quot;: 6, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.2191, &quot;rot_x&quot;: 8.0926, &quot;rot_y&quot;: 0.5457, &quot;rot_z&quot;: 4.4226, &quot;lift&quot;: 0.032, &quot;sink&quot;: 0.041, &quot;size&quot;: 0.9936, &quot;freq&quot;: 1.0325, &quot;flick&quot;: 0.0312}"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.22, &quot;rot_x&quot;: 3, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 0.3569, &quot;bob&quot;: 0.2191, &quot;rot_x&quot;: 3.8938, &quot;rot_y&quot;: 0.5457, &quot;rot_z&quot;: 4.4226, &quot;lift&quot;: 0.032, &quot;sink&quot;: 0.041, &quot;size&quot;: 0.9936, &quot;freq&quot;: 1.0325, &quot;flick&quot;: 0.0312}"
           data-energy="0.5057425893281169" data-approach="1.639626740264764" data-emit="0.03626141769958141"
           data-top="idle">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -291,7 +293,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.1187, &quot;rot_x&quot;: 6.7995, &quot;rot_y&quot;: 7.6721, &quot;rot_z&quot;: 4.4913, &quot;lift&quot;: 0.0772, &quot;sink&quot;: 0.0803, &quot;size&quot;: 0.9815, &quot;freq&quot;: 1.2047, &quot;flick&quot;: 0.4701}"
+          data-pose="{&quot;tilt_x&quot;: 1.2438, &quot;bob&quot;: 0.1187, &quot;rot_x&quot;: 3.1548, &quot;rot_y&quot;: 7.6721, &quot;rot_z&quot;: 4.4913, &quot;lift&quot;: 0.0772, &quot;sink&quot;: 0.0803, &quot;size&quot;: 0.9815, &quot;freq&quot;: 1.2047, &quot;flick&quot;: 0.4701}"
           data-energy="0.8035862374487781" data-approach="1.8855115480383735"
           data-emit="0.062105065616315916">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -318,8 +320,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.1922, &quot;rot_x&quot;: 13.0295, &quot;rot_y&quot;: 3.4648, &quot;rot_z&quot;: 1.4407, &quot;lift&quot;: 0.1169, &quot;sink&quot;: 0.5266, &quot;size&quot;: 0.8414, &quot;freq&quot;: 0.9927, &quot;flick&quot;: 0.1004}"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -7.3222, &quot;bob&quot;: 0.1922, &quot;rot_x&quot;: 6.1328, &quot;rot_y&quot;: 3.4648, &quot;rot_z&quot;: 1.4407, &quot;lift&quot;: 0.1169, &quot;sink&quot;: 0.5266, &quot;size&quot;: 0.8414, &quot;freq&quot;: 0.9927, &quot;flick&quot;: 0.1004}"
           data-energy="0.7860229123961211" data-approach="0.7995392655666422" data-emit="0.17981665398860586"
           data-top="settle">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -328,7 +330,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.0924, &quot;rot_x&quot;: 5.6864, &quot;rot_y&quot;: 2.6907, &quot;rot_z&quot;: 5.916, &quot;lift&quot;: 0.059, &quot;sink&quot;: 0.0828, &quot;size&quot;: 0.9803, &quot;freq&quot;: 1.1345, &quot;flick&quot;: 0.7132}"
+          data-pose="{&quot;tilt_x&quot;: 0.2023, &quot;bob&quot;: 0.0924, &quot;rot_x&quot;: 2.6562, &quot;rot_y&quot;: 2.6907, &quot;rot_z&quot;: 5.916, &quot;lift&quot;: 0.059, &quot;sink&quot;: 0.0828, &quot;size&quot;: 0.9803, &quot;freq&quot;: 1.1345, &quot;flick&quot;: 0.7132}"
           data-energy="1.2071314724795634" data-approach="1.8806378961439547"
           data-emit="0.028199451682429315">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -355,8 +357,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.04, &quot;rot_x&quot;: 2, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 8, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.1, &quot;flick&quot;: 1.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.0821, &quot;rot_x&quot;: 4.3148, &quot;rot_y&quot;: 1.1314, &quot;rot_z&quot;: 6.6852, &quot;lift&quot;: 0.0231, &quot;sink&quot;: 0.0505, &quot;size&quot;: 0.9856, &quot;freq&quot;: 1.1017, &quot;flick&quot;: 0.7599}"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.04, &quot;rot_x&quot;: 1, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 8, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.1, &quot;flick&quot;: 1.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -0.1814, &quot;bob&quot;: 0.0821, &quot;rot_x&quot;: 2.0692, &quot;rot_y&quot;: 1.1314, &quot;rot_z&quot;: 6.6852, &quot;lift&quot;: 0.0231, &quot;sink&quot;: 0.0505, &quot;size&quot;: 0.9856, &quot;freq&quot;: 1.1017, &quot;flick&quot;: 0.7599}"
           data-energy="0.9302040205270176" data-approach="1.150667561300046" data-emit="0.22343648219510964"
           data-top="flicker">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -365,7 +367,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.1435, &quot;rot_x&quot;: 9.2807, &quot;rot_y&quot;: 10.4485, &quot;rot_z&quot;: 2.9162, &quot;lift&quot;: 0.1219, &quot;sink&quot;: 0.1398, &quot;size&quot;: 0.9743, &quot;freq&quot;: 1.2336, &quot;flick&quot;: 0.3044}"
+          data-pose="{&quot;tilt_x&quot;: 0.7381, &quot;bob&quot;: 0.1435, &quot;rot_x&quot;: 4.2399, &quot;rot_y&quot;: 10.4485, &quot;rot_z&quot;: 2.9162, &quot;lift&quot;: 0.1219, &quot;sink&quot;: 0.1398, &quot;size&quot;: 0.9743, &quot;freq&quot;: 1.2336, &quot;flick&quot;: 0.3044}"
           data-energy="1.9930983482359932" data-approach="2.3641832389921715"
           data-emit="0.034546244783597004">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -392,8 +394,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.22, &quot;rot_x&quot;: 6, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.1957, &quot;rot_x&quot;: 13.5085, &quot;rot_y&quot;: 1.9345, &quot;rot_z&quot;: 2.5477, &quot;lift&quot;: 0.0429, &quot;sink&quot;: 0.2803, &quot;size&quot;: 0.9274, &quot;freq&quot;: 1.0313, &quot;flick&quot;: 0.0554}"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.22, &quot;rot_x&quot;: 3, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 5, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.0, &quot;size&quot;: 1.0, &quot;freq&quot;: 1.0, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: -3.6213, &quot;bob&quot;: 0.1957, &quot;rot_x&quot;: 6.3055, &quot;rot_y&quot;: 1.9345, &quot;rot_z&quot;: 2.5477, &quot;lift&quot;: 0.0429, &quot;sink&quot;: 0.2803, &quot;size&quot;: 0.9274, &quot;freq&quot;: 1.0313, &quot;flick&quot;: 0.0554}"
           data-energy="0.7930367697916169" data-approach="1.7409923557947473" data-emit="0.12216669888904044"
           data-top="idle">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -402,7 +404,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.0622, &quot;rot_x&quot;: 3.5606, &quot;rot_y&quot;: 0.9061, &quot;rot_z&quot;: 7.1255, &quot;lift&quot;: 0.024, &quot;sink&quot;: 0.0403, &quot;size&quot;: 0.9909, &quot;freq&quot;: 1.1069, &quot;flick&quot;: 0.8811}"
+          data-pose="{&quot;tilt_x&quot;: -0.0951, &quot;bob&quot;: 0.0622, &quot;rot_x&quot;: 1.7023, &quot;rot_y&quot;: 0.9061, &quot;rot_z&quot;: 7.1255, &quot;lift&quot;: 0.024, &quot;sink&quot;: 0.0403, &quot;size&quot;: 0.9909, &quot;freq&quot;: 1.1069, &quot;flick&quot;: 0.8811}"
           data-energy="0.8381388772002609" data-approach="1.9996774136961555"
           data-emit="0.0017712571088769281">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -429,8 +431,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.18, &quot;rot_x&quot;: 40, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.2006, &quot;rot_x&quot;: 35.5974, &quot;rot_y&quot;: 0.1796, &quot;rot_z&quot;: 0.3911, &quot;lift&quot;: 0.0432, &quot;sink&quot;: 0.135, &quot;size&quot;: 0.9759, &quot;freq&quot;: 1.3979, &quot;flick&quot;: 0.009}"
+          data-pose-top="{&quot;tilt_x&quot;: 0, &quot;bob&quot;: 0.18, &quot;rot_x&quot;: 18, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 0.15, &quot;size&quot;: 0.96, &quot;freq&quot;: 1.45, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 2.083, &quot;bob&quot;: 0.2006, &quot;rot_x&quot;: 16.0087, &quot;rot_y&quot;: 0.1796, &quot;rot_z&quot;: 0.3911, &quot;lift&quot;: 0.0432, &quot;sink&quot;: 0.135, &quot;size&quot;: 0.9759, &quot;freq&quot;: 1.3979, &quot;flick&quot;: 0.009}"
           data-energy="2.223484666090634" data-approach="2.906082483303416" data-emit="0.4345962403544053"
           data-top="nod">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -439,7 +441,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.1467, &quot;rot_x&quot;: 10.3032, &quot;rot_y&quot;: 7.7722, &quot;rot_z&quot;: 3.3562, &quot;lift&quot;: 0.1222, &quot;sink&quot;: 0.1267, &quot;size&quot;: 0.9793, &quot;freq&quot;: 1.2256, &quot;flick&quot;: 0.3745}"
+          data-pose="{&quot;tilt_x&quot;: 2.0529, &quot;bob&quot;: 0.1467, &quot;rot_x&quot;: 4.6867, &quot;rot_y&quot;: 7.7722, &quot;rot_z&quot;: 3.3562, &quot;lift&quot;: 0.1222, &quot;sink&quot;: 0.1267, &quot;size&quot;: 0.9793, &quot;freq&quot;: 1.2256, &quot;flick&quot;: 0.3745}"
           data-energy="1.890232044951825" data-approach="2.0482492346587278"
           data-emit="0.08107550230782218">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -466,8 +468,8 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">clef</div>
         <div class="stage" data-role="main"
-          data-pose-top="{&quot;bob&quot;: 0.16, &quot;rot_x&quot;: 10, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
-          data-pose-mean="{&quot;bob&quot;: 0.2099, &quot;rot_x&quot;: 16.4069, &quot;rot_y&quot;: 9.2367, &quot;rot_z&quot;: 0.9963, &quot;lift&quot;: 0.2139, &quot;sink&quot;: 0.3241, &quot;size&quot;: 0.8802, &quot;freq&quot;: 1.3049, &quot;flick&quot;: 0.067}"
+          data-pose-top="{&quot;tilt_x&quot;: -24, &quot;bob&quot;: 0.16, &quot;rot_x&quot;: 5, &quot;rot_y&quot;: 0, &quot;rot_z&quot;: 0, &quot;lift&quot;: 0.0, &quot;sink&quot;: 1.05, &quot;size&quot;: 0.7, &quot;freq&quot;: 0.55, &quot;flick&quot;: 0.0}"
+          data-pose-mean="{&quot;tilt_x&quot;: 0.4151, &quot;bob&quot;: 0.2099, &quot;rot_x&quot;: 7.5396, &quot;rot_y&quot;: 9.2367, &quot;rot_z&quot;: 0.9963, &quot;lift&quot;: 0.2139, &quot;sink&quot;: 0.3241, &quot;size&quot;: 0.8802, &quot;freq&quot;: 1.3049, &quot;flick&quot;: 0.067}"
           data-energy="1.0351038252136997" data-approach="0.6439321590020773" data-emit="0.49276928165859474"
           data-top="settle">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -476,7 +478,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm" data-role="cmp"
-          data-pose="{&quot;bob&quot;: 0.1529, &quot;rot_x&quot;: 10.5446, &quot;rot_y&quot;: 10.9264, &quot;rot_z&quot;: 2.5984, &quot;lift&quot;: 0.1428, &quot;sink&quot;: 0.1341, &quot;size&quot;: 0.9781, &quot;freq&quot;: 1.2693, &quot;flick&quot;: 0.2854}"
+          data-pose="{&quot;tilt_x&quot;: 2.2022, &quot;bob&quot;: 0.1529, &quot;rot_x&quot;: 4.7812, &quot;rot_y&quot;: 10.9264, &quot;rot_z&quot;: 2.5984, &quot;lift&quot;: 0.1428, &quot;sink&quot;: 0.1341, &quot;size&quot;: 0.9781, &quot;freq&quot;: 1.2693, &quot;flick&quot;: 0.2854}"
           data-energy="1.705721753118623" data-approach="2.117846401295882"
           data-emit="0.10074516323507156">
           <div class="flick"><div class="body"><div class="face f-front"></div><div class="face f-back"></div><div class="face f-right"></div><div class="face f-left"></div><div class="face f-top"></div><div class="face f-bottom"></div></div></div>
@@ -499,7 +501,7 @@ Cube では yaw / pitch が「別の面が見える」離散的な変化にな�
 <script>
 const PX = 18.0;
 const DPC = 60.0;
-const IDLE = {"bob": 0.22, "rot_x": 6, "rot_y": 0, "rot_z": 5, "lift": 0.0, "sink": 0.0, "size": 1.0, "freq": 1.0, "flick": 0.0};
+const IDLE = {"tilt_x": 0, "bob": 0.22, "rot_x": 3, "rot_y": 0, "rot_z": 5, "lift": 0.0, "sink": 0.0, "size": 1.0, "freq": 1.0, "flick": 0.0};
 
 /* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。
  *
@@ -522,6 +524,7 @@ function varsFor(pose, energy, approach, emit) {
   return {
     '--p-bob':   (pose.bob * PX * bobS).toFixed(2),
     '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
+    '--p-tiltx': (pose.tilt_x).toFixed(2),
     '--p-rotx':  (pose.rot_x * rotS).toFixed(2),
     '--p-roty':  (pose.rot_y * rotS).toFixed(2),
     '--p-rotz':  ((pose.rot_z + DPC * conflict) * rotS).toFixed(2),
@@ -538,7 +541,9 @@ function poseText(pose) {
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   const net = pose.sink - pose.lift;
   const roll = pose.rot_z + DPC * conflict;
-  return 'rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
+  const face = pose.tilt_x >= 15 ? '（上面が見える）' : (pose.tilt_x <= -15 ? '（下面が見える）' : '');
+  return 'tilt ' + f(pose.tilt_x, 1) + 'deg' + face
+       + ' · rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
        + f(roll, 1) + 'deg'
        + (conflict > 0.02 ? '（うち葛藤 ' + f(DPC * conflict, 1) + 'deg）' : '')
        + '  /  bob ' + f(pose.bob, 2) + ' · 正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)

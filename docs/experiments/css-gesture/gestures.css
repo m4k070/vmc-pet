@@ -13,6 +13,7 @@
  * 受け取る変数（build_viewer.py の JS が .stage に inline style で入れる。子は継承で受ける）:
  *   --p-bob   : 上下のボブ振幅（px）
  *   --p-rise  : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
+ *   --p-tiltx : 静的な pitch（姿勢、度）。正 = のけぞる / 負 = うつむく。energy では増幅しない
  *   --p-rotx  : pitch の振れ幅（度）
  *   --p-roty  : yaw の振れ幅（度）
  *   --p-rotz  : roll の振れ幅（度）。混合の「葛藤」もここに加算済み
@@ -80,18 +81,19 @@
 .f-top    { transform: rotateX(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(1.18); }
 .f-bottom { transform: rotateX(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.44); }
 
-/* 姿勢。平行移動は上下のボブと静的偏りだけ。回転が主役。波の形は往復の正弦1種類。 */
+/* 姿勢。tilt_x は静的な pitch（姿勢）、rot_* は振れ幅。波の形は往復の正弦1種類。
+   rotateX は「tilt_x（姿勢）+ rot_x * sin（振れ）」の合成。 */
 @keyframes k-pose {
   0%, 100% {
     transform: translateY(calc((var(--p-rise, 0) - var(--p-bob, 0)) * 1px))
-               rotateX(calc(var(--p-rotx, 0) * -1deg))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * -1deg))
                rotateY(calc(var(--p-roty, 0) * -1deg))
                rotateZ(calc(var(--p-rotz, 0) * -1deg))
                scale(var(--p-size, 1));
   }
   50% {
     transform: translateY(calc((var(--p-rise, 0) + var(--p-bob, 0)) * 1px))
-               rotateX(calc(var(--p-rotx, 0) * 1deg))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * 1deg))
                rotateY(calc(var(--p-roty, 0) * 1deg))
                rotateZ(calc(var(--p-rotz, 0) * 1deg))
                scale(var(--p-size, 1));

@@ -122,7 +122,7 @@ def main() -> None:
         energy = row.get("energy") or 0.0
         approach = row.get("approach") or 0.0
         emit = row.get("emit") or 0.0
-        report.append(f"  {row['key']:12} top={top:9} bob{mean_r['bob']:.2f} "
+        report.append(f"  {row['key']:12} top={top:9} tilt{mean_r['tilt_x']:+6.1f} bob{mean_r['bob']:.2f} "
                       f"rot_x{mean_r['rot_x']:.1f} rot_y{mean_r['rot_y']:.1f} "
                       f"rot_z{mean_r['rot_z']:.1f} lift{mean_r['lift']:.2f} sink{mean_r['sink']:.2f} "
                       f"size{mean_r['size']:.2f} freq{mean_r['freq']:.2f} flick{mean_r['flick']:.2f} "
@@ -291,6 +291,7 @@ function varsFor(pose, energy, approach, emit) {{
   return {{
     '--p-bob':   (pose.bob * PX * bobS).toFixed(2),
     '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
+    '--p-tiltx': (pose.tilt_x).toFixed(2),
     '--p-rotx':  (pose.rot_x * rotS).toFixed(2),
     '--p-roty':  (pose.rot_y * rotS).toFixed(2),
     '--p-rotz':  ((pose.rot_z + DPC * conflict) * rotS).toFixed(2),
@@ -307,7 +308,9 @@ function poseText(pose) {{
   const conflict = 2 * Math.min(pose.lift, pose.sink);
   const net = pose.sink - pose.lift;
   const roll = pose.rot_z + DPC * conflict;
-  return 'rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
+  const face = pose.tilt_x >= 15 ? '（上面が見える）' : (pose.tilt_x <= -15 ? '（下面が見える）' : '');
+  return 'tilt ' + f(pose.tilt_x, 1) + 'deg' + face
+       + ' · rot pitch ' + f(pose.rot_x, 1) + 'deg · yaw ' + f(pose.rot_y, 1) + 'deg · roll '
        + f(roll, 1) + 'deg'
        + (conflict > 0.02 ? '（うち葛藤 ' + f(DPC * conflict, 1) + 'deg）' : '')
        + '  /  bob ' + f(pose.bob, 2) + ' · 正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
