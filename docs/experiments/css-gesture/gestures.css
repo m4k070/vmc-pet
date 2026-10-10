@@ -1,0 +1,120 @@
+/* css-gesture spike — 姿勢パラメータ空間の描画（手書き・決定論的）
+ *
+ * 変遷:
+ *   1. 8個の keyframe アニメーションを確率で重ねる → 「半透明の図形がずれた雲」になり不採用
+ *   2. 語彙を姿勢パラメータ空間の点にし、混合を重み付き平均（補間）に → 雲は解消
+ *   3. rise（符号付き1次元）が混合で相殺する → lift / sink の非負2チャネルに分割
+ *   4. 平行移動の振幅差は人間に読めない → **Cube にして回転（rotateX/Y/Z）を持たせた**
+ *
+ * 4 について: 立方体では yaw / pitch が「別の面が見える」という離散的な変化になるので、
+ * ただの foreshortening（＝拡大縮小に見える）にならず、回転として読める。
+ * 混合の「葛藤」（2*min(lift, sink)）も、縦振幅ではなく roll の振れとして描く。
+ *
+ * 受け取る変数（build_viewer.py の JS が .stage に inline style で入れる。子は継承で受ける）:
+ *   --p-bob   : 上下のボブ振幅（px）
+ *   --p-rise  : 上下の静的偏り（px。正 = 沈む）。元は (sink - lift)
+ *   --p-tiltx : 静的な pitch（姿勢、度）。正 = のけぞる / 負 = うつむく。energy では増幅しない
+ *   --p-rotx  : pitch の振れ幅（度）
+ *   --p-roty  : yaw の振れ幅（度）
+ *   --p-rotz  : roll の振れ幅（度）。混合の「葛藤」もここに加算済み
+ *   --p-size  : 体の大きさ
+ *   --p-freq  : 動きの速さ（大きいほど速い。周期の逆数の相対値）
+ *   --p-flick : 明滅の強さ（0-1）
+ *   --p-base  : 不透明度の基準（発火の強さ）
+ *   --p-glow  : 発光の強さ（発火の強さ）
+ */
+
+.stage {
+  --cube-w: 44px;
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: grid;
+  place-items: center;
+  /* 3D の遠近。これが無いと Cube の回転が「回転」に見えない。
+     probe-rotation.html の実測: 440px では立体として読むのに 30度必要、170px なら 15度で読める。 */
+  perspective: 170px;
+  perspective-origin: 50% 45%;
+}
+
+/* 発光。Cube の box-shadow は 3D に乗らないので、後ろに置いた光で代用する。 */
+.stage::before {
+  content: '';
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent, #d2694a) 0%, transparent 68%);
+  opacity: calc(0.75 * var(--p-glow, 0));
+  filter: blur(7px);
+  pointer-events: none;
+}
+
+/* 明滅はこの層が持つ。opacity < 1 を preserve-3d の要素に当てると 3D が平坦化されるため、
+   Cube 本体とは別の要素に分けている。 */
+.flick {
+  animation: k-flick calc(0.9s / var(--p-freq, 1)) steps(1, end) infinite;
+}
+
+/* Cube。姿勢ベクトル1つで駆動される。 */
+.body {
+  position: relative;
+  width: var(--cube-w);
+  height: var(--cube-w);
+  transform-style: preserve-3d;
+  transform-origin: 50% 50%;
+  animation: k-pose calc(2.2s / var(--p-freq, 1)) ease-in-out infinite;
+}
+
+.face {
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  background: var(--accent, #d2694a);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+}
+/* 面ごとに明度を変えて、回転したときに立体として読めるようにする。 */
+.f-front  { transform: translateZ(calc(var(--cube-w) / 2)); }
+.f-back   { transform: rotateY(180deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.55); }
+.f-right  { transform: rotateY(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.74); }
+.f-left   { transform: rotateY(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.62); }
+.f-top    { transform: rotateX(90deg)  translateZ(calc(var(--cube-w) / 2)); filter: brightness(1.18); }
+.f-bottom { transform: rotateX(-90deg) translateZ(calc(var(--cube-w) / 2)); filter: brightness(0.44); }
+
+/* 姿勢。tilt_x は静的な pitch（姿勢）、rot_* は振れ幅。波の形は往復の正弦1種類。
+   rotateX は「tilt_x（姿勢）+ rot_x * sin（振れ）」の合成。 */
+@keyframes k-pose {
+  0%, 100% {
+    transform: translateY(calc((var(--p-rise, 0) - var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * -1deg))
+               rotateY(calc(var(--p-roty, 0) * -1deg))
+               rotateZ(calc(var(--p-rotz, 0) * -1deg))
+               scale(var(--p-size, 1));
+  }
+  50% {
+    transform: translateY(calc((var(--p-rise, 0) + var(--p-bob, 0)) * 1px))
+               rotateX(calc(var(--p-tiltx, 0) * 1deg + var(--p-rotx, 0) * 1deg))
+               rotateY(calc(var(--p-roty, 0) * 1deg))
+               rotateZ(calc(var(--p-rotz, 0) * 1deg))
+               scale(var(--p-size, 1));
+  }
+}
+
+/* 明滅。--p-flick が 0 なら全キーフレームで同じ不透明度になり、静止する。 */
+@keyframes k-flick {
+  0%, 100% { opacity: calc(var(--p-base, 1) * (1 - 0.10 * var(--p-flick, 0))); }
+  17%      { opacity: calc(var(--p-base, 1) * (1 - 0.85 * var(--p-flick, 0))); }
+  23%      { opacity: calc(var(--p-base, 1) * (1 - 0.00 * var(--p-flick, 0))); }
+  41%      { opacity: calc(var(--p-base, 1) * (1 - 0.72 * var(--p-flick, 0))); }
+  67%      { opacity: calc(var(--p-base, 1) * (1 - 0.04 * var(--p-flick, 0))); }
+  83%      { opacity: calc(var(--p-base, 1) * (1 - 0.66 * var(--p-flick, 0))); }
+}
+
+/* 比較用の小さい枠（Laya など別モデルの結果を並べるとき） */
+.stage.sm { --cube-w: 32px; width: 110px; height: 110px; perspective: 140px; }
+.stage.sm::before { width: 56px; height: 56px; }
+.stage.sm .face { border-radius: 5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flick, .body { animation: none; }
+}
