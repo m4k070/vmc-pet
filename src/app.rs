@@ -9,10 +9,22 @@ use std::time::{Duration, Instant};
 
 use crate::interface::MachineLoad;
 use crate::persistence::{now_unix_seconds, MemoryStore};
-use crate::render::{Camera, DotGrid};
+use crate::render::{Camera, DotGrid, PoseProjection};
 use crate::shell::{InputRegion, PointerInput, Surface};
+use vmc_pet_body::gesture::{Expression, ResolvedPose, COHESION_RADIUS_CELLS};
 use vmc_pet_body::particles_body::{BOX_SIZE, ZOOM};
 use vmc_pet_body::Pet as PetCore;
+
+/// 姿勢(ジェスチャー)層の駆動のしかた。`--pose` で選ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoseMode {
+    /// ペットの内部状態から決める(既定)。
+    Auto,
+    /// 姿勢を掛けない。ジェスチャー層を入れる前の見た目に戻す逃げ道。
+    Off,
+    /// 1つのジェスチャーに固定して見る(`--probe-pose` と目視確認のため)。
+    Pinned(usize),
+}
 
 /// `code` が粒子の体の選択(`particles:<番号>`)か。
 fn code_starts_with_particles(code: &str) -> bool {
@@ -55,6 +67,14 @@ const ECHO_DECAY_PER_FRAME: f32 = 0.90;
 /// 定期的に書いておく方が「突然終わっても直前まで覚えている」状態に近づく。
 const SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// 姿勢(ジェスチャー)の位相を、1回の描画で進める上限(秒)。
+///
+/// ウィンドウが隠れていた、デバッガで止めた、といった理由で描画の間が大きく空くと、
+/// 姿勢だけが跳ねる。位相は 0..2π に畳まれるので破綻はしないが、上限を置くと
+/// 空いた後も動きが連続に見える。常駐ウィンドウは 60fps 前後で描かれるので、
+/// この上限に触れるのは異常時だけ。
+const MAX_POSE_STEP_SECONDS: f32 = 0.25;
+
 /// Lenia の場を体として持つペット。
 pub struct Pet {
     core: PetCore,
@@ -74,6 +94,14 @@ pub struct Pet {
     /// プロセスをまたぐ記憶の読み書き役。
     memory_store: MemoryStore,
     last_saved: Instant,
+    /// 姿勢(ジェスチャー)層。ペットの内部状態から姿勢を決める。
+    expression: Expression,
+    pose_mode: PoseMode,
+    /// 直近に描いた姿勢の投影。クリック位置の逆写像に使う
+    /// (見えているドットと押した位置を一致させる)。
+    pose: PoseProjection,
+    /// 直近の描画時刻。姿勢の位相を進める間隔を測る。
+    last_draw: Instant,
 }
 
 impl Pet {
@@ -151,7 +179,84 @@ impl Pet {
             machine_load: MachineLoad::new(),
             memory_store,
             last_saved: Instant::now(),
+            expression: Expression::new(),
+            pose_mode: PoseMode::Auto,
+            pose: PoseProjection::IDENTITY,
+            last_draw: Instant::now(),
         })
+    }
+
+    /// 姿勢層の駆動のしかたを変える(`--pose`)。固定したときは、その姿勢が
+    /// `tick` をまたいで残る。
+    pub fn set_pose_mode(&mut self, mode: PoseMode) {
+        self.pose_mode = mode;
+        match mode {
+            PoseMode::Pinned(index) => self.expression.pin_gesture(index),
+            PoseMode::Auto | PoseMode::Off => self.expression.unpin(),
+        }
+    }
+
+    pub fn pose_mode(&self) -> PoseMode {
+        self.pose_mode
+    }
+
+    /// 姿勢を1つに固定して見る(`--probe-pose` と目視確認のため)。
+    pub fn pin_pose(&mut self, index: usize) {
+        self.set_pose_mode(PoseMode::Pinned(index));
+    }
+
+    /// 検証用: 姿勢の位相を固定する。
+    ///
+    /// **動いている絵では差が読めない**ことは spike が実測しているので、姿勢の検証は
+    /// 位相を止めて行う(`docs/experiments/expression-layer.md`)。
+    pub fn set_pose_phase(&mut self, phase: f32) {
+        self.expression.set_phase(phase);
+    }
+
+    /// 姿勢層を1回進める。`seconds` は前回の描画からの経過。
+    ///
+    /// 駆動源は体の外側の少数の状態変数(energy / まとまり / テンポ / 放置時間)。
+    /// 決定モデルは使わない(`docs/experiments/expression-layer.md` の段階1)。
+    pub fn tick_expression(&mut self, seconds: f32) -> ResolvedPose {
+        if self.pose_mode == PoseMode::Off {
+            self.pose = PoseProjection::IDENTITY;
+            return ResolvedPose::IDENTITY;
+        }
+        let cohesion = self.core.observe().cohesion(COHESION_RADIUS_CELLS);
+        let resolved =
+            self.expression
+                .tick(seconds, self.core.energy(), cohesion, self.core.tempo());
+        self.pose = PoseProjection::from_pose(&resolved);
+        resolved
+    }
+
+    /// いまの姿勢を駆動している入力(検証と記録のため)。
+    /// 返り値は (energy, まとまり, テンポ, 放置秒数)。
+    pub fn expression_inputs(&self) -> (f32, f32, f32, f32) {
+        (
+            self.core.energy(),
+            self.core.observe().cohesion(COHESION_RADIUS_CELLS),
+            self.core.tempo(),
+            self.expression.unattended_seconds(),
+        )
+    }
+
+    /// いまの姿勢層の重み(検証と記録のため)。
+    pub fn expression(&self) -> &Expression {
+        &self.expression
+    }
+
+    /// 体の場(検証と記録のため)。
+    pub fn field_view(&self) -> vmc_pet_body::FieldView<'_> {
+        self.core.observe()
+    }
+
+    /// 体を `steps` ステップ進める(検証と記録のため。時計に依存しない)。
+    pub fn advance_steps(&mut self, steps: usize) {
+        for _ in 0..steps {
+            let next = self.last_step + self.step_interval;
+            self.advance(next);
+        }
     }
 
     /// 前回のステップからの経過分だけ体を進める。
@@ -180,10 +285,12 @@ impl Pet {
     }
 
     /// ポインタ座標に対応する場のセル。グリッドの外なら `None`。
+    /// 直近に描いた姿勢の逆写像を通すので、見えているドットと押した位置が一致する。
     fn cell_under(&self, x: f64, y: f64) -> Option<vmc_pet_body::CellPos> {
-        self.grid.cell_at(
+        self.grid.cell_at_posed(
             (x, y),
             self.camera.origin(),
+            &self.pose,
             (FIELD_WIDTH, FIELD_HEIGHT),
             self.surface_size.0,
             self.surface_size.1,
@@ -216,6 +323,11 @@ impl Surface for Pet {
     fn draw(&mut self, canvas: &mut [u8], width: u32, height: u32) {
         self.surface_size = (width, height);
         let now = Instant::now();
+        let seconds = now
+            .duration_since(self.last_draw)
+            .as_secs_f32()
+            .clamp(0.0, MAX_POSE_STEP_SECONDS);
+        self.last_draw = now;
         self.advance(now);
 
         if now.duration_since(self.last_saved) >= SAVE_INTERVAL {
@@ -236,12 +348,17 @@ impl Surface for Pet {
             self.camera
                 .follow(self.core.observe(), GRID_COLUMNS, GRID_ROWS);
         }
+        // 姿勢(ジェスチャー)層。体より後に進めるのは、弱った体・まとまりの悪い体を
+        // **そのフレームの姿**として読ませたいため。
+        let pose = self.tick_expression(seconds);
         canvas.fill(0);
-        self.grid.draw_with_pigment(
+        self.grid.draw_posed(
             self.core.observe(),
             self.core.echo_view(),
             Some(self.core.pigment_view()),
             self.camera.origin(),
+            &self.pose,
+            pose.visibility,
             canvas,
             width,
             height,
@@ -264,7 +381,12 @@ impl Surface for Pet {
                 self.core.hover_at(self.cell_under(x, y));
             }
             PointerInput::Pressed { x, y } => match self.cell_under(x, y) {
-                Some(at) => self.core.click(at),
+                Some(at) => {
+                    // 世話が来たことを姿勢層にも知らせる(放置時間が 0 に戻り、
+                    // `perk_up` の項が立ち上がる)。
+                    self.expression.record_care();
+                    self.core.click(at);
+                }
                 None => self.core.hover_at(None),
             },
             PointerInput::Left => {
@@ -503,6 +625,97 @@ mod tests {
 
         // Assert
         assert_eq!(pet.core.energy(), 1.0);
+    }
+
+    #[test]
+    fn the_pose_layer_starts_in_auto_mode() {
+        // Arrange / Act
+        let pet = fresh_pet();
+
+        // Assert: 既定で内部状態から姿勢を決める
+        assert_eq!(pet.pose_mode(), PoseMode::Auto);
+        assert_eq!(pet.expression().pinned(), None);
+    }
+
+    #[test]
+    fn turning_the_pose_layer_off_puts_the_plain_picture_back() {
+        // Arrange
+        let mut pet = drawn_pet();
+        pet.set_pose_mode(PoseMode::Off);
+        let mut canvas = vec![0u8; 384 * 384 * 4];
+
+        // Act: 姿勢を切ると、投影も姿勢も掛からない
+        let resolved = pet.tick_expression(1.0);
+        pet.draw(&mut canvas, 384, 384);
+
+        // Assert
+        assert_eq!(resolved, vmc_pet_body::ResolvedPose::IDENTITY);
+        assert_eq!(pet.pose_mode(), PoseMode::Off);
+        assert!(
+            canvas.chunks(4).any(|pixel| pixel[3] > 0),
+            "the body must still be drawn"
+        );
+    }
+
+    #[test]
+    fn pinning_a_gesture_keeps_it_through_ticks() {
+        // Arrange
+        let mut pet = drawn_pet();
+        let index = vmc_pet_body::gesture::gesture_index("shake").expect("shake exists");
+
+        // Act
+        pet.pin_pose(index);
+        pet.tick_expression(1.0);
+        pet.tick_expression(1.0);
+
+        // Assert: 状態が変わっても固定は解けない
+        assert_eq!(pet.pose_mode(), PoseMode::Pinned(index));
+        assert_eq!(pet.expression().pinned(), Some(index));
+        assert_eq!(
+            pet.expression().pose(),
+            vmc_pet_body::GESTURES[index].pose
+        );
+    }
+
+    #[test]
+    fn a_neglected_body_ends_up_settling() {
+        // Arrange: 一切触れずに22分(20000ステップ)進める
+        let mut pet = drawn_pet();
+        for _ in 0..20_000 {
+            let next = pet.last_step + pet.step_interval;
+            pet.advance(next);
+        }
+
+        // Act: 姿勢を決める
+        pet.tick_expression(1.0 / 15.0);
+
+        // Assert: エネルギーが尽きたので、沈む側が主役になる
+        let (energy, _, _, _) = pet.expression_inputs();
+        assert_eq!(energy, 0.0);
+        let top = vmc_pet_body::gesture::dominant(&pet.expression().weights());
+        assert!(
+            matches!(
+                vmc_pet_body::GESTURES[top].name,
+                "settle" | "recoil" | "shake"
+            ),
+            "a drained body must not perk up, got {}",
+            vmc_pet_body::GESTURES[top].name
+        );
+    }
+
+    #[test]
+    fn a_click_tells_the_pose_layer_that_care_arrived() {
+        // Arrange: 放置して放置時間を進める
+        let mut pet = drawn_pet();
+        pet.tick_expression(120.0);
+        let before = pet.expression_inputs().3;
+        assert!(before > 0.0);
+
+        // Act
+        pet.on_pointer(PointerInput::Pressed { x: 192.0, y: 192.0 });
+
+        // Assert: 世話が来たので放置時間が戻る
+        assert_eq!(pet.expression_inputs().3, 0.0);
     }
 }
 

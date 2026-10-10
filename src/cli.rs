@@ -4,6 +4,8 @@
 //! (main.rs)を分けることで、引数解釈そのものを OS から独立してテストできる
 //! ようにする。
 
+use crate::app::PoseMode;
+use vmc_pet_body::gesture::{gesture_index, GESTURES};
 use vmc_pet_body::{list_animals, MoodState};
 
 /// 引数解釈の結果、main が実際に行うべきこと。
@@ -15,6 +17,8 @@ pub enum Action {
         animal_code: String,
         preview: Option<MoodState>,
         particle_seed: Option<u64>,
+        /// 姿勢(ジェスチャー)層の駆動のしかた。
+        pose: PoseMode,
     },
     /// 選べる生物の一覧を表示して終了する。
     ListAnimals,
@@ -37,6 +41,9 @@ pub enum Action {
     },
     /// 【実験】表示できる多チャンネルの生物の一覧を表示して終了する。
     ListMultichannel,
+    /// 【実験】姿勢(ジェスチャー)層の読みやすさを実測し、確認用の画像を書き出す。
+    /// ウィンドウは開かない(`docs/experiments/expression-layer.md`)。
+    ProbePose { directory: String },
     /// 使い方を表示して終了する。
     Help,
 }
@@ -47,6 +54,8 @@ pub enum ArgsError {
     UnknownFlag(String),
     MissingValue(&'static str),
     UnknownMood(String),
+    /// `--pose` に、知らないジェスチャー名が渡された。
+    UnknownPose(String),
     /// 数を取るオプションに、受け付けない値が渡された(候補番号は 0 以上、倍率は 1 以上の整数)。
     InvalidNumber(&'static str, String),
     /// 決まった語を取るオプションに、知らない値が渡された。
@@ -75,6 +84,14 @@ impl std::fmt::Display for ArgsError {
                     names.join(", ")
                 )
             }
+            Self::UnknownPose(value) => {
+                let names: Vec<&str> = GESTURES.iter().map(|gesture| gesture.name).collect();
+                write!(
+                    f,
+                    "unknown pose for --pose: {value} (expected one of: auto, off, {})",
+                    names.join(", ")
+                )
+            }
         }
     }
 }
@@ -92,6 +109,17 @@ fn parse_mood(value: &str) -> Result<MoodState, ArgsError> {
     MoodState::from_name(value).ok_or_else(|| ArgsError::UnknownMood(value.to_string()))
 }
 
+/// `--pose` の値を読む。`auto`(状態から決める) / `off`(掛けない) / ジェスチャー名。
+fn parse_pose(value: &str) -> Result<PoseMode, ArgsError> {
+    match value {
+        "auto" => Ok(PoseMode::Auto),
+        "off" => Ok(PoseMode::Off),
+        name => gesture_index(name)
+            .map(PoseMode::Pinned)
+            .ok_or_else(|| ArgsError::UnknownPose(value.to_string())),
+    }
+}
+
 impl std::error::Error for ArgsError {}
 
 /// プログラム名を含まない引数列を解釈する。
@@ -103,6 +131,7 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
     let mut particle_zoom: u32 = 1;
     let mut particle_log: Option<String> = None;
     let mut particle_controller = true;
+    let mut pose = PoseMode::Auto;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -114,6 +143,15 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
         }
         if arg == "--list-multichannel" {
             return Ok(Action::ListMultichannel);
+        }
+        if let Some((flag, value)) = split_flag(arg, &mut iter, "--probe-pose")? {
+            let _ = flag;
+            return Ok(Action::ProbePose { directory: value });
+        }
+        if let Some((flag, value)) = split_flag(arg, &mut iter, "--pose")? {
+            let _ = flag;
+            pose = parse_pose(&value)?;
+            continue;
         }
         if arg == "--preview-multichannel" {
             let value = iter
@@ -201,12 +239,14 @@ pub fn parse(args: &[String], default_animal_code: &str) -> Result<Action, ArgsE
             animal_code,
             preview,
             particle_seed: Some(seed),
+            pose,
         });
     }
     Ok(Action::Run {
         animal_code,
         preview,
         particle_seed: None,
+        pose,
     })
 }
 
@@ -251,6 +291,14 @@ vmc-pet [オプション]
                      見えるが、動き回れる箱は狭くなる(ポインタは撫でるだけ、クリックで弾く)。
                      誘いはコントローラが行い、--particle-controller off で止められる。
                      --particle-log を渡すと、1 秒ごとの体の状態と操作を CSV で書き出す
+  --pose <auto|off|ジェスチャー名>
+                     姿勢(ジェスチャー)層の駆動を選ぶ。既定は auto(内部状態から決める)。
+                     off は姿勢を掛けない(この層を入れる前の見た目)。
+                     ジェスチャー名を渡すと、その姿勢に固定して見られる
+                     (idle / perk_up / nod / shake / lean_in / recoil / settle / flicker)
+  --probe-pose <ディレクトリ>
+                     【実験】姿勢の読みやすさを実測し、確認用の PNG を書き出して終了する
+                     (ウィンドウは開かない。docs/experiments/expression-layer.md)
   -h, --help         このメッセージを表示して終了する
 ";
 
@@ -304,6 +352,7 @@ mod tests {
                 animal_code: "O2u".to_string(),
                 preview: None,
                 particle_seed: None,
+                pose: PoseMode::Auto,
             }
         );
     }
@@ -320,6 +369,7 @@ mod tests {
                 animal_code: "OG2g".to_string(),
                 preview: None,
                 particle_seed: None,
+                pose: PoseMode::Auto,
             }
         );
     }
@@ -336,6 +386,7 @@ mod tests {
                 animal_code: "OG2g".to_string(),
                 preview: None,
                 particle_seed: None,
+                pose: PoseMode::Auto,
             }
         );
     }
@@ -557,6 +608,7 @@ mod tests {
                 animal_code: "O2u".to_string(),
                 preview: Some(MoodState::Waiting),
                 particle_seed: None,
+                pose: PoseMode::Auto,
             }
         );
         assert_eq!(
@@ -565,6 +617,7 @@ mod tests {
                 animal_code: "O2u".to_string(),
                 preview: Some(MoodState::Disappointed),
                 particle_seed: None,
+                pose: PoseMode::Auto,
             }
         );
     }
@@ -581,6 +634,7 @@ mod tests {
                 animal_code: "particles:1091".to_string(),
                 preview: None,
                 particle_seed: Some(1091),
+                pose: PoseMode::Auto,
             }
         );
     }
@@ -623,6 +677,69 @@ mod tests {
         // Assert
         for code in ["O2u", "OG2g", "S1s", "2S1v"] {
             assert!(list.contains(code), "expected {code} in:\n{list}");
+        }
+    }
+
+    #[test]
+    fn the_pose_layer_defaults_to_auto_and_can_be_turned_off() {
+        // Arrange / Act / Assert
+        assert_eq!(parse(&args(&[]), "O2u").unwrap(), default_run());
+        assert_eq!(
+            parse(&args(&["--pose", "off"]), "O2u").unwrap(),
+            run_with_pose(PoseMode::Off)
+        );
+        assert_eq!(
+            parse(&args(&["--pose=auto"]), "O2u").unwrap(),
+            default_run()
+        );
+    }
+
+    #[test]
+    fn the_pose_layer_can_be_pinned_to_a_gesture_by_name() {
+        // Arrange / Act / Assert
+        let index = gesture_index("shake").unwrap();
+        assert_eq!(
+            parse(&args(&["--pose", "shake"]), "O2u").unwrap(),
+            run_with_pose(PoseMode::Pinned(index))
+        );
+    }
+
+    #[test]
+    fn an_unknown_gesture_name_is_reported_with_the_ones_that_exist() {
+        // Arrange / Act
+        let result = parse(&args(&["--pose", "sulk"]), "O2u");
+
+        // Assert
+        assert_eq!(result, Err(ArgsError::UnknownPose("sulk".to_string())));
+        let message = ArgsError::UnknownPose("sulk".to_string()).to_string();
+        assert!(message.contains("perk_up"), "got: {message}");
+    }
+
+    #[test]
+    fn the_pose_probe_takes_an_output_directory() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse(&args(&["--probe-pose", "docs/x"]), "O2u").unwrap(),
+            Action::ProbePose {
+                directory: "docs/x".to_string()
+            }
+        );
+        assert_eq!(
+            parse(&args(&["--probe-pose"]), "O2u"),
+            Err(ArgsError::MissingValue("--probe-pose"))
+        );
+    }
+
+    fn default_run() -> Action {
+        run_with_pose(PoseMode::Auto)
+    }
+
+    fn run_with_pose(pose: PoseMode) -> Action {
+        Action::Run {
+            animal_code: "O2u".to_string(),
+            preview: None,
+            particle_seed: None,
+            pose,
         }
     }
 }
