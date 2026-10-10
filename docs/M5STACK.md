@@ -178,13 +178,25 @@ USB をつなぐと恵まれ側(ストレス 0)に戻るので、**充電器を�
   増えてストレスが上がらない)
 - 最大ストレスの効き方は**実測した**: エネルギーが尽きるまでが 150秒 → 75秒
   (`vitality::tests::maximum_stress_halves_the_time_before_the_energy_is_gone`)
-- ファームウェアは `cargo check --release` が通る(型・借用の検査。警告なし)
+- ファームウェアは `cargo check --release` と **`cargo build --release` の両方が通った**
+  (xtensa ターゲット)。成果物は 5,003,260 バイトの ELF。リンカの警告は
+  `LOAD segment with RWX permissions`(esp-hal で前から出るもの)だけ
 
 **限界**
-- **実機では未検証。リンクもできていない。** この環境には Xtensa のリンカ
-  (`xtensa-esp32s3-elf-gcc`)が無く、`--release` のビルドは
-  `error: linker xtensa-esp32s3-elf-gcc not found` で止まる(`vmc-pet-body` を
-  ターゲット指定で検査するのは通る)。書き込みと目視は実機のある環境で行う
+- **実機での動作確認はしていない(書き込みをしていない)。** このマシンには CoreS3 が
+  USB で接続されていて(`/dev/ttyACM0`、`303a:1001` Espressif USB JTAG/serial)、
+  `espflash` もあるので**書き込める状態**ではある。ただし書き込みはペットの記憶
+  (`pet` パーティション)を巻き込む操作なので、行うかどうかは別に決める
+- **ツールチェーンの PATH**(このマシンには `espup` の `export-esp.sh` が無い)。
+  `~/.rustup/toolchains/esp/bin` と、GCC の実体がある
+  `~/.rustup/toolchains/esp/xtensa-esp-elf/esp-15.2.0_20250920/xtensa-esp-elf/bin` を
+  PATH に足すとビルドが通る:
+
+  ```sh
+  export PATH="$HOME/.rustup/toolchains/esp/bin:\
+  $HOME/.rustup/toolchains/esp/xtensa-esp-elf/esp-15.2.0_20250920/xtensa-esp-elf/bin:$PATH"
+  cd m5stack-cores3 && cargo build --release
+  ```
 - 60% / 20% の初期値、30秒の読み間隔、0.7 の平滑化は、いずれも実機で見ながら決める前提
 - 「電池が減ると体が弱る」を、放置による弱りと区別して人が読めるかは未判定
 
