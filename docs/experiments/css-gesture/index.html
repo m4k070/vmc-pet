@@ -24,8 +24,9 @@ h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
   border-radius: 4px; padding: 0 4px; margin-left: 4px; }
 .state { font-size: 11px; color: var(--muted-foreground, #999); margin: 0 0 8px; min-height: 28px; }
 .row { display: flex; gap: 8px; align-items: center; }
-.stage { width: 118px; height: 118px; display: grid; place-items: center; flex: 0 0 auto; }
+.stage { width: 118px; height: 118px; display: grid; place-items: center; flex: 0 0 auto; position: relative; }
 .stage.sm { width: 92px; height: 92px; }
+.lyr { position: absolute; inset: 0; margin: auto; }
 .cmp { display: grid; justify-items: center; gap: 2px; }
 .cmp-label, .cmp-meta { font-size: 9px; color: var(--muted-foreground, #999); text-align: center; }
 .cmp .body { width: 40px; height: 40px; border-radius: 12px; }
@@ -184,13 +185,18 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
   <span class="val" id="thv">0.30</span>
   <span class="count" id="cnt"></span>
   <span class="fires" id="fires"></span>
+  <label for="mode">表示</label>
+  <select id="mode">
+    <option value="argmax" selected>argmax（ゲート後）</option>
+    <option value="blend">混合（確率で重ねる）</option>
+  </select>
 </div>
 <div class="grid">
   <div class="card">
     <h3>fixed_bug <span class="tag">clef</span></h3>
     <p class="state">ついに3日詰まっていたバグが直った。テストも全部通った。</p>
     <div class="row">
-      <div class="stage"><div class="body g-nod" data-emit="0.471" data-raw="nod" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div></div>
+      <div class="stage" data-top="nod" data-emit="0.471"><div class="lyr body g-idle" data-p="0.105474" data-g="idle" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-perk_up" data-p="0.307681" data-g="perk_up" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-nod" data-p="0.392475" data-g="nod" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-shake" data-p="0.009214" data-g="shake" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-lean_in" data-p="0.080283" data-g="lean_in" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-recoil" data-p="0.016619" data-g="recoil" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-settle" data-p="0.061580" data-g="settle" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div><div class="lyr body g-flicker" data-p="0.026674" data-g="flicker" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.054" data-raw="flicker" style="--speed:1.306;--amp:0.76;--scale:1.061;--glow:0.054"></div></div>
@@ -212,7 +218,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>build_fail <span class="tag">clef</span></h3>
     <p class="state">またビルドが落ちた。同じエラーが4回目。</p>
     <div class="row">
-      <div class="stage"><div class="body g-settle" data-emit="0.356" data-raw="settle" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div></div>
+      <div class="stage" data-top="settle" data-emit="0.356"><div class="lyr body g-idle" data-p="0.114776" data-g="idle" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-perk_up" data-p="0.042285" data-g="perk_up" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-nod" data-p="0.064384" data-g="nod" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-shake" data-p="0.052057" data-g="shake" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-lean_in" data-p="0.027881" data-g="lean_in" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-recoil" data-p="0.063901" data-g="recoil" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-settle" data-p="0.547818" data-g="settle" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div><div class="lyr body g-flicker" data-p="0.086898" data-g="flicker" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.112" data-raw="flicker" style="--speed:1.105;--amp:1.016;--scale:1.053;--glow:0.112"></div></div>
@@ -234,7 +240,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>waiting <span class="tag">clef</span></h3>
     <p class="state">テストスイートの実行が終わるのをただ待っている。</p>
     <div class="row">
-      <div class="stage"><div class="body g-idle" data-emit="0.036" data-raw="idle" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div></div>
+      <div class="stage" data-top="idle" data-emit="0.036"><div class="lyr body g-idle" data-p="0.834665" data-g="idle" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-perk_up" data-p="0.018315" data-g="perk_up" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-nod" data-p="0.034230" data-g="nod" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-shake" data-p="0.012127" data-g="shake" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-lean_in" data-p="0.023273" data-g="lean_in" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-recoil" data-p="0.012068" data-g="recoil" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-settle" data-p="0.034166" data-g="settle" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div><div class="lyr body g-flicker" data-p="0.031156" data-g="flicker" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.062" data-raw="flicker" style="--speed:1.373;--amp:0.675;--scale:1.05;--glow:0.062"></div></div>
@@ -256,7 +262,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>branch_gone <span class="tag">clef</span></h3>
     <p class="state">レビュー前にブランチを消されてしまった。</p>
     <div class="row">
-      <div class="stage"><div class="body g-settle" data-emit="0.18" data-raw="settle" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div></div>
+      <div class="stage" data-top="settle" data-emit="0.18"><div class="lyr body g-idle" data-p="0.127562" data-g="idle" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-perk_up" data-p="0.035438" data-g="perk_up" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-nod" data-p="0.052502" data-g="nod" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-shake" data-p="0.076996" data-g="shake" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-lean_in" data-p="0.020209" data-g="lean_in" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-recoil" data-p="0.092946" data-g="recoil" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-settle" data-p="0.493988" data-g="settle" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div><div class="lyr body g-flicker" data-p="0.100361" data-g="flicker" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.028" data-raw="flicker" style="--speed:1.284;--amp:0.788;--scale:1.049;--glow:0.028"></div></div>
@@ -278,7 +284,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>uncertain <span class="tag">clef</span></h3>
     <p class="state">次に何をすればいいのか分からない。選択肢が多すぎる。</p>
     <div class="row">
-      <div class="stage"><div class="body g-flicker" data-emit="0.223" data-raw="flicker" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div></div>
+      <div class="stage" data-top="flicker" data-emit="0.223"><div class="lyr body g-idle" data-p="0.121233" data-g="idle" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-perk_up" data-p="0.009420" data-g="perk_up" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-nod" data-p="0.015638" data-g="nod" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-shake" data-p="0.025143" data-g="shake" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-lean_in" data-p="0.007537" data-g="lean_in" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-recoil" data-p="0.015252" data-g="recoil" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-settle" data-p="0.045901" data-g="settle" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div><div class="lyr body g-flicker" data-p="0.759876" data-g="flicker" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.035" data-raw="flicker" style="--speed:1.112;--amp:1.008;--scale:1.093;--glow:0.035"></div></div>
@@ -300,7 +306,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>late_night <span class="tag">clef</span></h3>
     <p class="state">深夜3時。そろそろ寝たほうがいいのは分かっている。</p>
     <div class="row">
-      <div class="stage"><div class="body g-idle" data-emit="0.122" data-raw="idle" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div></div>
+      <div class="stage" data-top="idle" data-emit="0.122"><div class="lyr body g-idle" data-p="0.420881" data-g="idle" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-perk_up" data-p="0.033245" data-g="perk_up" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-nod" data-p="0.164545" data-g="nod" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-shake" data-p="0.042988" data-g="shake" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-lean_in" data-p="0.025684" data-g="lean_in" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-recoil" data-p="0.013754" data-g="recoil" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-settle" data-p="0.243487" data-g="settle" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div><div class="lyr body g-flicker" data-p="0.055417" data-g="flicker" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.002" data-raw="flicker" style="--speed:1.366;--amp:0.685;--scale:1.06;--glow:0.002"></div></div>
@@ -322,7 +328,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>approved <span class="tag">clef</span></h3>
     <p class="state">レビューで全部OKをもらった。そのままマージできた。</p>
     <div class="row">
-      <div class="stage"><div class="body g-nod" data-emit="0.435" data-raw="nod" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div></div>
+      <div class="stage" data-top="nod" data-emit="0.435"><div class="lyr body g-idle" data-p="0.063798" data-g="idle" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-perk_up" data-p="0.040940" data-g="perk_up" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-nod" data-p="0.831380" data-g="nod" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-shake" data-p="0.003991" data-g="shake" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-lean_in" data-p="0.036666" data-g="lean_in" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-recoil" data-p="0.004368" data-g="recoil" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-settle" data-p="0.009847" data-g="settle" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div><div class="lyr body g-flicker" data-p="0.009009" data-g="flicker" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.081" data-raw="flicker" style="--speed:1.134;--amp:0.979;--scale:1.064;--glow:0.081"></div></div>
@@ -344,7 +350,7 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h3>nag <span class="tag">clef</span></h3>
     <p class="state">同じ指摘を3回目にされた。もう直したはずなのに。</p>
     <div class="row">
-      <div class="stage"><div class="body g-settle" data-emit="0.493" data-raw="settle" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div></div>
+      <div class="stage" data-top="settle" data-emit="0.493"><div class="lyr body g-idle" data-p="0.092113" data-g="idle" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-perk_up" data-p="0.038942" data-g="perk_up" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-nod" data-p="0.089996" data-g="nod" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-shake" data-p="0.205260" data-g="shake" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-lean_in" data-p="0.015826" data-g="lean_in" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-recoil" data-p="0.195111" data-g="recoil" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-settle" data-p="0.295789" data-g="settle" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div><div class="lyr body g-flicker" data-p="0.066963" data-g="flicker" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div></div>
       <div class="cmp">
         <div class="cmp-label">laya</div>
         <div class="stage sm"><div class="body g-flicker" data-emit="0.101" data-raw="flicker" style="--speed:1.175;--amp:0.928;--scale:1.071;--glow:0.101"></div></div>
@@ -363,29 +369,43 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div></div>
 <script>
-function apply(theta) {
+function apply(theta, mode) {
   document.getElementById('thv').textContent = theta.toFixed(2);
   const fired = [];
-  document.querySelectorAll('.card').forEach(card => {
-    const body = card.querySelector('.stage .body');
-    if (!body) return;
-    const emit = parseFloat(body.dataset.emit);
-    const raw = body.dataset.raw;
+  document.querySelectorAll('.stage[data-top]').forEach(stage => {
+    const emit = parseFloat(stage.dataset.emit);
+    const top = stage.dataset.top;
     const on = emit >= theta;
-    body.className = 'body g-' + (on ? raw : 'idle');
-    card.classList.toggle('silent', !on);
+    const layers = Array.from(stage.querySelectorAll('.lyr'));
+    const pmax = Math.max.apply(null, layers.map(l => parseFloat(l.dataset.p) || 0).concat([1e-9]));
+    layers.forEach(l => {
+      const p = parseFloat(l.dataset.p) || 0;
+      if (mode === 'blend') {
+        l.style.display = '';
+        l.style.opacity = (p / pmax * 0.55).toFixed(3);
+      } else {
+        const show = on && l.dataset.g === top;
+        l.style.display = show ? '' : 'none';
+      }
+    });
+    const card = stage.closest('.card');
+    card.classList.toggle('silent', mode === 'argmax' && !on);
     const name = card.querySelector('.gname');
     const note = card.querySelector('.gnote');
-    const key = card.querySelector('h3').textContent.trim().split(/\s+/)[0];
-    if (name) name.textContent = on ? raw : 'idle';
-    if (note) note.innerHTML = on ? '' :
-      ' <span>(emit ' + emit.toFixed(2) + ' &lt; ' + theta.toFixed(2) + ' → idle。モデルの選択は ' + raw + ')</span>';
-    if (on) fired.push(key);
+    if (name) name.textContent = (mode === 'blend') ? '混合' : (on ? top : 'idle');
+    if (note) note.innerHTML = (mode === 'blend')
+      ? ' <span>(確率に比例して8ジェスチャーを重ねている)</span>'
+      : (on ? '' : ' <span>(emit ' + emit.toFixed(2) + ' &lt; ' + theta.toFixed(2)
+         + ' → idle。モデルの選択は ' + top + ')</span>');
+    if (on) fired.push(card.querySelector('h3').textContent.trim().split(/\s+/)[0]);
   });
   document.getElementById('cnt').textContent = '発火 ' + fired.length + ' / 8';
   document.getElementById('fires').textContent = fired.join(', ');
 }
-document.getElementById('th').addEventListener('input', e => apply(parseFloat(e.target.value)));
-apply(0.3);
+const th = document.getElementById('th'), md = document.getElementById('mode');
+const upd = () => apply(parseFloat(th.value), md.value);
+th.addEventListener('input', upd);
+md.addEventListener('change', upd);
+upd();
 </script>
 </body></html>

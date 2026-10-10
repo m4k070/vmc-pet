@@ -62,6 +62,22 @@ def body_div(c: dict, cls: str = "body") -> str:
     )
 
 
+def layers_div(c: dict, probs: dict) -> str:
+    """8ジェスチャーを重ねたレイヤを作る（argmax 表示と混合表示を切り替えるため）。
+
+    パラメータ（speed/amp/scale/glow）は全レイヤ共通で、違うのは animation-name だけ。
+    混合モードでは各レイヤの不透明度を確率に比例させるので、動きが重み付きで平均される。
+    """
+    total = sum(probs.values()) or 1.0
+    top = max(probs.items(), key=lambda kv: kv[1])[0] if probs else "idle"
+    layers = "".join(
+        f'<div class="lyr body g-{g}" data-p="{probs.get(g, 0.0) / total:.6f}" data-g="{g}" '
+        f'style="--speed:{c["speed"]};--amp:{c["amp"]};--scale:{c["scale"]};--glow:{c["glow"]}"></div>'
+        for g in GESTURE_ORDER
+    )
+    return f'<div class="stage" data-top="{top}" data-emit="{c["glow"]}">{layers}</div>'
+
+
 def dist_text(probs: dict, top: int = 3) -> str:
     """上位の内訳を文字でも出す（ホバーしないと分からないと判定しづらいため）。"""
     total = sum(probs.values()) or 1.0
@@ -79,6 +95,8 @@ def main() -> None:
     ap.add_argument("--out", default="index.html")
     ap.add_argument("--css", default="gestures.css")
     ap.add_argument("--theta", type=float, default=DEFAULT_THETA, help="スライダの初期値")
+    ap.add_argument("--default-mode", choices=["argmax", "blend"], default="argmax",
+                    help="初期の表示モード")
     args = ap.parse_args()
 
     here = Path(__file__).parent
@@ -116,7 +134,7 @@ def main() -> None:
     <h3>{row['key']} <span class="tag">{data['model']}</span></h3>
     <p class="state">{row['state']}</p>
     <div class="row">
-      <div class="stage">{body_div(c)}</div>{other_html}
+      {layers_div(c, row.get('gesture_probs', {}))}{other_html}
     </div>
     <div class="meta"><b class="gname">?</b><span class="gnote"></span> <span class="conf">conf {c['conf']:.2f}</span></div>
     <dl>
@@ -156,8 +174,9 @@ h3 {{ font-size: 13px; margin: 0 0 4px; font-weight: 600; }}
   border-radius: 4px; padding: 0 4px; margin-left: 4px; }}
 .state {{ font-size: 11px; color: var(--muted-foreground, #999); margin: 0 0 8px; min-height: 28px; }}
 .row {{ display: flex; gap: 8px; align-items: center; }}
-.stage {{ width: 118px; height: 118px; display: grid; place-items: center; flex: 0 0 auto; }}
+.stage {{ width: 118px; height: 118px; display: grid; place-items: center; flex: 0 0 auto; position: relative; }}
 .stage.sm {{ width: 92px; height: 92px; }}
+.lyr {{ position: absolute; inset: 0; margin: auto; }}
 .cmp {{ display: grid; justify-items: center; gap: 2px; }}
 .cmp-label, .cmp-meta {{ font-size: 9px; color: var(--muted-foreground, #999); text-align: center; }}
 .cmp .body {{ width: 40px; height: 40px; border-radius: 12px; }}
@@ -199,33 +218,52 @@ dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
   <span class="val" id="thv">{args.theta:.2f}</span>
   <span class="count" id="cnt"></span>
   <span class="fires" id="fires"></span>
+  <label for="mode">表示</label>
+  <select id="mode">
+    <option value="argmax"{' selected' if args.default_mode == 'argmax' else ''}>argmax（ゲート後）</option>
+    <option value="blend"{' selected' if args.default_mode == 'blend' else ''}>混合（確率で重ねる）</option>
+  </select>
 </div>
 <div class="grid">{''.join(cards)}</div>
 <script>
-function apply(theta) {{
+function apply(theta, mode) {{
   document.getElementById('thv').textContent = theta.toFixed(2);
   const fired = [];
-  document.querySelectorAll('.card').forEach(card => {{
-    const body = card.querySelector('.stage .body');
-    if (!body) return;
-    const emit = parseFloat(body.dataset.emit);
-    const raw = body.dataset.raw;
+  document.querySelectorAll('.stage[data-top]').forEach(stage => {{
+    const emit = parseFloat(stage.dataset.emit);
+    const top = stage.dataset.top;
     const on = emit >= theta;
-    body.className = 'body g-' + (on ? raw : 'idle');
-    card.classList.toggle('silent', !on);
+    const layers = Array.from(stage.querySelectorAll('.lyr'));
+    const pmax = Math.max.apply(null, layers.map(l => parseFloat(l.dataset.p) || 0).concat([1e-9]));
+    layers.forEach(l => {{
+      const p = parseFloat(l.dataset.p) || 0;
+      if (mode === 'blend') {{
+        l.style.display = '';
+        l.style.opacity = (p / pmax * 0.55).toFixed(3);
+      }} else {{
+        const show = on && l.dataset.g === top;
+        l.style.display = show ? '' : 'none';
+      }}
+    }});
+    const card = stage.closest('.card');
+    card.classList.toggle('silent', mode === 'argmax' && !on);
     const name = card.querySelector('.gname');
     const note = card.querySelector('.gnote');
-    const key = card.querySelector('h3').textContent.trim().split(/\\s+/)[0];
-    if (name) name.textContent = on ? raw : 'idle';
-    if (note) note.innerHTML = on ? '' :
-      ' <span>(emit ' + emit.toFixed(2) + ' &lt; ' + theta.toFixed(2) + ' → idle。モデルの選択は ' + raw + ')</span>';
-    if (on) fired.push(key);
+    if (name) name.textContent = (mode === 'blend') ? '混合' : (on ? top : 'idle');
+    if (note) note.innerHTML = (mode === 'blend')
+      ? ' <span>(確率に比例して8ジェスチャーを重ねている)</span>'
+      : (on ? '' : ' <span>(emit ' + emit.toFixed(2) + ' &lt; ' + theta.toFixed(2)
+         + ' → idle。モデルの選択は ' + top + ')</span>');
+    if (on) fired.push(card.querySelector('h3').textContent.trim().split(/\\s+/)[0]);
   }});
   document.getElementById('cnt').textContent = '発火 ' + fired.length + ' / 8';
   document.getElementById('fires').textContent = fired.join(', ');
 }}
-document.getElementById('th').addEventListener('input', e => apply(parseFloat(e.target.value)));
-apply({args.theta});
+const th = document.getElementById('th'), md = document.getElementById('mode');
+const upd = () => apply(parseFloat(th.value), md.value);
+th.addEventListener('input', upd);
+md.addEventListener('change', upd);
+upd();
 </script>
 </body></html>"""
 
