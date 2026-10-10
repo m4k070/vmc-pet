@@ -7,8 +7,9 @@
 //! 体の場(body)と入力の echo(touch_echo)は別データとして受け取り、ここで初めて
 //! 1つの絵に合成する。合成は見た目だけの都合であり、どちらの値も書き換えない。
 
+use crate::render::pose::{PoseProjection, WALL_STEPS};
 use crate::render::TouchEchoView;
-use vmc_pet_body::appearance::{appearance_of, DOT_GAP_RATIO, MIN_VISIBLE_VALUE};
+use vmc_pet_body::appearance::{appearance_of, CellAppearance, DOT_GAP_RATIO, MIN_VISIBLE_VALUE};
 use vmc_pet_body::{CellPos, FieldView, PigmentView};
 
 /// 円の縁をぼかす幅(ピクセル)。ジャギーを消すために使う。
@@ -70,6 +71,33 @@ impl DotGrid {
         width: u32,
         height: u32,
     ) -> Option<CellPos> {
+        self.cell_at_posed(
+            position,
+            origin,
+            &PoseProjection::IDENTITY,
+            field_size,
+            width,
+            height,
+        )
+    }
+
+    /// 姿勢を掛けて描いた `draw_posed` の逆写像。
+    ///
+    /// 姿勢は点を動かすので、`cell_at` だけでは見えているドットと押した位置が
+    /// 食い違う(`lift` で体が浮いたぶん、クリックが下にずれる)。投影の逆写像
+    /// (`PoseProjection::unproject`)を通して、見えている位置からセルを引く。
+    ///
+    /// 板の**中央面**との交点を返す。板の側面(厚みの帯)を押した場合は、
+    /// 帯の後ろにある中央面のセルが返る(帯そのものはセルを持たない)。
+    pub fn cell_at_posed(
+        &self,
+        position: (f64, f64),
+        origin: (f32, f32),
+        projection: &PoseProjection,
+        field_size: (usize, usize),
+        width: u32,
+        height: u32,
+    ) -> Option<CellPos> {
         let bounds = self.bounds(width, height);
         if bounds.width == 0 {
             return None;
@@ -87,8 +115,17 @@ impl DotGrid {
         let cell_origin = (origin.0.floor() as i32, origin.1.floor() as i32);
         let shift = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
 
-        let column = ((x - bounds.x as f32) / cell_size + shift.0).floor() as i32;
-        let row = ((y - bounds.y as f32) / cell_size + shift.1).floor() as i32;
+        let centre = (
+            bounds.x as f32 + bounds.width as f32 / 2.0,
+            bounds.y as f32 + bounds.height as f32 / 2.0,
+        );
+        let (u, v) = projection.unproject((
+            (x - centre.0) / cell_size,
+            (y - centre.1) / cell_size,
+        ))?;
+
+        let column = (u + shift.0 + self.columns as f32 / 2.0).floor() as i32;
+        let row = (v + shift.1 + self.rows as f32 / 2.0).floor() as i32;
 
         let (field_width, field_height) = (field_size.0 as i32, field_size.1 as i32);
         let field_x =
@@ -141,6 +178,42 @@ impl DotGrid {
         width: u32,
         height: u32,
     ) {
+        self.draw_posed(
+            field,
+            echo,
+            pigment,
+            origin,
+            &PoseProjection::IDENTITY,
+            1.0,
+            canvas,
+            width,
+            height,
+        );
+    }
+
+    /// 姿勢(ジェスチャー)を掛けて描く(`docs/experiments/expression-layer.md`)。
+    ///
+    /// 各セルの点を、グリッド中心を原点とするセル単位の座標で組み立て、`projection`
+    /// (板のオルソ投影)に通してから画面へ置く。`visibility` は明滅の掛け率で、
+    /// 1.0 なら明滅しない。
+    ///
+    /// **姿勢が 0 のときの見た目は、`draw_with_pigment` と1ビットも変わらない。**
+    /// 投影が恒等 (`PoseProjection::IDENTITY`) なら層は1枚に畳まれ、中心からの
+    /// 相対座標も `cell_size` も整数なので、位置の計算は元の式と厳密に一致する。
+    /// これはテストで固定している。
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_posed(
+        &self,
+        field: FieldView<'_>,
+        echo: TouchEchoView<'_>,
+        pigment: Option<PigmentView<'_>>,
+        origin: (f32, f32),
+        projection: &PoseProjection,
+        visibility: f32,
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+    ) {
         let bounds = self.bounds(width, height);
         if bounds.width == 0 {
             return;
@@ -150,10 +223,19 @@ impl DotGrid {
 
         let cell_origin = (origin.0.floor() as i32, origin.1.floor() as i32);
         let shift = (origin.0 - origin.0.floor(), origin.1 - origin.1.floor());
-
+        // 姿勢はグリッド中心を原点に掛ける。中心からの相対座標はセル単位で組み立てる。
+        let (columns_half, rows_half) = (self.columns as f32 / 2.0, self.rows as f32 / 2.0);
+        let (last_column, last_row) = (self.columns as i32, self.rows as i32);
         // ずらした分だけ端に隙間ができるため、上下左右へ1列ずつ余分に描く
-        for row in -1..=self.rows as i32 {
-            for column in -1..=self.columns as i32 {
+        let (columns, rows) = (last_column + 2, last_row + 2);
+        let index = |column: i32, row: i32| ((row + 1) * columns + (column + 1)) as usize;
+
+        // 側面を描くセル(輪郭の上にあるセル)を知るために、見え方を先に全部決める。
+        // 1セルの見え方(大きさ・色)は M5Stack版と共有する決まりに従う
+        // (`vmc_pet_body::appearance`)。ここが持つのはドットの配置だけ。
+        let mut cells: Vec<Option<CellAppearance>> = vec![None; (columns * rows) as usize];
+        for row in -1..=last_row {
+            for column in -1..=last_column {
                 let body_value = pool_cell(
                     |x, y| field.get(x, y),
                     (field.width(), field.height()),
@@ -183,23 +265,69 @@ impl DotGrid {
                         row,
                     )
                 });
-                // 1セルの見え方(大きさ・色)は M5Stack版と共有する決まりに従う
-                // (`vmc_pet_body::appearance`)。ここが持つのはドットの配置だけ。
-                let Some(appearance) = appearance_of(body_value, echo_value, tint) else {
+                cells[index(column, row)] = appearance_of(body_value, echo_value, tint);
+            }
+        }
+
+        // 前面(板の手前の面)を描き、輪郭の上のセルだけ側面を掃く。
+        // 姿勢が 0 なら側面は描かれず、位置の計算も元の式と厳密に一致する。
+        for row in -1..=last_row {
+            for column in -1..=last_column {
+                let Some(appearance) = cells[index(column, row)] else {
                     continue;
                 };
-                let color = appearance.color;
-                let dot = Dot {
-                    center_x: bounds.x as f32 + (column as f32 + 0.5 - shift.0) * cell_size,
-                    center_y: bounds.y as f32 + (row as f32 + 0.5 - shift.1) * cell_size,
-                    radius: max_radius * appearance.size,
-                    value: appearance.opacity,
-                    color: (color.red, color.green, color.blue),
+                let value = appearance.opacity * visibility;
+                if value <= 0.0 {
+                    continue;
+                }
+                // グリッド中心からの局所座標(セル単位)。姿勢はここに掛かる。
+                let u = column as f32 + 0.5 - shift.0 - columns_half;
+                let v = row as f32 + 0.5 - shift.1 - rows_half;
+                let radius = max_radius * appearance.size * projection.scale();
+                let color = (
+                    appearance.color.red,
+                    appearance.color.green,
+                    appearance.color.blue,
+                );
+                let place = |z: f32| {
+                    let (x, y) = projection.project((u, v, z));
+                    Dot {
+                        center_x: bounds.x as f32 + bounds.width as f32 / 2.0 + x * cell_size,
+                        center_y: bounds.y as f32 + bounds.height as f32 / 2.0 + y * cell_size,
+                        radius,
+                        value,
+                        color,
+                    }
                 };
-                draw_dot(canvas, width, height, bounds, dot);
+                draw_dot(canvas, width, height, bounds, place(projection.front_z()));
+                if !projection.shows_walls() || !on_the_outline(&cells, columns, column, row) {
+                    continue;
+                }
+                for step in 1..WALL_STEPS {
+                    draw_dot(canvas, width, height, bounds, place(projection.wall_z(step)));
+                }
             }
         }
     }
+}
+
+/// そのセルが輪郭の上にあるか(4近傍のどれかが見えていないか、場の外か)。
+/// 側面を描くのはここだけ。内側のセルの側面は前面の裏に隠れるので描かない。
+fn on_the_outline(
+    cells: &[Option<CellAppearance>],
+    columns: i32,
+    column: i32,
+    row: i32,
+) -> bool {
+    let last_column = columns - 2;
+    let last_row = cells.len() as i32 / columns - 2;
+    [(0, -1), (0, 1), (-1, 0), (1, 0)].iter().any(|(dc, dr)| {
+        let (nc, nr) = (column + dc, row + dr);
+        if nc < -1 || nc > last_column || nr < -1 || nr > last_row {
+            return true;
+        }
+        cells[((nr + 1) * columns + (nc + 1)) as usize].is_none()
+    })
 }
 
 impl DotGrid {
@@ -332,7 +460,12 @@ fn draw_dot(canvas: &mut [u8], width: u32, height: u32, bounds: GridBounds, dot:
             let offset = (y * width as usize + x) * BYTES_PER_PIXEL;
             let pixel =
                 premultiplied_argb8888(dot.color.0, dot.color.1, dot.color.2, dot.value * coverage);
-            canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
+            // 層を重ねたときに不透明度が足し合わさると、板を厚くしただけで明るくなる
+            // = 姿勢ではない信号が出てしまう。**いちばん濃いドットが勝つ**合成にして、
+            // 層が重なったときに元の1枚と厳密に同じ絵になるようにする。
+            if pixel[3] > canvas[offset + 3] {
+                canvas[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&pixel);
+            }
         }
     }
 }
@@ -737,4 +870,262 @@ mod tests {
             "a body-only dot must keep the body color, not lean toward echo"
         );
     }
+
+    /// 不透明ピクセルを含む矩形 `(min_x, min_y, max_x, max_y)`。姿勢の効果を測るのに使う。
+    fn content_bounds(canvas: &[u8], width: usize, height: usize) -> Option<(usize, usize, usize, usize)> {
+        let (mut min_x, mut min_y) = (width, height);
+        let (mut max_x, mut max_y) = (0usize, 0usize);
+        for y in 0..height {
+            for x in 0..width {
+                if canvas[(y * width + x) * BYTES_PER_PIXEL + 3] == 0 {
+                    continue;
+                }
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        if min_x > max_x {
+            return None;
+        }
+        Some((min_x, min_y, max_x, max_y))
+    }
+
+    /// 中央の1セルだけを点灯させた場を描き、内容の矩形を返す。
+    fn posed_bounds(pose: &ResolvedPose, surface: usize) -> (usize, usize) {
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if x == 16 && y == 16 { 1.0 } else { 0.0 });
+        let echo = TouchEcho::new(32, 32);
+        let grid = DotGrid::new(32, 32);
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+        grid.draw_posed(
+            field.view(),
+            echo.view(),
+            None,
+            (0.0, 0.0),
+            &PoseProjection::from_pose(pose),
+            1.0,
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+        let (_, min_y, _, max_y) = content_bounds(&canvas, surface, surface).expect("lit");
+        (min_y, max_y)
+    }
+
+    #[test]
+    fn a_zero_pose_draws_exactly_like_the_unposed_draw() {
+        // Arrange: 体・echo・色素がすべて載った場を、姿勢なしで2通りに描く
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if (x + y) % 3 == 0 { 0.7 } else { 0.0 });
+        let mut echo = TouchEcho::new(32, 32);
+        echo.touch(&vmc_pet_body::Perturbation {
+            at: CellPos { x: 10, y: 20 },
+            radius: 3.0,
+            amount: 0.8,
+        });
+        let mut pigment = vmc_pet_body::Pigment::new(32, 32);
+        for _ in 0..300 {
+            pigment.step(field.view(), 1.0);
+        }
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut plain = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+        let mut posed = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw_with_pigment(
+            field.view(),
+            echo.view(),
+            Some(pigment.view()),
+            (0.5, 1.25),
+            &mut plain,
+            surface as u32,
+            surface as u32,
+        );
+        grid.draw_posed(
+            field.view(),
+            echo.view(),
+            Some(pigment.view()),
+            (0.5, 1.25),
+            &PoseProjection::IDENTITY,
+            1.0,
+            &mut posed,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 姿勢を足しても、姿勢ゼロなら見た目は1ビットも変わらない。
+        // これは「ジェスチャー層を入れても、何もしないときは元の絵のまま」という
+        // 不変条件で、崩れると既存の見た目が全部変わる。
+        assert_eq!(plain, posed);
+    }
+
+    #[test]
+    fn a_zero_pose_survives_a_non_integer_origin_and_a_larger_surface() {
+        // Arrange: cell_size が割り切れる範囲で、原点の小数部と余白を変える
+        let mut field = Field::new(32, 32);
+        field.map(|x, y, _value| if x == 5 && y == 27 { 1.0 } else { 0.0 });
+        let echo = TouchEcho::new(32, 32);
+        let grid = DotGrid::new(32, 32);
+        let (width, height) = (512usize, 384usize);
+        let mut plain = vec![0u8; width * height * BYTES_PER_PIXEL];
+        let mut posed = vec![0u8; width * height * BYTES_PER_PIXEL];
+        let origin = (0.25, 0.75);
+
+        // Act
+        grid.draw(
+            field.view(),
+            echo.view(),
+            origin,
+            &mut plain,
+            width as u32,
+            height as u32,
+        );
+        grid.draw_posed(
+            field.view(),
+            echo.view(),
+            None,
+            origin,
+            &PoseProjection::IDENTITY,
+            1.0,
+            &mut posed,
+            width as u32,
+            height as u32,
+        );
+
+        // Assert
+        assert_eq!(plain, posed);
+    }
+
+    #[test]
+    fn pitch_grows_the_dot_vertically_by_the_thickness_times_the_sine() {
+        // Arrange: 中央の1セルを、姿勢なしと pitch 30度で描く(表示は 384px・12px/セル)
+        let flat = posed_bounds(&ResolvedPose::IDENTITY, 384);
+        let pitched = posed_bounds(
+            &ResolvedPose {
+                pitch_deg: 30.0,
+                ..ResolvedPose::IDENTITY
+            },
+            384,
+        );
+
+        // Act
+        let flat_height = flat.1 - flat.0;
+        let pitched_height = pitched.1 - pitched.0;
+
+        // Assert: 厚み 3.5 セル × sin30度 = 1.75 セル = 21px だけ縦に伸びる
+        let grown = (pitched_height - flat_height) as f32;
+        assert!(
+            (grown - 21.0).abs() <= 2.0,
+            "flat={flat_height} pitched={pitched_height} (grown {grown}px)"
+        );
+    }
+
+    #[test]
+    fn a_flat_pose_keeps_the_dot_from_growing() {
+        // Arrange / Act: 回転が無く、大きさも揺れも無い姿勢
+        let flat = posed_bounds(&ResolvedPose::IDENTITY, 384);
+        let still = posed_bounds(
+            &ResolvedPose {
+                offset_cells: (0.0, 0.0),
+                scale: 1.0,
+                ..ResolvedPose::IDENTITY
+            },
+            384,
+        );
+
+        // Assert
+        assert_eq!(flat, still);
+    }
+
+    #[test]
+    fn roll_tilts_a_row_without_thickening_it() {
+        // Arrange: 横一列のセル
+        let mut field = Field::new(32, 32);
+        field.map(|_x, y, _value| if y == 16 { 1.0 } else { 0.0 });
+        let echo = TouchEcho::new(32, 32);
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act: 画面内の傾きだけを与える
+        grid.draw_posed(
+            field.view(),
+            echo.view(),
+            None,
+            (0.0, 0.0),
+            &PoseProjection::from_pose(&ResolvedPose {
+                roll_deg: 20.0,
+                ..ResolvedPose::IDENTITY
+            }),
+            1.0,
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 端のドットの高さが違う(列ごとの縦位置がずれる)
+        let (min_x, _, max_x, _) = content_bounds(&canvas, surface, surface).expect("a row is drawn");
+        let left = column_centre_y(&canvas, surface, min_x).expect("left end is drawn");
+        let right = column_centre_y(&canvas, surface, max_x).expect("right end is drawn");
+        // 端の余分な1列(-1 と 32)まで描くので、両端は 33 セルぶん離れている。
+        // 33 × sin20度 = 11.3 セル = 135px ずれる
+        let expected = 33.0 * 20.0f32.to_radians().sin() * 12.0;
+        assert!(
+            (right - left - expected).abs() < 6.0,
+            "left={left} right={right} expected {expected}"
+        );
+    }
+
+    /// その列で描かれているピクセルの重心の y。
+    fn column_centre_y(canvas: &[u8], width: usize, x: usize) -> Option<f32> {
+        let height = canvas.len() / (width * BYTES_PER_PIXEL);
+        let (mut total, mut weight) = (0.0f32, 0.0f32);
+        for y in 0..height {
+            let alpha = canvas[(y * width + x) * BYTES_PER_PIXEL + 3] as f32;
+            if alpha == 0.0 {
+                continue;
+            }
+            total += y as f32 * alpha;
+            weight += alpha;
+        }
+        (weight > 0.0).then(|| total / weight)
+    }
+
+    #[test]
+    fn a_shrunk_body_keeps_its_dots_inside_the_grid() {
+        // Arrange: 語彙のいちばん小さい size(settle の 0.70)
+        let mut field = Field::new(32, 32);
+        field.map(|_x, _y, _value| 1.0);
+        let echo = TouchEcho::new(32, 32);
+        let grid = DotGrid::new(32, 32);
+        let surface = 384usize;
+        let mut canvas = vec![0u8; surface * surface * BYTES_PER_PIXEL];
+
+        // Act
+        grid.draw_posed(
+            field.view(),
+            echo.view(),
+            None,
+            (0.0, 0.0),
+            &PoseProjection::from_pose(&ResolvedPose {
+                scale: 0.7,
+                ..ResolvedPose::IDENTITY
+            }),
+            1.0,
+            &mut canvas,
+            surface as u32,
+            surface as u32,
+        );
+
+        // Assert: 縮んだぶんの余白ができ、描かれた範囲は元より狭い
+        let (min_x, min_y, max_x, max_y) = content_bounds(&canvas, surface, surface).expect("lit");
+        assert!(min_x > 0 && min_y > 0, "縮んだので端は空く");
+        assert!(max_x < surface - 1 && max_y < surface - 1);
+    }
+
+    use crate::render::pose::PoseProjection;
+    use vmc_pet_body::gesture::ResolvedPose;
 }
