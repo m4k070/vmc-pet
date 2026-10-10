@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<title>css-gesture spike</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--foreground, #ddd); font-family: inherit; }
+h1 { font-size: 15px; margin: 0 0 4px; }
+.sub { font-size: 12px; color: var(--muted-foreground, #999); margin: 0 0 14px; line-height: 1.5; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.card { background: var(--card, rgba(127,127,127,.08)); border: 1px solid var(--border, rgba(127,127,127,.25));
+  border-radius: 10px; padding: 12px; }
+.card.err { border-color: #a33; }
+h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
+.tag { font-size: 10px; font-weight: 400; color: var(--muted-foreground, #999); border: 1px solid var(--border, #555);
+  border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+.state { font-size: 11px; color: var(--muted-foreground, #999); margin: 0 0 8px; min-height: 28px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.stage { width: 118px; height: 118px; display: grid; place-items: center; flex: 0 0 auto; }
+.cmp .stage { width: 92px; height: 92px; }
+.cmp { display: grid; justify-items: center; gap: 2px; }
+.cmp-label, .cmp-meta { font-size: 9px; color: var(--muted-foreground, #999); text-align: center; }
+.cmp .body { width: 40px; height: 40px; border-radius: 12px; }
+.meta { font-size: 12px; margin: 6px 0 8px; }
+.gated { color: var(--muted-foreground, #999); font-size: 10px; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 11px; margin: 0 0 8px; }
+dt { color: var(--muted-foreground, #999); }
+dd { margin: 0; font-variant-numeric: tabular-nums; }
+.fx { color: var(--muted-foreground, #999); font-size: 10px; }
+.bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }
+.seg { display: block; height: 100%; }
+.swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+.s-idle { background: #6b7280; } .s-perk_up { background: #f59e0b; } .s-nod { background: #22c55e; }
+.s-shake { background: #ef4444; } .s-lean_in { background: #3b82f6; } .s-recoil { background: #a855f7; }
+.s-settle { background: #0ea5e9; } .s-flicker { background: #eab308; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--muted-foreground, #999); margin-top: 6px; }
+/* css-gesture spike — ジェスチャー語彙（手書き・決定論的）
+ *
+ * 8個の離散ジェスチャーを CSS クラスとして定義する。決定モデルには**これを生成させない**
+ * （決定モデルは choice/score/noul の確率しか返せないため）。モデルが担うのは
+ * 「どれを・どれくらいの強さで」の選択だけ。
+ *
+ * 連続パラメータは CSS カスタムプロパティで受ける:
+ *   --speed : 動きの速さ（小さいほど速い。animation-duration の倍率）
+ *   --amp   : 振幅（0〜1.5 程度）
+ *   --scale : 体の大きさ
+ *   --glow  : 発火の強さ（発火していないときは 0）
+ *
+ * すべてのジェスチャーは「基準の姿勢」に対する差分として書く。共通の呼吸は .body が持ち、
+ * ジェスチャーは transform を上書きする。こうすると混合（複数レイヤの重ね）が成立する。
+ */
+
+.stage {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: grid;
+  place-items: center;
+}
+
+/* 体。全ジェスチャーが共有する土台。 */
+.body {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent, #d2694a);
+  opacity: calc(0.25 + 0.75 * var(--glow, 0));
+  box-shadow: 0 0 calc(24px * var(--glow, 0)) var(--accent, #d2694a);
+  animation-duration: calc(2.4s * var(--speed, 1));
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+  transform-origin: 50% 70%;
+}
+
+/* 表情の差分。8個。それぞれ明確に違う動きにして、人が読み分けられるかを試す。 */
+
+/* 1. idle — ゆっくり漂う。基準。 */
+.g-idle      { animation-name: k-idle; }
+@keyframes k-idle {
+  0%, 100% { transform: translateY(calc(-4px * var(--amp, 1))) scale(var(--scale, 1)); }
+  50%      { transform: translateY(calc( 4px * var(--amp, 1))) scale(var(--scale, 1)); }
+}
+
+/* 2. perk_up — 一瞬沈んでから跳ね上がる。注意が向いた。 */
+.g-perk_up   { animation-name: k-perk; animation-timing-function: cubic-bezier(.2,1.6,.4,1); }
+@keyframes k-perk {
+  0%, 40%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  12%           { transform: translateY(calc( 3px * var(--amp, 1))) scale(var(--scale, 1)); }
+  62%           { transform: translateY(calc(-14px * var(--amp, 1))) scale(calc(var(--scale, 1) * 1.08)); }
+}
+
+/* 3. nod — 縦に2回。了解・同意。 */
+.g-nod       { animation-name: k-nod; }
+@keyframes k-nod {
+  0%, 100%   { transform: translateY(0) scaleY(var(--scale, 1)); }
+  18%, 58%   { transform: translateY(calc( 9px * var(--amp, 1))) scaleY(calc(var(--scale, 1) * 0.88)); }
+  38%, 78%   { transform: translateY(calc(-4px * var(--amp, 1))) scaleY(var(--scale, 1)); }
+}
+
+/* 4. shake — 横に3回。拒否・違う。 */
+.g-shake     { animation-name: k-shake; animation-timing-function: ease-out; }
+@keyframes k-shake {
+  0%, 100% { transform: translateX(0) scale(var(--scale, 1)); }
+  12%      { transform: translateX(calc(-13px * var(--amp, 1))) scale(var(--scale, 1)); }
+  32%      { transform: translateX(calc( 13px * var(--amp, 1))) scale(var(--scale, 1)); }
+  52%      { transform: translateX(calc( -9px * var(--amp, 1))) scale(var(--scale, 1)); }
+  72%      { transform: translateX(calc(  9px * var(--amp, 1))) scale(var(--scale, 1)); }
+}
+
+/* 5. lean_in — 前のめり。近づいて大きくなる。興味。 */
+.g-lean_in   { animation-name: k-lean; }
+@keyframes k-lean {
+  0%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  50%      { transform: translateY(calc(12px * var(--amp, 1))) scale(calc(var(--scale, 1) * 1.22)); }
+}
+
+/* 6. recoil — のけぞる。驚き・嫌悪。lean_in の逆向き。 */
+.g-recoil    { animation-name: k-recoil; animation-timing-function: cubic-bezier(.3,0,.2,1); }
+@keyframes k-recoil {
+  0%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  25%      { transform: translateY(calc(-16px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.84)); }
+}
+
+/* 7. settle — 沈んで小さくなる。がっかり・疲れ。戻ってこない。 */
+.g-settle    { animation-name: k-settle; animation-timing-function: cubic-bezier(.4,0,.7,.3); }
+@keyframes k-settle {
+  0%   { transform: translateY(0) scale(var(--scale, 1)); }
+  60%  { transform: translateY(calc(16px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.72)); }
+  100% { transform: translateY(calc(13px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.76)); }
+}
+
+/* 8. flicker — 不規則に明滅。迷い・不確か。動きではなく不透明度で出す。 */
+.g-flicker   { animation-name: k-flicker; animation-timing-function: steps(1, end); }
+@keyframes k-flicker {
+  0%, 100% { opacity: calc(0.25 + 0.75 * var(--glow, 0)); transform: scale(var(--scale, 1)); }
+  17%      { opacity: calc(0.10 + 0.35 * var(--glow, 0)); }
+  23%      { opacity: calc(0.25 + 0.85 * var(--glow, 0)); }
+  41%      { opacity: calc(0.15 + 0.30 * var(--glow, 0)); }
+  67%      { opacity: calc(0.30 + 0.90 * var(--glow, 0)); }
+  83%      { opacity: calc(0.12 + 0.40 * var(--glow, 0)); }
+}
+
+/* --- 混合レイヤ ---
+ * 一次ジェスチャー（argmax）を主役に、確率分布の残りを薄いレイヤとして重ねる。
+ * 「読める離散」と「滑らかな連続」を同時に持つための2層構成。
+ */
+.blend { position: absolute; inset: 0; display: grid; place-items: center; }
+.blend .body { position: absolute; }
+
+@media (prefers-reduced-motion: reduce) {
+  .body { animation: none; }
+}
+
+</style></head>
+<body>
+<h1>css-gesture spike — 決定モデルの出力が「読める動き」になるか</h1>
+<p class="sub">左が <b>clef</b> の結果。右に <b>laya</b> を並べた。
+判定したいのは4点: ①8個のジェスチャーが読み分けられるか ②分布の混合が意味のある中間になるか
+③confidence が低いとき「迷い」に見えるか ④ score 軸が動きの差として知覚できるか。<br>
+<b>θ（emit の発火しきい値）= 0.30</b> を使っている。素直に 0.5 にすると Clef は
+<b>8件すべてが idle になった</b>（明確な場面でも emit は 0.49 止まり）。しきい値は推測せずデータから決める必要がある、
+という較正の実測例。emit &lt; θ の件は idle に落とし、モデルが選んだジェスチャーは括弧内に残した。</p>
+<div class="grid">
+  <div class="card">
+    <h3>fixed_bug <span class="tag">clef</span></h3>
+    <p class="state">ついに3日詰まっていたバグが直った。テストも全部通った。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-nod" style="--speed:0.938;--amp:1.229;--scale:1.125;--glow:0.471"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.306;--amp:0.76;--scale:1.061;--glow:0.054"></div>
+        </div>
+        <div class="cmp-meta">idle / e1.1 a2.0 emit 0.05</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>nod</b>
+      &nbsp;conf 0.31
+    </div>
+    <dl>
+      <dt>energy</dt><dd>2.78 / 4 <span class="fx">→ duration 0.94s, amp 1.23</span></dd>
+      <dt>approach</dt><dd>2.72 / 4 <span class="fx">→ scale 1.12</span></dd>
+      <dt>emit</dt><dd>0.471 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>39.568s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:10.5%" title="idle 0.105"><i class="swatch s-idle"></i></span><span class="seg" style="width:30.8%" title="perk_up 0.308"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:39.2%" title="nod 0.392"><i class="swatch s-nod"></i></span><span class="seg" style="width:0.9%" title="shake 0.009"><i class="swatch s-shake"></i></span><span class="seg" style="width:8.0%" title="lean_in 0.080"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:1.7%" title="recoil 0.017"><i class="swatch s-recoil"></i></span><span class="seg" style="width:6.2%" title="settle 0.062"><i class="swatch s-settle"></i></span><span class="seg" style="width:2.7%" title="flicker 0.027"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>build_fail <span class="tag">clef</span></h3>
+    <p class="state">またビルドが落ちた。同じエラーが4回目。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-settle" style="--speed:1.317;--amp:0.747;--scale:0.978;--glow:0.356"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.105;--amp:1.016;--scale:1.053;--glow:0.112"></div>
+        </div>
+        <div class="cmp-meta">idle / e2.0 a1.9 emit 0.11</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>settle</b>
+      &nbsp;conf 0.48
+    </div>
+    <dl>
+      <dt>energy</dt><dd>1.06 / 4 <span class="fx">→ duration 1.32s, amp 0.75</span></dd>
+      <dt>approach</dt><dd>1.09 / 4 <span class="fx">→ scale 0.98</span></dd>
+      <dt>emit</dt><dd>0.356 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>28.745s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:11.5%" title="idle 0.115"><i class="swatch s-idle"></i></span><span class="seg" style="width:4.2%" title="perk_up 0.042"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:6.4%" title="nod 0.064"><i class="swatch s-nod"></i></span><span class="seg" style="width:5.2%" title="shake 0.052"><i class="swatch s-shake"></i></span><span class="seg" style="width:2.8%" title="lean_in 0.028"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:6.4%" title="recoil 0.064"><i class="swatch s-recoil"></i></span><span class="seg" style="width:54.8%" title="settle 0.548"><i class="swatch s-settle"></i></span><span class="seg" style="width:8.7%" title="flicker 0.087"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>waiting <span class="tag">clef</span></h3>
+    <p class="state">テストスイートの実行が終わるのをただ待っている。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-idle" style="--speed:1.439;--amp:0.592;--scale:1.028;--glow:0.036"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.373;--amp:0.675;--scale:1.05;--glow:0.062"></div>
+        </div>
+        <div class="cmp-meta">idle / e0.8 a1.9 emit 0.06</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>idle</b> <span class="gated">(emit 0.04 &lt; θ 0.30 → idle に落とした。モデルの選択は idle)</span>
+      &nbsp;conf 0.81
+    </div>
+    <dl>
+      <dt>energy</dt><dd>0.51 / 4 <span class="fx">→ duration 1.44s, amp 0.59</span></dd>
+      <dt>approach</dt><dd>1.64 / 4 <span class="fx">→ scale 1.03</span></dd>
+      <dt>emit</dt><dd>0.036 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>34.538s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:83.5%" title="idle 0.835"><i class="swatch s-idle"></i></span><span class="seg" style="width:1.8%" title="perk_up 0.018"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:3.4%" title="nod 0.034"><i class="swatch s-nod"></i></span><span class="seg" style="width:1.2%" title="shake 0.012"><i class="swatch s-shake"></i></span><span class="seg" style="width:2.3%" title="lean_in 0.023"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:1.2%" title="recoil 0.012"><i class="swatch s-recoil"></i></span><span class="seg" style="width:3.4%" title="settle 0.034"><i class="swatch s-settle"></i></span><span class="seg" style="width:3.1%" title="flicker 0.031"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>branch_gone <span class="tag">clef</span></h3>
+    <p class="state">レビュー前にブランチを消されてしまった。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-idle" style="--speed:1.377;--amp:0.67;--scale:0.952;--glow:0.18"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.284;--amp:0.788;--scale:1.049;--glow:0.028"></div>
+        </div>
+        <div class="cmp-meta">idle / e1.2 a1.9 emit 0.03</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>idle</b> <span class="gated">(emit 0.18 &lt; θ 0.30 → idle に落とした。モデルの選択は settle)</span>
+      &nbsp;conf 0.42
+    </div>
+    <dl>
+      <dt>energy</dt><dd>0.79 / 4 <span class="fx">→ duration 1.38s, amp 0.67</span></dd>
+      <dt>approach</dt><dd>0.80 / 4 <span class="fx">→ scale 0.95</span></dd>
+      <dt>emit</dt><dd>0.180 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>34.392s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:12.8%" title="idle 0.128"><i class="swatch s-idle"></i></span><span class="seg" style="width:3.5%" title="perk_up 0.035"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:5.3%" title="nod 0.053"><i class="swatch s-nod"></i></span><span class="seg" style="width:7.7%" title="shake 0.077"><i class="swatch s-shake"></i></span><span class="seg" style="width:2.0%" title="lean_in 0.020"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:9.3%" title="recoil 0.093"><i class="swatch s-recoil"></i></span><span class="seg" style="width:49.4%" title="settle 0.494"><i class="swatch s-settle"></i></span><span class="seg" style="width:10.0%" title="flicker 0.100"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>uncertain <span class="tag">clef</span></h3>
+    <p class="state">次に何をすればいいのか分からない。選択肢が多すぎる。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-idle" style="--speed:1.345;--amp:0.71;--scale:0.984;--glow:0.223"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.112;--amp:1.008;--scale:1.093;--glow:0.035"></div>
+        </div>
+        <div class="cmp-meta">idle / e2.0 a2.4 emit 0.03</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>idle</b> <span class="gated">(emit 0.22 &lt; θ 0.30 → idle に落とした。モデルの選択は flicker)</span>
+      &nbsp;conf 0.73
+    </div>
+    <dl>
+      <dt>energy</dt><dd>0.93 / 4 <span class="fx">→ duration 1.34s, amp 0.71</span></dd>
+      <dt>approach</dt><dd>1.15 / 4 <span class="fx">→ scale 0.98</span></dd>
+      <dt>emit</dt><dd>0.223 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>34.876s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:12.1%" title="idle 0.121"><i class="swatch s-idle"></i></span><span class="seg" style="width:0.9%" title="perk_up 0.009"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:1.6%" title="nod 0.016"><i class="swatch s-nod"></i></span><span class="seg" style="width:2.5%" title="shake 0.025"><i class="swatch s-shake"></i></span><span class="seg" style="width:0.8%" title="lean_in 0.008"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:1.5%" title="recoil 0.015"><i class="swatch s-recoil"></i></span><span class="seg" style="width:4.6%" title="settle 0.046"><i class="swatch s-settle"></i></span><span class="seg" style="width:76.0%" title="flicker 0.760"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>late_night <span class="tag">clef</span></h3>
+    <p class="state">深夜3時。そろそろ寝たほうがいいのは分かっている。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-idle" style="--speed:1.376;--amp:0.672;--scale:1.037;--glow:0.122"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.366;--amp:0.685;--scale:1.06;--glow:0.002"></div>
+        </div>
+        <div class="cmp-meta">idle / e0.8 a2.0 emit 0.00</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>idle</b> <span class="gated">(emit 0.12 &lt; θ 0.30 → idle に落とした。モデルの選択は idle)</span>
+      &nbsp;conf 0.34
+    </div>
+    <dl>
+      <dt>energy</dt><dd>0.79 / 4 <span class="fx">→ duration 1.38s, amp 0.67</span></dd>
+      <dt>approach</dt><dd>1.74 / 4 <span class="fx">→ scale 1.04</span></dd>
+      <dt>emit</dt><dd>0.122 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>35.315s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:42.1%" title="idle 0.421"><i class="swatch s-idle"></i></span><span class="seg" style="width:3.3%" title="perk_up 0.033"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:16.5%" title="nod 0.165"><i class="swatch s-nod"></i></span><span class="seg" style="width:4.3%" title="shake 0.043"><i class="swatch s-shake"></i></span><span class="seg" style="width:2.6%" title="lean_in 0.026"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:1.4%" title="recoil 0.014"><i class="swatch s-recoil"></i></span><span class="seg" style="width:24.3%" title="settle 0.243"><i class="swatch s-settle"></i></span><span class="seg" style="width:5.5%" title="flicker 0.055"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>approved <span class="tag">clef</span></h3>
+    <p class="state">レビューで全部OKをもらった。そのままマージできた。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-nod" style="--speed:1.061;--amp:1.073;--scale:1.142;--glow:0.435"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.134;--amp:0.979;--scale:1.064;--glow:0.081"></div>
+        </div>
+        <div class="cmp-meta">idle / e1.9 a2.0 emit 0.08</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>nod</b>
+      &nbsp;conf 0.81
+    </div>
+    <dl>
+      <dt>energy</dt><dd>2.22 / 4 <span class="fx">→ duration 1.06s, amp 1.07</span></dd>
+      <dt>approach</dt><dd>2.91 / 4 <span class="fx">→ scale 1.14</span></dd>
+      <dt>emit</dt><dd>0.435 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>34.122s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:6.4%" title="idle 0.064"><i class="swatch s-idle"></i></span><span class="seg" style="width:4.1%" title="perk_up 0.041"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:83.1%" title="nod 0.831"><i class="swatch s-nod"></i></span><span class="seg" style="width:0.4%" title="shake 0.004"><i class="swatch s-shake"></i></span><span class="seg" style="width:3.7%" title="lean_in 0.037"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:0.4%" title="recoil 0.004"><i class="swatch s-recoil"></i></span><span class="seg" style="width:1.0%" title="settle 0.010"><i class="swatch s-settle"></i></span><span class="seg" style="width:0.9%" title="flicker 0.009"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div>
+  <div class="card">
+    <h3>nag <span class="tag">clef</span></h3>
+    <p class="state">同じ指摘を3回目にされた。もう直したはずなのに。</p>
+    <div class="row">
+      <div class="stage">
+        <div class="body g-settle" style="--speed:1.322;--amp:0.74;--scale:0.938;--glow:0.493"></div>
+      </div>
+      <div class="cmp">
+        <div class="cmp-label">laya</div>
+        <div class="stage">
+          <div class="body g-idle" style="--speed:1.175;--amp:0.928;--scale:1.071;--glow:0.101"></div>
+        </div>
+        <div class="cmp-meta">idle / e1.7 a2.1 emit 0.10</div>
+      </div>
+    </div>
+    <div class="meta">
+      <b>settle</b>
+      &nbsp;conf 0.20
+    </div>
+    <dl>
+      <dt>energy</dt><dd>1.04 / 4 <span class="fx">→ duration 1.32s, amp 0.74</span></dd>
+      <dt>approach</dt><dd>0.64 / 4 <span class="fx">→ scale 0.94</span></dd>
+      <dt>emit</dt><dd>0.493 <span class="fx">→ glow</span></dd>
+      <dt>latency</dt><dd>34.672s</dd>
+    </dl>
+    <div class="bar"><span class="seg" style="width:9.2%" title="idle 0.092"><i class="swatch s-idle"></i></span><span class="seg" style="width:3.9%" title="perk_up 0.039"><i class="swatch s-perk_up"></i></span><span class="seg" style="width:9.0%" title="nod 0.090"><i class="swatch s-nod"></i></span><span class="seg" style="width:20.5%" title="shake 0.205"><i class="swatch s-shake"></i></span><span class="seg" style="width:1.6%" title="lean_in 0.016"><i class="swatch s-lean_in"></i></span><span class="seg" style="width:19.5%" title="recoil 0.195"><i class="swatch s-recoil"></i></span><span class="seg" style="width:29.6%" title="settle 0.296"><i class="swatch s-settle"></i></span><span class="seg" style="width:6.7%" title="flicker 0.067"><i class="swatch s-flicker"></i></span></div>
+    <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
+  </div></div>
+</body></html>

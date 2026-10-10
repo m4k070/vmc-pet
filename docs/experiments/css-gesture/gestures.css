@@ -1,0 +1,117 @@
+/* css-gesture spike — ジェスチャー語彙（手書き・決定論的）
+ *
+ * 8個の離散ジェスチャーを CSS クラスとして定義する。決定モデルには**これを生成させない**
+ * （決定モデルは choice/score/noul の確率しか返せないため）。モデルが担うのは
+ * 「どれを・どれくらいの強さで」の選択だけ。
+ *
+ * 連続パラメータは CSS カスタムプロパティで受ける:
+ *   --speed : 動きの速さ（小さいほど速い。animation-duration の倍率）
+ *   --amp   : 振幅（0〜1.5 程度）
+ *   --scale : 体の大きさ
+ *   --glow  : 発火の強さ（発火していないときは 0）
+ *
+ * すべてのジェスチャーは「基準の姿勢」に対する差分として書く。共通の呼吸は .body が持ち、
+ * ジェスチャーは transform を上書きする。こうすると混合（複数レイヤの重ね）が成立する。
+ */
+
+.stage {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: grid;
+  place-items: center;
+}
+
+/* 体。全ジェスチャーが共有する土台。 */
+.body {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent, #d2694a);
+  opacity: calc(0.25 + 0.75 * var(--glow, 0));
+  box-shadow: 0 0 calc(24px * var(--glow, 0)) var(--accent, #d2694a);
+  animation-duration: calc(2.4s * var(--speed, 1));
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+  transform-origin: 50% 70%;
+}
+
+/* 表情の差分。8個。それぞれ明確に違う動きにして、人が読み分けられるかを試す。 */
+
+/* 1. idle — ゆっくり漂う。基準。 */
+.g-idle      { animation-name: k-idle; }
+@keyframes k-idle {
+  0%, 100% { transform: translateY(calc(-4px * var(--amp, 1))) scale(var(--scale, 1)); }
+  50%      { transform: translateY(calc( 4px * var(--amp, 1))) scale(var(--scale, 1)); }
+}
+
+/* 2. perk_up — 一瞬沈んでから跳ね上がる。注意が向いた。 */
+.g-perk_up   { animation-name: k-perk; animation-timing-function: cubic-bezier(.2,1.6,.4,1); }
+@keyframes k-perk {
+  0%, 40%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  12%           { transform: translateY(calc( 3px * var(--amp, 1))) scale(var(--scale, 1)); }
+  62%           { transform: translateY(calc(-14px * var(--amp, 1))) scale(calc(var(--scale, 1) * 1.08)); }
+}
+
+/* 3. nod — 縦に2回。了解・同意。 */
+.g-nod       { animation-name: k-nod; }
+@keyframes k-nod {
+  0%, 100%   { transform: translateY(0) scaleY(var(--scale, 1)); }
+  18%, 58%   { transform: translateY(calc( 9px * var(--amp, 1))) scaleY(calc(var(--scale, 1) * 0.88)); }
+  38%, 78%   { transform: translateY(calc(-4px * var(--amp, 1))) scaleY(var(--scale, 1)); }
+}
+
+/* 4. shake — 横に3回。拒否・違う。 */
+.g-shake     { animation-name: k-shake; animation-timing-function: ease-out; }
+@keyframes k-shake {
+  0%, 100% { transform: translateX(0) scale(var(--scale, 1)); }
+  12%      { transform: translateX(calc(-13px * var(--amp, 1))) scale(var(--scale, 1)); }
+  32%      { transform: translateX(calc( 13px * var(--amp, 1))) scale(var(--scale, 1)); }
+  52%      { transform: translateX(calc( -9px * var(--amp, 1))) scale(var(--scale, 1)); }
+  72%      { transform: translateX(calc(  9px * var(--amp, 1))) scale(var(--scale, 1)); }
+}
+
+/* 5. lean_in — 前のめり。近づいて大きくなる。興味。 */
+.g-lean_in   { animation-name: k-lean; }
+@keyframes k-lean {
+  0%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  50%      { transform: translateY(calc(12px * var(--amp, 1))) scale(calc(var(--scale, 1) * 1.22)); }
+}
+
+/* 6. recoil — のけぞる。驚き・嫌悪。lean_in の逆向き。 */
+.g-recoil    { animation-name: k-recoil; animation-timing-function: cubic-bezier(.3,0,.2,1); }
+@keyframes k-recoil {
+  0%, 100% { transform: translateY(0) scale(var(--scale, 1)); }
+  25%      { transform: translateY(calc(-16px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.84)); }
+}
+
+/* 7. settle — 沈んで小さくなる。がっかり・疲れ。戻ってこない。 */
+.g-settle    { animation-name: k-settle; animation-timing-function: cubic-bezier(.4,0,.7,.3); }
+@keyframes k-settle {
+  0%   { transform: translateY(0) scale(var(--scale, 1)); }
+  60%  { transform: translateY(calc(16px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.72)); }
+  100% { transform: translateY(calc(13px * var(--amp, 1))) scale(calc(var(--scale, 1) * 0.76)); }
+}
+
+/* 8. flicker — 不規則に明滅。迷い・不確か。動きではなく不透明度で出す。 */
+.g-flicker   { animation-name: k-flicker; animation-timing-function: steps(1, end); }
+@keyframes k-flicker {
+  0%, 100% { opacity: calc(0.25 + 0.75 * var(--glow, 0)); transform: scale(var(--scale, 1)); }
+  17%      { opacity: calc(0.10 + 0.35 * var(--glow, 0)); }
+  23%      { opacity: calc(0.25 + 0.85 * var(--glow, 0)); }
+  41%      { opacity: calc(0.15 + 0.30 * var(--glow, 0)); }
+  67%      { opacity: calc(0.30 + 0.90 * var(--glow, 0)); }
+  83%      { opacity: calc(0.12 + 0.40 * var(--glow, 0)); }
+}
+
+/* --- 混合レイヤ ---
+ * 一次ジェスチャー（argmax）を主役に、確率分布の残りを薄いレイヤとして重ねる。
+ * 「読める離散」と「滑らかな連続」を同時に持つための2層構成。
+ */
+.blend { position: absolute; inset: 0; display: grid; place-items: center; }
+.blend .body { position: absolute; }
+
+@media (prefers-reduced-motion: reduce) {
+  .body { animation: none; }
+}
