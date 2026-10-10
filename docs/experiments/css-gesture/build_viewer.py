@@ -48,7 +48,8 @@ def to_css(row: dict) -> dict:
 def bar(probs: dict) -> str:
     total = sum(probs.values()) or 1.0
     segs = "".join(
-        f'<span class="seg" style="width:{100 * v / total:.1f}%" title="{k} {v:.3f}"></span>'
+        f'<span class="seg s-{k}" style="width:{100 * v / total:.2f}%" '
+        f'title="{k} {v:.3f} ({100 * v / total:.1f}%)"></span>'
         for k, v in sorted(probs.items(), key=lambda kv: -kv[1])
     )
     return f'<div class="bar">{segs}</div>'
@@ -59,6 +60,16 @@ def body_div(c: dict, cls: str = "body") -> str:
         f'<div class="{cls} g-{c["raw"]}" data-emit="{c["glow"]}" data-raw="{c["raw"]}" '
         f'style="--speed:{c["speed"]};--amp:{c["amp"]};--scale:{c["scale"]};--glow:{c["glow"]}"></div>'
     )
+
+
+def dist_text(probs: dict, top: int = 3) -> str:
+    """上位の内訳を文字でも出す（ホバーしないと分からないと判定しづらいため）。"""
+    total = sum(probs.values()) or 1.0
+    items = sorted(probs.items(), key=lambda kv: -kv[1])
+    head = " · ".join(f'<b class="d-{k}">{k}</b> {100 * v / total:.0f}%' for k, v in items[:top])
+    rest = len(items) - top
+    tail = f' <span class="rest">他 {rest}</span>' if rest > 0 else ""
+    return head + tail
 
 
 def main() -> None:
@@ -115,6 +126,7 @@ def main() -> None:
       <dt>latency</dt><dd>{row.get('latency_s')}s</dd>
     </dl>
     {bar(row.get('gesture_probs', {}))}
+    <div class="dist">{dist_text(row.get('gesture_probs', {}))}</div>
     <div class="legend">{' '.join(f'<span><i class="swatch s-{g}"></i>{g}</span>' for g in GESTURE_ORDER)}</div>
   </div>""")
 
@@ -156,8 +168,14 @@ dl {{ display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 
 dt {{ color: var(--muted-foreground, #999); }}
 dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
 .fx {{ color: var(--muted-foreground, #999); font-size: 10px; }}
-.bar {{ display: flex; height: 10px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }}
+.bar {{ display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }}
 .seg {{ display: block; height: 100%; }}
+.dist {{ font-size: 10px; color: var(--muted-foreground, #999); margin-top: 5px; }}
+.dist b {{ font-weight: 600; }}
+.d-idle {{ color: #6b7280; }} .d-perk_up {{ color: #f59e0b; }} .d-nod {{ color: #22c55e; }}
+.d-shake {{ color: #ef4444; }} .d-lean_in {{ color: #3b82f6; }} .d-recoil {{ color: #a855f7; }}
+.d-settle {{ color: #0ea5e9; }} .d-flicker {{ color: #eab308; }}
+.rest {{ opacity: .65; }}
 .swatch {{ display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }}
 .s-idle {{ background: #6b7280; }} .s-perk_up {{ background: #f59e0b; }} .s-nod {{ background: #22c55e; }}
 .s-shake {{ background: #ef4444; }} .s-lean_in {{ background: #3b82f6; }} .s-recoil {{ background: #a855f7; }}

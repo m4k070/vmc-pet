@@ -36,8 +36,14 @@ dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 1
 dt { color: var(--muted-foreground, #999); }
 dd { margin: 0; font-variant-numeric: tabular-nums; }
 .fx { color: var(--muted-foreground, #999); font-size: 10px; }
-.bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }
+.bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }
 .seg { display: block; height: 100%; }
+.dist { font-size: 10px; color: var(--muted-foreground, #999); margin-top: 5px; }
+.dist b { font-weight: 600; }
+.d-idle { color: #6b7280; } .d-perk_up { color: #f59e0b; } .d-nod { color: #22c55e; }
+.d-shake { color: #ef4444; } .d-lean_in { color: #3b82f6; } .d-recoil { color: #a855f7; }
+.d-settle { color: #0ea5e9; } .d-flicker { color: #eab308; }
+.rest { opacity: .65; }
 .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
 .s-idle { background: #6b7280; } .s-perk_up { background: #f59e0b; } .s-nod { background: #22c55e; }
 .s-shake { background: #ef4444; } .s-lean_in { background: #3b82f6; } .s-recoil { background: #a855f7; }
@@ -198,7 +204,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.471 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>39.568s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:39.2%" title="nod 0.392"></span><span class="seg" style="width:30.8%" title="perk_up 0.308"></span><span class="seg" style="width:10.5%" title="idle 0.105"></span><span class="seg" style="width:8.0%" title="lean_in 0.080"></span><span class="seg" style="width:6.2%" title="settle 0.062"></span><span class="seg" style="width:2.7%" title="flicker 0.027"></span><span class="seg" style="width:1.7%" title="recoil 0.017"></span><span class="seg" style="width:0.9%" title="shake 0.009"></span></div>
+    <div class="bar"><span class="seg s-nod" style="width:39.25%" title="nod 0.392 (39.2%)"></span><span class="seg s-perk_up" style="width:30.77%" title="perk_up 0.308 (30.8%)"></span><span class="seg s-idle" style="width:10.55%" title="idle 0.105 (10.5%)"></span><span class="seg s-lean_in" style="width:8.03%" title="lean_in 0.080 (8.0%)"></span><span class="seg s-settle" style="width:6.16%" title="settle 0.062 (6.2%)"></span><span class="seg s-flicker" style="width:2.67%" title="flicker 0.027 (2.7%)"></span><span class="seg s-recoil" style="width:1.66%" title="recoil 0.017 (1.7%)"></span><span class="seg s-shake" style="width:0.92%" title="shake 0.009 (0.9%)"></span></div>
+    <div class="dist"><b class="d-nod">nod</b> 39% · <b class="d-perk_up">perk_up</b> 31% · <b class="d-idle">idle</b> 11% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -219,7 +226,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.356 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>28.745s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:54.8%" title="settle 0.548"></span><span class="seg" style="width:11.5%" title="idle 0.115"></span><span class="seg" style="width:8.7%" title="flicker 0.087"></span><span class="seg" style="width:6.4%" title="nod 0.064"></span><span class="seg" style="width:6.4%" title="recoil 0.064"></span><span class="seg" style="width:5.2%" title="shake 0.052"></span><span class="seg" style="width:4.2%" title="perk_up 0.042"></span><span class="seg" style="width:2.8%" title="lean_in 0.028"></span></div>
+    <div class="bar"><span class="seg s-settle" style="width:54.78%" title="settle 0.548 (54.8%)"></span><span class="seg s-idle" style="width:11.48%" title="idle 0.115 (11.5%)"></span><span class="seg s-flicker" style="width:8.69%" title="flicker 0.087 (8.7%)"></span><span class="seg s-nod" style="width:6.44%" title="nod 0.064 (6.4%)"></span><span class="seg s-recoil" style="width:6.39%" title="recoil 0.064 (6.4%)"></span><span class="seg s-shake" style="width:5.21%" title="shake 0.052 (5.2%)"></span><span class="seg s-perk_up" style="width:4.23%" title="perk_up 0.042 (4.2%)"></span><span class="seg s-lean_in" style="width:2.79%" title="lean_in 0.028 (2.8%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 55% · <b class="d-idle">idle</b> 11% · <b class="d-flicker">flicker</b> 9% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -240,7 +248,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.036 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>34.538s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:83.5%" title="idle 0.835"></span><span class="seg" style="width:3.4%" title="nod 0.034"></span><span class="seg" style="width:3.4%" title="settle 0.034"></span><span class="seg" style="width:3.1%" title="flicker 0.031"></span><span class="seg" style="width:2.3%" title="lean_in 0.023"></span><span class="seg" style="width:1.8%" title="perk_up 0.018"></span><span class="seg" style="width:1.2%" title="shake 0.012"></span><span class="seg" style="width:1.2%" title="recoil 0.012"></span></div>
+    <div class="bar"><span class="seg s-idle" style="width:83.47%" title="idle 0.835 (83.5%)"></span><span class="seg s-nod" style="width:3.42%" title="nod 0.034 (3.4%)"></span><span class="seg s-settle" style="width:3.42%" title="settle 0.034 (3.4%)"></span><span class="seg s-flicker" style="width:3.12%" title="flicker 0.031 (3.1%)"></span><span class="seg s-lean_in" style="width:2.33%" title="lean_in 0.023 (2.3%)"></span><span class="seg s-perk_up" style="width:1.83%" title="perk_up 0.018 (1.8%)"></span><span class="seg s-shake" style="width:1.21%" title="shake 0.012 (1.2%)"></span><span class="seg s-recoil" style="width:1.21%" title="recoil 0.012 (1.2%)"></span></div>
+    <div class="dist"><b class="d-idle">idle</b> 83% · <b class="d-nod">nod</b> 3% · <b class="d-settle">settle</b> 3% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -261,7 +270,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.180 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>34.392s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:49.4%" title="settle 0.494"></span><span class="seg" style="width:12.8%" title="idle 0.128"></span><span class="seg" style="width:10.0%" title="flicker 0.100"></span><span class="seg" style="width:9.3%" title="recoil 0.093"></span><span class="seg" style="width:7.7%" title="shake 0.077"></span><span class="seg" style="width:5.3%" title="nod 0.053"></span><span class="seg" style="width:3.5%" title="perk_up 0.035"></span><span class="seg" style="width:2.0%" title="lean_in 0.020"></span></div>
+    <div class="bar"><span class="seg s-settle" style="width:49.40%" title="settle 0.494 (49.4%)"></span><span class="seg s-idle" style="width:12.76%" title="idle 0.128 (12.8%)"></span><span class="seg s-flicker" style="width:10.04%" title="flicker 0.100 (10.0%)"></span><span class="seg s-recoil" style="width:9.29%" title="recoil 0.093 (9.3%)"></span><span class="seg s-shake" style="width:7.70%" title="shake 0.077 (7.7%)"></span><span class="seg s-nod" style="width:5.25%" title="nod 0.053 (5.3%)"></span><span class="seg s-perk_up" style="width:3.54%" title="perk_up 0.035 (3.5%)"></span><span class="seg s-lean_in" style="width:2.02%" title="lean_in 0.020 (2.0%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 49% · <b class="d-idle">idle</b> 13% · <b class="d-flicker">flicker</b> 10% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -282,7 +292,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.223 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>34.876s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:76.0%" title="flicker 0.760"></span><span class="seg" style="width:12.1%" title="idle 0.121"></span><span class="seg" style="width:4.6%" title="settle 0.046"></span><span class="seg" style="width:2.5%" title="shake 0.025"></span><span class="seg" style="width:1.6%" title="nod 0.016"></span><span class="seg" style="width:1.5%" title="recoil 0.015"></span><span class="seg" style="width:0.9%" title="perk_up 0.009"></span><span class="seg" style="width:0.8%" title="lean_in 0.008"></span></div>
+    <div class="bar"><span class="seg s-flicker" style="width:75.99%" title="flicker 0.760 (76.0%)"></span><span class="seg s-idle" style="width:12.12%" title="idle 0.121 (12.1%)"></span><span class="seg s-settle" style="width:4.59%" title="settle 0.046 (4.6%)"></span><span class="seg s-shake" style="width:2.51%" title="shake 0.025 (2.5%)"></span><span class="seg s-nod" style="width:1.56%" title="nod 0.016 (1.6%)"></span><span class="seg s-recoil" style="width:1.53%" title="recoil 0.015 (1.5%)"></span><span class="seg s-perk_up" style="width:0.94%" title="perk_up 0.009 (0.9%)"></span><span class="seg s-lean_in" style="width:0.75%" title="lean_in 0.008 (0.8%)"></span></div>
+    <div class="dist"><b class="d-flicker">flicker</b> 76% · <b class="d-idle">idle</b> 12% · <b class="d-settle">settle</b> 5% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -303,7 +314,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.122 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>35.315s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:42.1%" title="idle 0.421"></span><span class="seg" style="width:24.3%" title="settle 0.243"></span><span class="seg" style="width:16.5%" title="nod 0.165"></span><span class="seg" style="width:5.5%" title="flicker 0.055"></span><span class="seg" style="width:4.3%" title="shake 0.043"></span><span class="seg" style="width:3.3%" title="perk_up 0.033"></span><span class="seg" style="width:2.6%" title="lean_in 0.026"></span><span class="seg" style="width:1.4%" title="recoil 0.014"></span></div>
+    <div class="bar"><span class="seg s-idle" style="width:42.09%" title="idle 0.421 (42.1%)"></span><span class="seg s-settle" style="width:24.35%" title="settle 0.243 (24.3%)"></span><span class="seg s-nod" style="width:16.45%" title="nod 0.165 (16.5%)"></span><span class="seg s-flicker" style="width:5.54%" title="flicker 0.055 (5.5%)"></span><span class="seg s-shake" style="width:4.30%" title="shake 0.043 (4.3%)"></span><span class="seg s-perk_up" style="width:3.32%" title="perk_up 0.033 (3.3%)"></span><span class="seg s-lean_in" style="width:2.57%" title="lean_in 0.026 (2.6%)"></span><span class="seg s-recoil" style="width:1.38%" title="recoil 0.014 (1.4%)"></span></div>
+    <div class="dist"><b class="d-idle">idle</b> 42% · <b class="d-settle">settle</b> 24% · <b class="d-nod">nod</b> 16% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -324,7 +336,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.435 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>34.122s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:83.1%" title="nod 0.831"></span><span class="seg" style="width:6.4%" title="idle 0.064"></span><span class="seg" style="width:4.1%" title="perk_up 0.041"></span><span class="seg" style="width:3.7%" title="lean_in 0.037"></span><span class="seg" style="width:1.0%" title="settle 0.010"></span><span class="seg" style="width:0.9%" title="flicker 0.009"></span><span class="seg" style="width:0.4%" title="recoil 0.004"></span><span class="seg" style="width:0.4%" title="shake 0.004"></span></div>
+    <div class="bar"><span class="seg s-nod" style="width:83.14%" title="nod 0.831 (83.1%)"></span><span class="seg s-idle" style="width:6.38%" title="idle 0.064 (6.4%)"></span><span class="seg s-perk_up" style="width:4.09%" title="perk_up 0.041 (4.1%)"></span><span class="seg s-lean_in" style="width:3.67%" title="lean_in 0.037 (3.7%)"></span><span class="seg s-settle" style="width:0.98%" title="settle 0.010 (1.0%)"></span><span class="seg s-flicker" style="width:0.90%" title="flicker 0.009 (0.9%)"></span><span class="seg s-recoil" style="width:0.44%" title="recoil 0.004 (0.4%)"></span><span class="seg s-shake" style="width:0.40%" title="shake 0.004 (0.4%)"></span></div>
+    <div class="dist"><b class="d-nod">nod</b> 83% · <b class="d-idle">idle</b> 6% · <b class="d-perk_up">perk_up</b> 4% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div>
   <div class="card">
@@ -345,7 +358,8 @@ dd { margin: 0; font-variant-numeric: tabular-nums; }
       <dt>emit</dt><dd>0.493 <span class="fx">→ glow</span></dd>
       <dt>latency</dt><dd>34.672s</dd>
     </dl>
-    <div class="bar"><span class="seg" style="width:29.6%" title="settle 0.296"></span><span class="seg" style="width:20.5%" title="shake 0.205"></span><span class="seg" style="width:19.5%" title="recoil 0.195"></span><span class="seg" style="width:9.2%" title="idle 0.092"></span><span class="seg" style="width:9.0%" title="nod 0.090"></span><span class="seg" style="width:6.7%" title="flicker 0.067"></span><span class="seg" style="width:3.9%" title="perk_up 0.039"></span><span class="seg" style="width:1.6%" title="lean_in 0.016"></span></div>
+    <div class="bar"><span class="seg s-settle" style="width:29.58%" title="settle 0.296 (29.6%)"></span><span class="seg s-shake" style="width:20.53%" title="shake 0.205 (20.5%)"></span><span class="seg s-recoil" style="width:19.51%" title="recoil 0.195 (19.5%)"></span><span class="seg s-idle" style="width:9.21%" title="idle 0.092 (9.2%)"></span><span class="seg s-nod" style="width:9.00%" title="nod 0.090 (9.0%)"></span><span class="seg s-flicker" style="width:6.70%" title="flicker 0.067 (6.7%)"></span><span class="seg s-perk_up" style="width:3.89%" title="perk_up 0.039 (3.9%)"></span><span class="seg s-lean_in" style="width:1.58%" title="lean_in 0.016 (1.6%)"></span></div>
+    <div class="dist"><b class="d-settle">settle</b> 30% · <b class="d-shake">shake</b> 21% · <b class="d-recoil">recoil</b> 20% <span class="rest">他 5</span></div>
     <div class="legend"><span><i class="swatch s-idle"></i>idle</span> <span><i class="swatch s-perk_up"></i>perk_up</span> <span><i class="swatch s-nod"></i>nod</span> <span><i class="swatch s-shake"></i>shake</span> <span><i class="swatch s-lean_in"></i>lean_in</span> <span><i class="swatch s-recoil"></i>recoil</span> <span><i class="swatch s-settle"></i>settle</span> <span><i class="swatch s-flicker"></i>flicker</span></div>
   </div></div>
 <script>
