@@ -179,14 +179,32 @@ USB をつなぐと恵まれ側(ストレス 0)に戻るので、**充電器を�
 - 最大ストレスの効き方は**実測した**: エネルギーが尽きるまでが 150秒 → 75秒
   (`vitality::tests::maximum_stress_halves_the_time_before_the_energy_is_gone`)
 - ファームウェアは `cargo check --release` と **`cargo build --release` の両方が通った**
-  (xtensa ターゲット)。成果物は 5,003,260 バイトの ELF。リンカの警告は
+  (xtensa ターゲット)。成果物は 5,031,272 バイトの ELF。リンカの警告は
   `LOAD segment with RWX permissions`(esp-hal で前から出るもの)だけ
+- **実機(CoreS3、`/dev/ttyACM0`)に書き込んで動かした。** 実際に出たログ:
+
+  ```
+  vmc-pet-cores3: battery 100% -> environmental stress 0.00     ← 起動直後の1回
+  vmc-pet-cores3: step=   15 15 steps in 1378ms (body 359ms) mass=71.37 energy=0.00 ... stress=0.00
+  ...
+  vmc-pet-cores3: battery 100% -> environmental stress 0.00     ← 30秒後の周期読み
+  ```
+
+  USB 給電なので `plugged_in` が真 → 0.00。**周期読み(30秒)が実際に回っていること**、
+  **写した値がそのまま体へ渡っていること**、体が動き続けていることが確認できた。
+  このとき `energy=0.00` なのは、**28日前の保存記録を復元した**ため
+  (`restore` は離席時間ぶんエネルギーを減らす。44バイトの記録が 11個ぶん残っていた)。
+  `pet` パーティション(0xf10000, 4KB)は `espflash read-flash` で
+  `~/.local/share/vmc-pet/pet-backup-2026-10-10.bin` に退避してある
 
 **限界**
-- **実機での動作確認はしていない(書き込みをしていない)。** このマシンには CoreS3 が
-  USB で接続されていて(`/dev/ttyACM0`、`303a:1001` Espressif USB JTAG/serial)、
-  `espflash` もあるので**書き込める状態**ではある。ただし書き込みはペットの記憶
-  (`pet` パーティション)を巻き込む操作なので、行うかどうかは別に決める
+- **非ゼロのストレスを実機で見てはいない。** USB 給電だと必ず 0.00 になり、電池駆動に
+  すると同じ USB 経由のシリアルも切れるので、この1台では観測できない。また今の体は
+  `energy=0.00` なので、効き(減衰が2倍)を見るには誰かが画面に触れて回復させる必要がある。
+  写像の非ゼロ側と効きは**ホストのテストで実測済み**(0.5 / 1.0 の値と 150秒 → 75秒)
+- **焼くバイナリが古いと気づかずに一度焼いた。** `cargo build` の後にソースを触ったため、
+  1回目の書き込みは `stress=` を出さない古いものだった。`strings <elf> | grep stress=` と
+  ソース/バイナリの mtime 比較で気づいて焼き直した(同じ罠を踏まないよう記録しておく)
 - **ツールチェーンの PATH**(このマシンには `espup` の `export-esp.sh` が無い)。
   `~/.rustup/toolchains/esp/bin` と、GCC の実体がある
   `~/.rustup/toolchains/esp/xtensa-esp-elf/esp-15.2.0_20250920/xtensa-esp-elf/bin` を
