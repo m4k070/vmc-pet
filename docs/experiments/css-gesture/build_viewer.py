@@ -118,9 +118,10 @@ def main() -> None:
         energy = row.get("energy") or 0.0
         approach = row.get("approach") or 0.0
         emit = row.get("emit") or 0.0
-        report.append(f"  {row['key']:12} top={top:9} mean=ampx{mean_r['amp_x']:.2f} "
-                      f"ampy{mean_r['amp_y']:.2f} rise{mean_r['rise']:+.2f} size{mean_r['size']:.2f} "
-                      f"freq{mean_r['freq']:.2f} flick{mean_r['flick']:.2f}")
+        report.append(f"  {row['key']:12} top={top:9} ampx{mean_r['amp_x']:.2f} "
+                      f"ampy{mean_r['amp_y']:.2f} lift{mean_r['lift']:.2f} sink{mean_r['sink']:.2f} "
+                      f"size{mean_r['size']:.2f} freq{mean_r['freq']:.2f} flick{mean_r['flick']:.2f} "
+                      f"| 葛藤{2*min(mean_r['lift'], mean_r['sink']):.3f} 正味{mean_r['sink']-mean_r['lift']:+.3f}")
 
         # Laya を並べる（同じ姿勢空間で描く）
         other_html = ""
@@ -228,8 +229,11 @@ dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
 <body>
 <h1>css-gesture spike — 姿勢パラメータ空間（混合は補間、描画は1体）</h1>
 <p class="sub">
-語彙を <code>poses.json</code> の<code>&lbrace;amp_x, amp_y, rise, size, freq, flick&rbrace;</code> の点として定義し直した。
+語彙を <code>poses.json</code> の<code>&lbrace;amp_x, amp_y, lift, sink, size, freq, flick&rbrace;</code> の点として定義し直した。
 混合は<strong>重み付き平均（補間）</strong>で1つの姿勢ベクトルにし、描画は常に1体。<br>
+<code>lift</code> / <code>sink</code> は上下の向きを分けた非負のチャネル。静的な偏りは <code>(sink - lift)</code> が担い、
+符号付き平均が捨てていた <code>2*min(lift, sink)</code> を<strong>縦の揺れとして戻す</strong>ので、
+「沈む + 浮く」が中立ではなく<strong>葛藤（揺れ）</strong>として描かれる（各カードの「葛藤」の値）。<br>
 前版の「確率で重ねる」方式は<strong>半透明の図形がずれた雲</strong>になり、動きの混合にならなかった（人の判定）。
 <strong>表示</strong>を切り替えると、一番確率の高い姿勢（argmax）と、補間した姿勢（mean）を同じ枠で比べられる。<br>
 モデル <b>{data['model']}</b> / 比較 <b>{cmp_data['model'] if cmp_data else '-'}</b>。
@@ -253,15 +257,23 @@ dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
 const PX = {P['px_per_unit']};
 const IDLE = {json.dumps(gestures['idle'])};
 
-/* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。 */
+/* 姿勢ベクトル + score/noul → CSS 変数。写像はここ1箇所だけに置く。
+ *
+ * lift / sink の扱い（poses.json の _recovery_rule）:
+ *   静的な上下オフセット = (sink - lift)          … 姿勢としての沈み／浮き
+ *   縦の振れ幅に + 2*min(lift, sink)              … 符号付き平均が捨てていた量をそのまま戻す
+ *   （lift + sink - |sink - lift| = 2*min(lift, sink)）
+ * 片方だけ非ゼロの単一ジェスチャーでは min=0 なので振れは増えない。
+ * 混合のときだけ「葛藤が揺れとして見える」。 */
 function varsFor(pose, energy, approach, emit) {{
   const ampS  = 0.70 + 0.15 * energy;     // energy 0->4 で 0.70 -> 1.30
   const freqM = 1.00 + 0.18 * energy;     // 1.00 -> 1.72
   const sizeM = 0.94 + 0.035 * approach;  // 0.94 -> 1.08
+  const conflict = 2 * Math.min(pose.lift, pose.sink);
   return {{
     '--p-ampx':  (pose.amp_x * PX * ampS).toFixed(2),
-    '--p-ampy':  (pose.amp_y * PX * ampS).toFixed(2),
-    '--p-rise':  (pose.rise * PX).toFixed(2),
+    '--p-ampy':  ((pose.amp_y + conflict) * PX * ampS).toFixed(2),
+    '--p-rise':  ((pose.sink - pose.lift) * PX).toFixed(2),
     '--p-size':  (pose.size * sizeM).toFixed(3),
     '--p-freq':  (pose.freq * freqM).toFixed(3),
     '--p-flick': (pose.flick).toFixed(3),
@@ -272,9 +284,14 @@ function varsFor(pose, energy, approach, emit) {{
 
 function poseText(pose) {{
   const f = (v, n) => v.toFixed(n);
+  const conflict = 2 * Math.min(pose.lift, pose.sink);
+  const net = pose.sink - pose.lift;
   return 'ampx ' + f(pose.amp_x, 2) + ' · ampy ' + f(pose.amp_y, 2)
-       + ' · rise ' + f(pose.rise, 2) + ' · size ' + f(pose.size, 2)
-       + ' · freq ' + f(pose.freq, 2) + ' · flick ' + f(pose.flick, 2);
+       + ' · lift ' + f(pose.lift, 2) + ' · sink ' + f(pose.sink, 2)
+       + ' · size ' + f(pose.size, 2) + ' · freq ' + f(pose.freq, 2)
+       + ' · flick ' + f(pose.flick, 2)
+       + '  →  正味 ' + (net >= 0 ? '沈 ' : '浮 ') + f(Math.abs(net), 2)
+       + (conflict > 0.02 ? ' / 葛藤 ' + f(conflict, 2) : '');
 }}
 
 function apply(theta, mode) {{
