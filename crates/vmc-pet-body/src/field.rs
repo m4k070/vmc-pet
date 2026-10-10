@@ -156,6 +156,40 @@ impl FieldView<'_> {
             crate::math::rem_euclidf(crate::math::atan2f(y_sin, y_cos), TAU) / TAU * height,
         ))
     }
+
+    /// 体のまとまり(0.0..=1.0)。総量のうち、重心から `radius` セル以内にある割合。
+    ///
+    /// 姿勢層(`crate::gesture`)の入力の1つ。エネルギーが「勢い」なのに対し、
+    /// こちらは「形の乱れ」を見る。粒子の体がはぐれる、Lenia の塊が崩れる、
+    /// どちらでも同じ意味で使えるよう、体ごとの内部値ではなく場そのものから測る
+    /// (粒子の体は内部に `cohesion` を持つが、Lenia に対応する量が無い)。
+    ///
+    /// 場が空なら 0.0(まとまりようがない)。トーラスなので距離は継ぎ目をまたいで測る。
+    pub fn cohesion(&self, radius: f32) -> f32 {
+        let Some((centre_x, centre_y)) = self.toroidal_centroid() else {
+            return 0.0;
+        };
+        let (width, height) = (self.width as f32, self.height as f32);
+        let (mut inside, mut total) = (0.0f32, 0.0f32);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let value = self.get(x, y);
+                if value <= 0.0 {
+                    continue;
+                }
+                total += value;
+                let dx = toroidal_signed_offset(x as f32 + 0.5 - centre_x, width);
+                let dy = toroidal_signed_offset(y as f32 + 0.5 - centre_y, height);
+                if crate::math::sqrtf(dx * dx + dy * dy) <= radius {
+                    inside += value;
+                }
+            }
+        }
+        if total <= NEGLIGIBLE_MASS {
+            return 0.0;
+        }
+        (inside / total).clamp(0.0, 1.0)
+    }
 }
 
 /// トーラス上の符号付き最短オフセット。`size/2` を超えたら反対側から測り直す。
@@ -175,7 +209,8 @@ mod tests {
     use super::*;
 
     /// 指定した位置から `extent` 四方だけを 1.0 にした場を作る。トーラス上で折り返す。
-    fn field_with_block(size: usize, left: usize, top: usize, extent: usize) -> Field {
+    /// `injection_tests`(まとまりの検証)からも使うので `pub(super)`。
+    pub(super) fn field_with_block(size: usize, left: usize, top: usize, extent: usize) -> Field {
         let mut field = Field::new(size, size);
         field.map(|x, y, _value| {
             let inside_x = (x + size - left) % size < extent;
@@ -355,5 +390,52 @@ mod injection_tests {
 
         // Assert
         assert!((field.view().get(8, 8) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cohesion_is_one_for_a_block_smaller_than_the_radius() {
+        // Arrange: 4x4 の塊(対角が 5.7 セル)
+        let field = super::tests::field_with_block(32, 10, 10, 4);
+
+        // Act / Assert: 半径 6 なら塊がまるごと入る
+        let cohesion = field.view().cohesion(6.0);
+        assert!(cohesion > 0.99, "got {cohesion}");
+    }
+
+    #[test]
+    fn cohesion_falls_when_the_same_mass_is_spread_out() {
+        // Arrange: 同じ中心に、4x4 の塊と 16x16 の塊を置く
+        let tight = super::tests::field_with_block(32, 14, 14, 4);
+        let spread = super::tests::field_with_block(32, 8, 8, 16);
+
+        // Act
+        let tight_cohesion = tight.view().cohesion(6.0);
+        let spread_cohesion = spread.view().cohesion(6.0);
+
+        // Assert: 半径の外へ量が漏れるほど下がる
+        assert!(tight_cohesion > 0.99, "tight={tight_cohesion}");
+        assert!(
+            spread_cohesion < tight_cohesion * 0.7,
+            "tight={tight_cohesion} spread={spread_cohesion}"
+        );
+    }
+
+    #[test]
+    fn cohesion_measures_distance_across_the_seam() {
+        // Arrange: 継ぎ目をまたぐ塊。素朴な差では重心から遠く見える
+        let field = super::tests::field_with_block(32, 30, 30, 4);
+
+        // Act / Assert: 継ぎ目をまたいでも 1 つの塊として測る
+        let cohesion = field.view().cohesion(6.0);
+        assert!(cohesion > 0.99, "got {cohesion}");
+    }
+
+    #[test]
+    fn an_empty_field_has_no_cohesion() {
+        // Arrange
+        let field = Field::new(16, 16);
+
+        // Act / Assert
+        assert_eq!(field.view().cohesion(6.0), 0.0);
     }
 }

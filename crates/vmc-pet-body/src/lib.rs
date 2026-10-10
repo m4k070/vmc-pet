@@ -28,6 +28,7 @@ pub mod controller;
 pub mod field;
 #[cfg(feature = "std")]
 pub mod fitness;
+pub mod gesture;
 pub mod habituation;
 pub mod lenia;
 pub mod lenia_body;
@@ -51,6 +52,7 @@ pub use care_prediction::{CareMemory, CarePredictor, CarePredictorParams};
 pub use civil_time::{civil_from_unix_seconds, unix_seconds_from_civil, CivilDateTime};
 pub use controller::{AutonomousController, ControllerParams, Observation};
 pub use field::{Field, FieldView};
+pub use gesture::{Expression, Gesture, Pose, ResolvedPose, GESTURES};
 pub use habituation::Habituation;
 pub use lenia::{GrowthFunction, Lenia};
 pub use lenia_body::LeniaBody;
