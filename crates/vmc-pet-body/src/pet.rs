@@ -102,6 +102,15 @@ impl Body {
         }
     }
 
+    /// 体へ直接注入する。**注入の意味は体ごとに違う**(Lenia は突き + 世話、粒子は
+    /// 突きだけ)ので、ここでは決めずに各体の `BodyPort::inject` へ委譲する。
+    fn inject(&mut self, perturbation: Perturbation) {
+        match self {
+            Self::Lenia(body) => body.inject(perturbation),
+            Self::Particles(body) => body.inject(perturbation),
+        }
+    }
+
     fn disturb(&mut self, perturbation: Perturbation) {
         match self {
             Self::Lenia(body) => body.disturb(perturbation),
@@ -508,14 +517,13 @@ impl Pet {
 
 /// 通常の `click`/`hover_at` が通す安全域を経由せず、体へ直接摂動を注入したい
 /// 場面(体そのものの頑健性テストなど)のための、素の窓口。
+///
+/// **注入の意味は体ごとに違う。** `LeniaBody` の `inject` は突き + 世話
+/// (`receive_care`)、`ParticleBody` のは突きだけ。`Pet` はそれを決めず、
+/// 各体の `BodyPort::inject` に委譲する(判断は体のファイルにある)。
 impl BodyPort for Pet {
     fn inject(&mut self, perturbation: Perturbation) {
-        match &mut self.body {
-            Body::Lenia(body) => body.inject(perturbation),
-            // 粒子の体は崩壊しない。素の注入も、クリックと同じ「突き」になる。
-            // 世話(`receive_care`)は含めない。これは頑健性テストのための窓口なので
-            Body::Particles(body) => body.disturb(perturbation),
-        }
+        self.body.inject(perturbation);
     }
 
     fn observe(&self) -> FieldView<'_> {
@@ -795,6 +803,47 @@ mod tests {
         // Assert
         assert!(revived, "a collapsing body must be revived by step");
         assert!(pet.mass() > 40.0);
+    }
+
+    #[test]
+    fn the_raw_injection_window_keeps_each_bodys_meaning() {
+        // Arrange: 同じ「素の注入」を、崩壊する体と崩壊しない体の両方に通す。
+        // 意味は体ごとに違う(Lenia は世話を含む / 粒子は含まない)。
+        // `BodyPort` を体ごとに実装した後も、その差が保たれることを固定する。
+        // 満タンだと「世話で上がったか」が見えないので、6時間ぶん離席させて
+        // 元気を半分にしておく(OFFLINE_DEPLETION_SECONDS = 12時間で尽きる速さ)。
+        const SIX_HOURS: f32 = 6.0 * 60.0 * 60.0;
+        let perturbation = Perturbation {
+            at: CellPos { x: 2, y: 2 },
+            radius: 3.0,
+            amount: 0.1,
+        };
+        let mut lenia = orbium();
+        lenia.restore(lenia.memory(), SIX_HOURS);
+        let mut particles = Pet::with_particle_body(1091, 32, 32);
+        particles.restore(particles.memory(), SIX_HOURS);
+        let lenia_before = lenia.energy();
+        let particles_before = particles.energy();
+        assert!(
+            lenia_before < 0.6 && particles_before < 0.6,
+            "元気を先に減らしておく(lenia {lenia_before} / particles {particles_before})"
+        );
+
+        // Act
+        lenia.inject(perturbation);
+        particles.inject(perturbation);
+
+        // Assert
+        assert!(
+            lenia.energy() > lenia_before,
+            "Lenia の素の注入は世話を含む: {lenia_before} -> {}",
+            lenia.energy()
+        );
+        assert!(
+            (particles.energy() - particles_before).abs() < f32::EPSILON,
+            "粒子の素の注入は世話を含まない: {particles_before} -> {}",
+            particles.energy()
+        );
     }
 
     /// 自律コントローラ(体の形を見て自分から軽くならす)が常に動いている状態で、
